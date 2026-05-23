@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  scaffold:
+    name: Scaffold checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify expected scaffold files
+        run: |
+          test -f README.md
+          test -f .editorconfig
+          test -f .env.example
+          test -f .envrc
+          test -f .gitignore
+          test -f flake.nix
+          test -f flake.lock
+          test -f justfile
+          test -f scripts/dev/doctor.sh
+
+          test -d .vscode
+          test -f .vscode/extensions.json
+          test -f .vscode/launch.json
+          test -f .vscode/settings.json
+          test -f .vscode/tasks.json
+
+          test -d docs/adr
+          test -f docs/adr/README.md
+
+      - name: Verify generated/local directories are ignored
+        run: |
+          grep -q '^\.direnv/' .gitignore
+          grep -q '^\.local/' .gitignore
+
+  nix:
+    name: Nix flake checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Check flake
+        run: nix flake check
+
+      - name: Enter development shell and verify core tools
+        run: |
+          nix develop --command bash -lc '
+            command -v just
+            command -v racket
+            command -v raco
+            command -v rustc
+            command -v cargo
+            command -v sqlite3
+            command -v supabase
+            command -v tofu
+            echo "GROCERY_POS_DEV=$GROCERY_POS_DEV"
+            test "$GROCERY_POS_DEV" = "1"
+          '
