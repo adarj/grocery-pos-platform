@@ -55,4 +55,3 @@ Cloud Platform
       ├── update artifact distribution
       ├── support bundle storage
       └── auxiliary platform services
-
