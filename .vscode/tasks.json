@@ -1,0 +1,79 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "doctor",
+      "type": "shell",
+      "command": "just doctor",
+      "problemMatcher": []
+    },
+    {
+      "label": "check",
+      "type": "shell",
+      "command": "just check",
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "test",
+      "type": "shell",
+      "command": "just test",
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "test:racket",
+      "type": "shell",
+      "command": "just test-racket",
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "test:rust",
+      "type": "shell",
+      "command": "just test-rust",
+      "group": "test",
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "test:flutter",
+      "type": "shell",
+      "command": "just test-flutter",
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "run:racket",
+      "type": "shell",
+      "command": "just run-racket",
+      "problemMatcher": [],
+      "isBackground": true
+    },
+    {
+      "label": "run:pos",
+      "type": "shell",
+      "command": "just run-pos",
+      "problemMatcher": []
+    },
+    {
+      "label": "supabase:start",
+      "type": "shell",
+      "command": "just supabase-start",
+      "problemMatcher": []
+    },
+    {
+      "label": "supabase:stop",
+      "type": "shell",
+      "command": "just supabase-stop",
+      "problemMatcher": []
+    },
+    {
+      "label": "format",
+      "type": "shell",
+      "command": "just fmt",
+      "problemMatcher": []
+    }
+  ]
+}

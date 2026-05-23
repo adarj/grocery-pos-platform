@@ -1,0 +1,17 @@
+{
+  "recommendations": [
+    "editorconfig.editorconfig",
+    "rust-lang.rust-analyzer",
+    "tamasfe.even-better-toml",
+    "dart-code.dart-code",
+    "dart-code.flutter",
+    "jnoortheen.nix-ide",
+    "redhat.vscode-yaml",
+    "ms-azuretools.vscode-docker",
+    "davidanson.vscode-markdownlint"
+  ],
+  "unwantedRecommendations": [
+    "ms-vscode.cpptools",
+    "ms-vscode-remote.remote-containers"
+  ]
+}

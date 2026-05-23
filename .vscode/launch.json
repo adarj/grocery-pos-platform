@@ -1,0 +1,19 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Flutter POS Terminal",
+      "type": "dart",
+      "request": "launch",
+      "cwd": "${workspaceFolder}/flutter/apps/pos_terminal",
+      "program": "lib/main.dart"
+    },
+    {
+      "name": "Flutter Manager App",
+      "type": "dart",
+      "request": "launch",
+      "cwd": "${workspaceFolder}/flutter/apps/manager",
+      "program": "lib/main.dart"
+    }
+  ]
+}

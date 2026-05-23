@@ -1,0 +1,40 @@
+# Local env/secrets
+.env
+.env.*
+!.env.example
+
+# Local project state
+.local/
+.direnv/
+result
+result-*
+
+# Rust
+target/
+
+# Flutter/Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+build/
+coverage/
+
+# Node/Supabase/functions tooling
+node_modules/
+
+# OpenTofu/Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.example.tfvars
+
+# Logs
+*.log
+logs/
+
+# OS/editor noise
+.DS_Store
+
+# direnv / local Nix activation state
+.direnv/
