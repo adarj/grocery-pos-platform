@@ -19,4 +19,5 @@
  #:quit? #f
  #:listen-ip host
  #:port port
- #:servlet-path "/")
+ #:servlet-path "/"
+ #:servlet-regexp #rx"")
