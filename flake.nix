@@ -83,6 +83,16 @@
             # JS/TS tooling for Supabase functions, docs tooling, helper scripts, etc.
             nodejs_22
             pnpm
+
+            # Flutter / Dart UI
+            flutter
+            clang
+            cmake
+            ninja
+            gtk3
+            glib
+            libepoxy
+            pcre2
           ];
 
           shellHook = ''
