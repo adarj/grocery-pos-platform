@@ -90,6 +90,12 @@ check_cmd yq
 check_cmd sqlite3
 echo
 
+echo "Flutter"
+echo "------"
+check_cmd flutter
+check_cmd dart
+echo
+
 echo "Racket"
 echo "------"
 check_cmd racket
@@ -111,21 +117,6 @@ check_cmd supabase
 check_cmd tofu
 check_cmd tflint
 check_cmd terraform-docs
-echo
-
-echo "Optional / later"
-echo "----------------"
-if command -v flutter >/dev/null 2>&1; then
-  printf '[ok]      %-18s %s\n' "flutter" "$(command -v flutter)"
-else
-  warn "flutter not found; acceptable until Flutter app work begins"
-fi
-
-if command -v dart >/dev/null 2>&1; then
-  printf '[ok]      %-18s %s\n' "dart" "$(command -v dart)"
-else
-  warn "dart not found; acceptable until Flutter app work begins"
-fi
 echo
 
 echo "Repository scaffold"
