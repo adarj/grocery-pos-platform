@@ -2,34 +2,27 @@
 
 A local-first retail point-of-sale platform for small-to-medium grocery stores.
 
-This project is an early-stage implementation of a grocery POS system consisting of:
+The project is an early-stage implementation of a grocery POS system designed around reliable local checkout, explicit transaction state, test-driven development, hardware interoperability, and a cloud control plane that coordinates without becoming a hard dependency for ordinary register operation.
 
-- a cashier-facing touchscreen terminal,
-- a customer-facing portrait display,
-- a local POS backend,
-- a local durable transaction store,
-- optional hardware/device agents,
-- a manager/technician application layer,
-- and a cloud control plane for management, reporting, updates, support, and synchronization.
-
-The project is currently in the scaffolding and walking-skeleton phase. It is not yet a production-ready POS system.
+The project is currently in the **walking-skeleton / early domain-development phase**. It is not production-ready.
 
 ## Project Goals
 
-The platform is designed around the following goals:
+The platform is being designed to provide:
 
-- fast and reliable grocery checkout;
-- local-first operation during internet or cloud outages;
-- durable transaction, payment, receipt, and drawer state;
-- support for cashier touchscreen and customer-facing display workflows;
-- interoperability with existing grocery inventory systems;
-- clean manager, technician, and support workflows;
-- strong test-driven development practices;
-- reproducible development and deployment tooling;
-- infrastructure-as-code and GitOps-based change management;
-- future support for remote management, support bundles, and controlled update channels.
+* fast and reliable grocery checkout;
+* local-first operation during internet or cloud outages;
+* durable transaction, payment, receipt, and drawer state;
+* cashier-facing touchscreen and customer-facing display workflows;
+* interoperability with existing grocery inventory systems;
+* clean manager, technician, and support workflows;
+* test-driven development and explicit domain invariants;
+* reproducible development and deployment tooling;
+* infrastructure-as-code and GitOps-based change management;
+* controlled software updates and support tooling;
+* strong security boundaries around payments, authorization, remote operations, and sensitive data.
 
-## Planned Architecture
+## Architecture
 
 ```text
 Fedora Kinoite POS Terminal
@@ -38,12 +31,12 @@ Fedora Kinoite POS Terminal
   ├── Racket POS Core
   ├── SQLite Local Store
   ├── Rust System/Device Agents
-  ├── Supabase Sync Agent
+  ├── Supabase Sync/Control-Plane Integration
   └── KDE/Kinoite Appliance Layer
 
 Cloud Platform
   ├── Supabase
-  │   ├── Postgres
+  │   ├── PostgreSQL
   │   ├── Auth
   │   ├── RLS policies
   │   ├── register health snapshots
@@ -55,3 +48,287 @@ Cloud Platform
       ├── update artifact distribution
       ├── support bundle storage
       └── auxiliary platform services
+```
+
+### Responsibility Boundaries
+
+| Component            | Primary responsibility                                            |
+| -------------------- | ----------------------------------------------------------------- |
+| Flutter              | Human-facing applications and presentation                        |
+| Racket               | POS domain semantics, transaction state, rules, and orchestration |
+| SQLite               | Durable local register state and recovery data                    |
+| Rust                 | Hardware, protocol, system, update, and support edges             |
+| Supabase             | Primary cloud database and control plane                          |
+| DigitalOcean         | Auxiliary cloud services and artifact infrastructure              |
+| Fedora Kinoite / KDE | Atomic POS appliance substrate                                    |
+
+The central design rule is:
+
+```text
+Flutter presents.
+Racket decides.
+SQLite remembers.
+Rust talks to edges.
+The cloud coordinates.
+```
+
+## Core Principles
+
+### Local-First Checkout
+
+Normal checkout must not require Supabase, DigitalOcean, or another cloud service to be reachable.
+
+Cloud outages may reduce synchronization, reporting, management, or support capabilities, but should not prevent local checkout when the required local hardware and payment path remain available.
+
+### Racket Owns POS Meaning
+
+Flutter clients may request actions and render the resulting state, but they are not authoritative for:
+
+* transaction totals;
+* tax calculations;
+* promotion eligibility;
+* payment completion;
+* refunds;
+* manager authorization;
+* receipt truth;
+* transaction-state transitions.
+
+Those decisions belong to the local Racket POS Core.
+
+### Durable Explicit State
+
+Transaction, tender, payment, receipt, drawer, synchronization, and recovery state should be represented explicitly rather than inferred from UI state.
+
+SQLite will become the normal durable local store once the initial in-memory transaction model is established.
+
+### Specialized Rust Edges
+
+Rust is intended for components where low-level system integration, protocol handling, concurrency, hardware access, or robust native binaries provide clear value.
+
+Rust agents must not independently become authorities over transaction truth.
+
+## Current Implementation Status
+
+The initial development environment and walking skeleton are operational.
+
+Verified capabilities currently include:
+
+* Fedora Kinoite development VM on Apple Silicon through VMware Fusion;
+* VSCodium as the primary editor;
+* a Fedora-based `dev` Distrobox development environment;
+* Nix flakes with `direnv` / `nix-direnv`;
+* `just` as the canonical development command interface;
+* Racket POS Core process;
+* `GET /health` local API endpoint;
+* RackUnit backend tests;
+* Flutter Linux ARM64 POS terminal;
+* Flutter widget tests;
+* Flutter-to-Racket local health connection;
+* nixGL-based Flutter GUI launch in the current VM environment;
+* GitHub Actions continuous integration;
+* Architecture Decision Records under `docs/adr/`.
+
+## Development Environment
+
+The current primary environment is:
+
+```text
+Apple Silicon host
+  ↓
+VMware Fusion
+  ↓
+Fedora Kinoite aarch64 VM
+  ↓
+VSCodium Flatpak
+  ↓
+Distrobox: dev
+  ↓
+Nix flake development environment
+```
+
+Enter the project normally through the configured VSCodium terminal or:
+
+```bash
+cd ~/Projects/grocery-pos-platform
+direnv allow
+```
+
+Run the environment preflight check with:
+
+```bash
+just doctor
+```
+
+## Running the Walking Skeleton
+
+Use two terminals.
+
+### Terminal 1 — POS Core
+
+Start the Racket backend:
+
+```bash
+just run-racket
+```
+
+The development server listens on:
+
+```text
+http://127.0.0.1:7340
+```
+
+The current health endpoint is:
+
+```text
+GET http://127.0.0.1:7340/health
+```
+
+It can also be tested manually:
+
+```bash
+curl http://127.0.0.1:7340/health
+```
+
+A healthy development response currently resembles:
+
+```json
+{
+  "environment": "dev",
+  "ok": true,
+  "service": "grocery-pos-core",
+  "version": "0.0.0-dev"
+}
+```
+
+### Terminal 2 — Flutter POS Terminal
+
+In the current Fedora Kinoite / VMware / Distrobox / Nix environment:
+
+```bash
+just run-pos
+```
+
+This launches Flutter through nixGL to provide the graphics-driver bridge required by the development VM.
+
+On systems that do not require that workaround:
+
+```bash
+just run-pos-plain
+```
+
+When the backend is healthy, the Flutter application should report:
+
+```text
+POS Core Connected
+```
+
+If the backend becomes unavailable and the client retries, it should report:
+
+```text
+POS Core Unavailable
+```
+
+## Testing
+
+Run backend tests:
+
+```bash
+just test-racket
+```
+
+Run Flutter tests:
+
+```bash
+just test-flutter
+```
+
+Run the combined project test suite:
+
+```bash
+just test
+```
+
+The canonical development command surface is the repository `justfile`; prefer adding reusable commands there rather than relying on undocumented shell invocations.
+
+## Repository Layout
+
+```text
+.
+├── docs/
+│   ├── adr/
+│   ├── architecture/
+│   └── development/
+├── flutter/
+│   └── apps/
+│       └── pos_terminal/
+├── pos-backend-racket/
+├── scripts/
+│   └── dev/
+├── .github/
+│   └── workflows/
+├── flake.nix
+├── flake.lock
+├── justfile
+└── README.md
+```
+
+Some directories describe the intended project organization and will grow as their corresponding subsystems are implemented.
+
+## Documentation
+
+Architecture decisions are recorded under:
+
+```text
+docs/adr/
+```
+
+Development-environment notes are stored under:
+
+```text
+docs/development/
+```
+
+Architecture and interface contracts are stored under:
+
+```text
+docs/architecture/
+```
+
+Documentation should evolve in the same change as the behavior or architectural decision it describes.
+
+## Development Practices
+
+The project follows:
+
+* test-driven development where practical;
+* small, independently testable changes;
+* Conventional Commits;
+* signed Git commits;
+* architecture decision records for consequential choices;
+* reproducible development environments;
+* explicit security and recovery invariants;
+* Git-based review and CI before changes become production candidates.
+
+Generated local state, credentials, secrets, databases, support bundles, and other environment-specific data must not be committed.
+
+## Next Milestone
+
+The next major implementation milestone is the **in-memory Racket transaction core**.
+
+Its first vertical slice will establish:
+
+1. a money/value representation;
+2. a small fake catalog;
+3. transaction creation;
+4. item scanning;
+5. subtotal calculation;
+6. cash tender;
+7. change calculation;
+8. transaction completion;
+9. rejection of invalid state transitions.
+
+This domain model will be established under tests before SQLite persistence, production payment integration, promotions, hardware agents, or cloud synchronization are layered on.
+
+## Status
+
+This repository is under active development and is **not suitable for production retail use**.
