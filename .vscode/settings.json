@@ -1,11 +1,13 @@
 {
   "editor.formatOnSave": true,
-  "editor.rulers": [80, 100],
+  "editor.rulers": [
+    80,
+    100
+  ],
   "editor.tabSize": 2,
   "editor.insertSpaces": true,
   "files.trimTrailingWhitespace": true,
   "files.insertFinalNewline": true,
-
   "files.exclude": {
     "**/.direnv": true,
     "**/.local": true,
@@ -15,7 +17,6 @@
     "**/.dart_tool": true,
     "**/.terraform": true
   },
-
   "search.exclude": {
     "**/.direnv": true,
     "**/.local": true,
@@ -25,18 +26,20 @@
     "**/.terraform": true,
     "**/node_modules": true
   },
-
   "terminal.integrated.cwd": "${workspaceFolder}",
-
   "editor.codeActionsOnSave": {
     "source.fixAll": "explicit",
     "source.organizeImports": "explicit"
   },
-
   "rust-analyzer.cargo.features": "all",
   "rust-analyzer.check.command": "clippy",
-
   "dart.lineLength": 100,
-
-  "nix.enableLanguageServer": true
+  "nix.enableLanguageServer": true,
+  "magicRacket.languageServer.command": "/var/home/user/.local/bin/gpos-racket",
+  "magicRacket.languageServer.arguments": [
+    "--lib",
+    "racket-langserver"
+  ],
+  "magicRacket.general.racketPath": "/var/home/user/.local/bin/gpos-racket",
+  "magicRacket.general.racoPath": "/var/home/user/.local/bin/gpos-raco"
 }
