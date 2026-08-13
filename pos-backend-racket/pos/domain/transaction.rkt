@@ -27,7 +27,13 @@
          tender-accepted-transaction
          tender-rejected?
          tender-rejected-code
-         tender-rejected-transaction)
+         tender-rejected-transaction
+         complete-transaction
+         completion-accepted?
+         completion-accepted-transaction
+         completion-rejected?
+         completion-rejected-code
+         completion-rejected-transaction)
 
 (struct transaction (id status line-items cash-tender)
   #:transparent)
@@ -48,6 +54,12 @@
   #:transparent)
 
 (struct tender-rejected (code transaction)
+  #:transparent)
+
+(struct completion-accepted (transaction)
+  #:transparent)
+
+(struct completion-rejected (code transaction)
   #:transparent)
 
 (define (make-transaction id)
@@ -126,6 +138,8 @@
   (cond
     [(not (eq? (transaction-status current-transaction) 'open))
      (tender-rejected 'invalid-transaction-state current-transaction)]
+    [(empty? (transaction-line-items current-transaction))
+     (tender-rejected 'empty-transaction current-transaction)]
     [(< (money-minor-units amount)
         (money-minor-units (transaction-total current-transaction)))
      ;; v0 deliberately rejects partial cash rather than recording partial state.
@@ -138,13 +152,19 @@
        (transaction-line-items current-transaction)
        (cash-tender amount)))]))
 
-(module+ test-support
-  (provide make-transaction-with-status-for-test
-           transaction-with-status-for-test)
+(define (complete-transaction current-transaction)
+  (unless (transaction? current-transaction)
+    (raise-argument-error
+     'complete-transaction
+     "transaction?"
+     current-transaction))
 
-  (define (make-transaction-with-status-for-test id status)
-    (transaction id status '() #f))
-
-  (define (transaction-with-status-for-test current-transaction status)
-    (struct-copy transaction current-transaction
-                 [status status])))
+  (cond
+    [(not (eq? (transaction-status current-transaction) 'paid))
+     (completion-rejected
+      'invalid-transaction-state
+      current-transaction)]
+    [else
+     (completion-accepted
+      (struct-copy transaction current-transaction
+                   [status 'completed]))]))

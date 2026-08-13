@@ -3,8 +3,19 @@
 (require rackunit
          "../pos/domain/fake-catalog.rkt"
          "../pos/domain/money.rkt"
-         "../pos/domain/transaction.rkt"
-         (submod "../pos/domain/transaction.rkt" test-support))
+         "../pos/domain/transaction.rkt")
+
+(define (completed-sale id)
+  (define scanned
+    (scan-accepted-transaction
+     (scan-barcode (make-transaction id)
+                   "049000001234"
+                   fake-catalog-lookup)))
+  (define paid
+    (tender-accepted-transaction
+     (tender-cash scanned (money 199))))
+  (completion-accepted-transaction
+   (complete-transaction paid)))
 
 (module+ test
   (test-case "scanning a known barcode adds a sale-time line item"
@@ -46,13 +57,12 @@
     (check-equal? (transaction-subtotal original) (money 0)))
 
   (test-case "transaction state that does not accept items rejects scanning"
-    (define completed
-      (make-transaction-with-status-for-test "txn-004" 'completed))
+    (define completed (completed-sale "txn-004"))
     (define result
       (scan-barcode completed "049000001234" fake-catalog-lookup))
 
     (check-pred scan-rejected? result)
     (check-equal? (scan-rejected-code result) 'invalid-transaction-state)
     (check-eq? (scan-rejected-transaction result) completed)
-    (check-equal? (transaction-line-items completed) '())
-    (check-equal? (transaction-subtotal completed) (money 0))))
+    (check-equal? (length (transaction-line-items completed)) 1)
+    (check-equal? (transaction-subtotal completed) (money 199))))

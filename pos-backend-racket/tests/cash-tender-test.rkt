@@ -3,8 +3,7 @@
 (require rackunit
          "../pos/domain/fake-catalog.rkt"
          "../pos/domain/money.rkt"
-         "../pos/domain/transaction.rkt"
-         (submod "../pos/domain/transaction.rkt" test-support))
+         "../pos/domain/transaction.rkt")
 
 (define (open-sale id)
   (scan-accepted-transaction
@@ -56,6 +55,16 @@
     (check-equal? (tender-rejected-code result) 'insufficient-tender)
     (check-eq? (tender-rejected-transaction result) original))
 
+  (test-case "an empty transaction cannot be tendered"
+    (define original (make-transaction "txn-cash-empty"))
+    (define result (tender-cash original (money 0)))
+
+    (check-pred tender-rejected? result)
+    (check-equal? (tender-rejected-code result) 'empty-transaction)
+    (check-eq? (tender-rejected-transaction result) original)
+    (check-equal? (transaction-status original) 'open)
+    (check-false (transaction-tendered-cash original)))
+
   (test-case "cash tender requires an active transaction value"
     (check-exn exn:fail:contract?
                (lambda () (tender-cash #f (money 500)))))
@@ -76,7 +85,9 @@
     (define paid
       (tender-accepted-transaction
        (tender-cash (open-sale "txn-cash-006") (money 500))))
-    (define completed (transaction-with-status-for-test paid 'completed))
+    (define completed
+      (completion-accepted-transaction
+       (complete-transaction paid)))
     (define result (tender-cash completed (money 500)))
 
     (check-pred tender-rejected? result)
