@@ -9,6 +9,9 @@
          transaction-status
          transaction-line-items
          transaction-subtotal
+         transaction-total
+         transaction-tendered-cash
+         transaction-change-due
          transaction-line-item?
          transaction-line-item-barcode
          transaction-line-item-description
@@ -18,12 +21,21 @@
          scan-accepted-transaction
          scan-rejected?
          scan-rejected-code
-         scan-rejected-transaction)
+         scan-rejected-transaction
+         tender-cash
+         tender-accepted?
+         tender-accepted-transaction
+         tender-rejected?
+         tender-rejected-code
+         tender-rejected-transaction)
 
-(struct transaction (id status line-items)
+(struct transaction (id status line-items cash-tender)
   #:transparent)
 
 (struct transaction-line-item (barcode description unit-price)
+  #:transparent)
+
+(struct cash-tender (amount)
   #:transparent)
 
 (struct scan-accepted (transaction)
@@ -32,8 +44,14 @@
 (struct scan-rejected (code transaction)
   #:transparent)
 
+(struct tender-accepted (transaction)
+  #:transparent)
+
+(struct tender-rejected (code transaction)
+  #:transparent)
+
 (define (make-transaction id)
-  (transaction id 'open '()))
+  (transaction id 'open '() #f))
 
 (define (transaction-subtotal current-transaction)
   (unless (transaction? current-transaction)
@@ -46,6 +64,30 @@
               (in-list (transaction-line-items current-transaction))])
      (money-minor-units
       (transaction-line-item-unit-price line-item)))))
+
+(define (transaction-total current-transaction)
+  (transaction-subtotal current-transaction))
+
+(define (transaction-tendered-cash current-transaction)
+  (unless (transaction? current-transaction)
+    (raise-argument-error
+     'transaction-tendered-cash
+     "transaction?"
+     current-transaction))
+  (define tender (transaction-cash-tender current-transaction))
+  (and tender (cash-tender-amount tender)))
+
+(define (transaction-change-due current-transaction)
+  (unless (transaction? current-transaction)
+    (raise-argument-error
+     'transaction-change-due
+     "transaction?"
+     current-transaction))
+  (define tendered-cash (transaction-tendered-cash current-transaction))
+  (and tendered-cash
+       (money
+        (- (money-minor-units tendered-cash)
+           (money-minor-units (transaction-total current-transaction))))))
 
 (define (scan-barcode current-transaction barcode catalog-lookup)
   (unless (transaction? current-transaction)
@@ -72,10 +114,37 @@
           (transaction-id current-transaction)
           (transaction-status current-transaction)
           (append (transaction-line-items current-transaction)
-                  (list line-item))))])]))
+                  (list line-item))
+          (transaction-cash-tender current-transaction)))])]))
+
+(define (tender-cash current-transaction amount)
+  (unless (transaction? current-transaction)
+    (raise-argument-error 'tender-cash "transaction?" current-transaction))
+  (unless (money? amount)
+    (raise-argument-error 'tender-cash "money?" amount))
+
+  (cond
+    [(not (eq? (transaction-status current-transaction) 'open))
+     (tender-rejected 'invalid-transaction-state current-transaction)]
+    [(< (money-minor-units amount)
+        (money-minor-units (transaction-total current-transaction)))
+     ;; v0 deliberately rejects partial cash rather than recording partial state.
+     (tender-rejected 'insufficient-tender current-transaction)]
+    [else
+     (tender-accepted
+      (transaction
+       (transaction-id current-transaction)
+       'paid
+       (transaction-line-items current-transaction)
+       (cash-tender amount)))]))
 
 (module+ test-support
-  (provide make-transaction-with-status-for-test)
+  (provide make-transaction-with-status-for-test
+           transaction-with-status-for-test)
 
   (define (make-transaction-with-status-for-test id status)
-    (transaction id status '())))
+    (transaction id status '() #f))
+
+  (define (transaction-with-status-for-test current-transaction status)
+    (struct-copy transaction current-transaction
+                 [status status])))
