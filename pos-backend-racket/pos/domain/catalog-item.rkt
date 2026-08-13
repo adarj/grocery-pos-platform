@@ -14,4 +14,6 @@
       (raise-argument-error type-name "string?" description))
     (unless (money? unit-price)
       (raise-argument-error type-name "money?" unit-price))
-    (values barcode description unit-price)))
+    (values (string->immutable-string barcode)
+            (string->immutable-string description)
+            unit-price)))

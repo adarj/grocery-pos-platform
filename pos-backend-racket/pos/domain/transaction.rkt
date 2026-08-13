@@ -39,7 +39,18 @@
   #:transparent)
 
 (struct transaction-line-item (barcode description unit-price)
-  #:transparent)
+  #:transparent
+  #:guard
+  (lambda (barcode description unit-price type-name)
+    (unless (string? barcode)
+      (raise-argument-error type-name "string?" barcode))
+    (unless (string? description)
+      (raise-argument-error type-name "string?" description))
+    (unless (money? unit-price)
+      (raise-argument-error type-name "money?" unit-price))
+    (values (string->immutable-string barcode)
+            (string->immutable-string description)
+            unit-price)))
 
 (struct cash-tender (amount)
   #:transparent)
@@ -63,7 +74,9 @@
   #:transparent)
 
 (define (make-transaction id)
-  (transaction id 'open '() #f))
+  (unless (string? id)
+    (raise-argument-error 'make-transaction "string?" id))
+  (transaction (string->immutable-string id) 'open '() #f))
 
 (define (transaction-subtotal current-transaction)
   (unless (transaction? current-transaction)

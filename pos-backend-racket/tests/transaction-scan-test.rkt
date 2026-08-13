@@ -1,6 +1,7 @@
 #lang racket
 
 (require rackunit
+         "../pos/domain/catalog-item.rkt"
          "../pos/domain/fake-catalog.rkt"
          "../pos/domain/money.rkt"
          "../pos/domain/transaction.rkt")
@@ -32,6 +33,28 @@
     (check-equal? (transaction-line-item-unit-price line-item) (money 199))
     (check-equal? (transaction-subtotal updated) (money 199))
     (check-equal? (transaction-line-items original) '()))
+
+  (test-case "scanned line owns immutable sale-time text"
+    (define source-barcode (string-copy "049000001234"))
+    (define source-description (string-copy "Test Apples"))
+    (define item
+      (catalog-item source-barcode source-description (money 199)))
+    (define result
+      (scan-barcode (make-transaction "txn-snapshot")
+                    source-barcode
+                    (lambda (_barcode) item)))
+    (define line-item
+      (first
+       (transaction-line-items
+        (scan-accepted-transaction result))))
+
+    (string-set! source-barcode 0 #\9)
+    (string-set! source-description 0 #\B)
+
+    (check-equal? (transaction-line-item-barcode line-item) "049000001234")
+    (check-equal? (transaction-line-item-description line-item) "Test Apples")
+    (check-true (immutable? (transaction-line-item-barcode line-item)))
+    (check-true (immutable? (transaction-line-item-description line-item))))
 
   (test-case "each additional known scan adds another line to the subtotal"
     (define original (make-transaction "txn-002"))
