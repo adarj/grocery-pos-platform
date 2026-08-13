@@ -16,12 +16,25 @@
 
 (module+ test
   (test-case "a paid cash sale completes with its exact monetary facts intact"
-    (define paid (paid-sale "txn-complete-001"))
+    (define expected-id "txn-complete-001")
+    (define created (make-transaction expected-id))
+    (define scanned
+      (scan-accepted-transaction
+       (scan-barcode created
+                     "049000001234"
+                     fake-catalog-lookup)))
+    (define paid
+      (tender-accepted-transaction
+       (tender-cash scanned (money 500))))
     (define result (complete-transaction paid))
 
     (check-pred completion-accepted? result)
     (define completed (completion-accepted-transaction result))
 
+    (check-equal? (transaction-id created) expected-id)
+    (check-equal? (transaction-id scanned) expected-id)
+    (check-equal? (transaction-id paid) expected-id)
+    (check-equal? (transaction-id completed) expected-id)
     (check-equal? (transaction-status completed) 'completed)
     (check-equal? (transaction-subtotal completed) (money 199))
     (check-equal? (transaction-total completed) (money 199))
