@@ -45,6 +45,24 @@
     (check-eq? (completion-rejected-transaction result) open)
     (check-equal? (transaction-status open) 'open))
 
+  (test-case "a scanned but untendered transaction cannot complete"
+    (define open-with-item
+      (scan-accepted-transaction
+       (scan-barcode (make-transaction "txn-complete-untendered")
+                     "049000001234"
+                     fake-catalog-lookup)))
+    (define result (complete-transaction open-with-item))
+
+    (check-pred completion-rejected? result)
+    (check-equal? (completion-rejected-code result)
+                  'invalid-transaction-state)
+    (check-eq? (completion-rejected-transaction result) open-with-item)
+    (check-equal? (transaction-status open-with-item) 'open)
+    (check-equal? (length (transaction-line-items open-with-item)) 1)
+    (check-equal? (transaction-subtotal open-with-item) (money 199))
+    (check-false (transaction-tendered-cash open-with-item))
+    (check-false (transaction-change-due open-with-item)))
+
   (test-case "a completed transaction cannot complete again"
     (define completed
       (completion-accepted-transaction

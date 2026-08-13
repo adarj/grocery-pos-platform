@@ -6,17 +6,18 @@
          "../pos/domain/money.rkt"
          "../pos/domain/transaction.rkt")
 
-(define (completed-sale id)
+(define (paid-sale id)
   (define scanned
     (scan-accepted-transaction
      (scan-barcode (make-transaction id)
                    "049000001234"
                    fake-catalog-lookup)))
-  (define paid
-    (tender-accepted-transaction
-     (tender-cash scanned (money 199))))
+  (tender-accepted-transaction
+   (tender-cash scanned (money 199))))
+
+(define (completed-sale id)
   (completion-accepted-transaction
-   (complete-transaction paid)))
+   (complete-transaction (paid-sale id))))
 
 (module+ test
   (test-case "scanning a known barcode adds a sale-time line item"
@@ -79,7 +80,21 @@
     (check-equal? (transaction-line-items original) '())
     (check-equal? (transaction-subtotal original) (money 0)))
 
-  (test-case "transaction state that does not accept items rejects scanning"
+  (test-case "paid transaction rejects additional scanning"
+    (define paid (paid-sale "txn-paid-scan"))
+    (define result
+      (scan-barcode paid "049000001234" fake-catalog-lookup))
+
+    (check-pred scan-rejected? result)
+    (check-equal? (scan-rejected-code result) 'invalid-transaction-state)
+    (check-eq? (scan-rejected-transaction result) paid)
+    (check-equal? (transaction-status paid) 'paid)
+    (check-equal? (length (transaction-line-items paid)) 1)
+    (check-equal? (transaction-subtotal paid) (money 199))
+    (check-equal? (transaction-tendered-cash paid) (money 199))
+    (check-equal? (transaction-change-due paid) (money 0)))
+
+  (test-case "completed transaction rejects additional scanning"
     (define completed (completed-sale "txn-004"))
     (define result
       (scan-barcode completed "049000001234" fake-catalog-lookup))
