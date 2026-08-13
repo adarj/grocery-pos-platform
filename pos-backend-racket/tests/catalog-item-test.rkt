@@ -17,4 +17,25 @@
     (check-equal? (catalog-item-barcode item) "049000001234")
     (check-equal? (catalog-item-description item) "Test Apples")
     (check-true (immutable? (catalog-item-barcode item)))
-    (check-true (immutable? (catalog-item-description item)))))
+    (check-true (immutable? (catalog-item-description item))))
+
+  (test-case "catalog item requires a string barcode"
+    (check-exn exn:fail:contract?
+               (lambda ()
+                 (catalog-item 49000001234
+                               "Test Apples"
+                               (money 199)))))
+
+  (test-case "catalog item requires a string description"
+    (check-exn exn:fail:contract?
+               (lambda ()
+                 (catalog-item "049000001234"
+                               'test-apples
+                               (money 199)))))
+
+  (test-case "catalog item requires a money unit price"
+    (check-exn exn:fail:contract?
+               (lambda ()
+                 (catalog-item "049000001234"
+                               "Test Apples"
+                               199)))))
