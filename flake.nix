@@ -58,6 +58,9 @@
             openssl
             pkg-config
 
+            # Nix development
+            nixd
+
             # Racket backend
             racket
 
