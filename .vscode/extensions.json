@@ -8,7 +8,8 @@
     "jnoortheen.nix-ide",
     "redhat.vscode-yaml",
     "ms-azuretools.vscode-docker",
-    "davidanson.vscode-markdownlint"
+    "davidanson.vscode-markdownlint",
+    "evzen-wybitul.magic-racket"
   ],
   "unwantedRecommendations": [
     "ms-vscode.cpptools",
