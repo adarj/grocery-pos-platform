@@ -35,11 +35,4 @@
   "rust-analyzer.check.command": "clippy",
   "dart.lineLength": 100,
   "nix.enableLanguageServer": true,
-  "magicRacket.languageServer.command": "/var/home/user/.local/bin/gpos-racket",
-  "magicRacket.languageServer.arguments": [
-    "--lib",
-    "racket-langserver"
-  ],
-  "magicRacket.general.racketPath": "/var/home/user/.local/bin/gpos-racket",
-  "magicRacket.general.racoPath": "/var/home/user/.local/bin/gpos-raco"
 }
