@@ -20,7 +20,7 @@ The boundary is:
 ```text
 Racket transaction domain event
     -> Transaction Event Schema v1 JSON
-    -> future persisted journal record
+    -> SQLite persisted journal record
 ```
 
 On recovery the direction reverses:
@@ -41,16 +41,17 @@ A domain event records an accepted business fact such as an item being added
 or sufficient cash being tendered. This document defines the serialized type
 and payload for those facts.
 
-A future journal record will wrap that serialized event with storage metadata.
-That envelope may include a SQLite row identifier, transaction stream key,
-stream sequence, event identifier, recording timestamp, command identifier, or
-integrity information. Those values are not domain-event payload fields and are
-not part of Schema v1.
+The SQLite journal record wraps that serialized event with storage metadata.
+The implemented envelope contains a SQLite row identifier, transaction stream
+key, per-stream sequence, and duplicated schema-version and event-type fields.
+Event identifiers, recording timestamps, command identifiers, and integrity
+information remain deferred. Envelope values are not domain-event payload
+fields and are not part of Schema v1.
 
 The `transaction_started` payload contains `transaction_id` because the domain
-fact needs it to reconstruct transaction identity. A future journal envelope
-may independently contain the transaction stream key and validate that the two
-identifiers agree.
+fact needs it to reconstruct transaction identity. The journal envelope also
+contains the transaction stream key and validates that the two identifiers
+agree.
 
 ## Common shape
 
@@ -216,5 +217,6 @@ Schema v1 does not contain:
 - command IDs;
 - filesystem paths or other storage locations.
 
-Those are journal-record and persistence-envelope concerns for a later
-checkpoint.
+The current SQLite journal supplies its row identity, transaction stream key,
+and stream sequence outside Schema v1. The remaining metadata stays
+deliberately deferred. See [SQLite Transaction Journal](transaction-journal.md).

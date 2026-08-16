@@ -137,7 +137,8 @@
 
        (define loaded
          (load-transaction-events connection "txn-unknown"))
-       (check-equal? (journal-load-succeeded-version loaded) 1))))
+       (check-equal? (journal-load-succeeded-version loaded) 1)
+       (check-equal? (length (journal-load-succeeded-events loaded)) 1))))
 
   (test-case "sufficient cash is committed and recoverable"
     (call-with-service
@@ -179,7 +180,8 @@
 
        (define loaded
          (load-transaction-events connection "txn-insufficient"))
-       (check-equal? (journal-load-succeeded-version loaded) 2))))
+       (check-equal? (journal-load-succeeded-version loaded) 2)
+       (check-equal? (length (journal-load-succeeded-events loaded)) 2))))
 
   (test-case "paid completion is committed and recoverable"
     (call-with-service
@@ -218,7 +220,8 @@
 
        (define loaded
          (load-transaction-events connection "txn-invalid-complete"))
-       (check-equal? (journal-load-succeeded-version loaded) 2))))
+       (check-equal? (journal-load-succeeded-version loaded) 2)
+       (check-equal? (length (journal-load-succeeded-events loaded)) 2))))
 
   (test-case "commands do not implicitly create a missing transaction"
     (call-with-service
@@ -386,7 +389,17 @@ SQL
        (check-equal?
         (transaction-line-item-description
          (first (transaction-line-items recovered)))
-        "Concurrent Bananas"))))
+        "Concurrent Bananas")
+
+       (define persisted
+         (load-transaction-events connection "txn-conflict"))
+       (check-equal? (journal-load-succeeded-version persisted) 2)
+       (check-equal?
+        (journal-load-succeeded-events persisted)
+        (list (transaction-started "txn-conflict")
+              (sale-item-added "000000000002"
+                               "Concurrent Bananas"
+                               (money 250)))))))
 
   (test-case "non-conflict append rejection is a persistence failure"
     (call-with-service
@@ -422,9 +435,68 @@ SQL
           1))
        (check-equal? (transaction-line-items recovered) '()))))
 
+  (test-case "SQLite load exceptions propagate as infrastructure failures"
+    (call-with-service
+     (lambda (connection _normal-service)
+       (define load-call-count 0)
+       (define failure-service
+         (make-transaction-service
+          connection
+          #:load-events
+          (lambda (connection* _transaction-id)
+            (set! load-call-count (add1 load-call-count))
+            (db:query-exec connection* "SELECT * FROM missing_load_table"))))
+
+       (check-exn
+        db:exn:fail:sql?
+        (lambda ()
+          (transaction-service-load-transaction
+           failure-service
+           "txn-load-operational-failure")))
+       (check-equal? load-call-count 1))))
+
+  (test-case "SQLite append exceptions never expose provisional success"
+    (call-with-service
+     (lambda (connection normal-service)
+       (transaction-service-start-transaction
+        normal-service
+        "txn-append-operational-failure")
+       (define append-call-count 0)
+       (define lookup-call-count 0)
+       (define failure-service
+         (make-transaction-service
+          connection
+          #:append-events!
+          (lambda (connection* _transaction-id _version _events)
+            (set! append-call-count (add1 append-call-count))
+            (db:query-exec connection*
+                           "INSERT INTO missing_append_table VALUES (1)"))))
+
+       (check-exn
+        db:exn:fail:sql?
+        (lambda ()
+          (transaction-service-scan-barcode
+           failure-service
+           "txn-append-operational-failure"
+           test-barcode
+           (lambda (barcode)
+             (set! lookup-call-count (add1 lookup-call-count))
+             (fake-catalog-lookup barcode)))))
+       (check-equal? lookup-call-count 1)
+       (check-equal? append-call-count 1)
+
+       (define persisted
+         (load-transaction-events
+          connection
+          "txn-append-operational-failure"))
+       (check-equal? (journal-load-succeeded-version persisted) 1)
+       (check-equal?
+        (journal-load-succeeded-events persisted)
+        (list (transaction-started "txn-append-operational-failure"))))))
+
   (test-case "transactions remain isolated through the service"
     (call-with-service
-     (lambda (_connection service)
+     (lambda (connection service)
        (transaction-service-start-transaction service "txn-A")
        (transaction-service-start-transaction service "txn-B")
        (transaction-service-scan-barcode
@@ -446,4 +518,19 @@ SQL
        (check-equal? (transaction-status transaction-A) 'paid)
        (check-equal? (transaction-subtotal transaction-A) (money 199))
        (check-equal? (transaction-status transaction-B) 'open)
-       (check-equal? (transaction-subtotal transaction-B) (money 398))))))
+       (check-equal? (transaction-subtotal transaction-B) (money 398))
+
+       (define stream-A (load-transaction-events connection "txn-A"))
+       (define stream-B (load-transaction-events connection "txn-B"))
+       (check-equal? (journal-load-succeeded-version stream-A) 3)
+       (check-equal? (journal-load-succeeded-version stream-B) 3)
+       (check-equal?
+        (journal-load-succeeded-events stream-A)
+        (list (transaction-started "txn-A")
+              (sale-item-added test-barcode "Test Apples" (money 199))
+              (cash-tendered (money 500))))
+       (check-equal?
+        (journal-load-succeeded-events stream-B)
+        (list (transaction-started "txn-B")
+              (sale-item-added test-barcode "Test Apples" (money 199))
+              (sale-item-added test-barcode "Test Apples" (money 199))))))))

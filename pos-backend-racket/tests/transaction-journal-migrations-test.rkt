@@ -64,6 +64,67 @@ SQL
          "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'transaction_events'")
         1))))
 
+  (test-case "migration rejects inconsistent recorded history"
+    (call-with-test-database
+     (lambda (connection)
+       (migrate-transaction-journal! connection)
+       (query-exec
+        connection
+        "UPDATE pos_schema_migrations SET name = 'unexpected_migration'")
+
+       (check-exn exn:fail?
+                  (lambda ()
+                    (migrate-transaction-journal! connection)))))
+
+    (call-with-test-database
+     (lambda (connection)
+       (migrate-transaction-journal! connection)
+       (query-exec
+        connection
+        "UPDATE pos_schema_migrations SET version = 2")
+
+       (check-exn exn:fail?
+                  (lambda ()
+                    (migrate-transaction-journal! connection))))))
+
+  (test-case "migration rejects a same-named non-unique stream index"
+    (call-with-test-database
+     (lambda (connection)
+       (migrate-transaction-journal! connection)
+       (query-exec
+        connection
+        "DROP INDEX transaction_events_stream_sequence_unique")
+       (query-exec
+        connection
+        #<<SQL
+CREATE INDEX transaction_events_stream_sequence_unique
+ON transaction_events (transaction_id, stream_sequence)
+SQL
+        )
+
+       (check-exn exn:fail?
+                  (lambda ()
+                    (migrate-transaction-journal! connection))))))
+
+  (test-case "migration rejects a stream index over the wrong columns"
+    (call-with-test-database
+     (lambda (connection)
+       (migrate-transaction-journal! connection)
+       (query-exec
+        connection
+        "DROP INDEX transaction_events_stream_sequence_unique")
+       (query-exec
+        connection
+        #<<SQL
+CREATE UNIQUE INDEX transaction_events_stream_sequence_unique
+ON transaction_events (transaction_id)
+SQL
+        )
+
+       (check-exn exn:fail?
+                  (lambda ()
+                    (migrate-transaction-journal! connection))))))
+
   (test-case "database constraints defend stream positions"
     (call-with-test-database
      (lambda (connection)

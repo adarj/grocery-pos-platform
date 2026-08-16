@@ -99,7 +99,10 @@ Those decisions belong to the local Racket POS Core.
 
 Transaction, tender, payment, receipt, drawer, synchronization, and recovery state should be represented explicitly rather than inferred from UI state.
 
-SQLite will become the normal durable local store once the initial in-memory transaction model is established.
+For the implemented cash-sale slice, SQLite is now the durable local journal
+of accepted transaction facts, and Racket replay reconstructs authoritative
+transaction state. Persistence for the other listed concerns remains future
+work.
 
 ### Specialized Rust Edges
 
@@ -121,6 +124,13 @@ Verified capabilities currently include:
 * Racket POS Core process;
 * `GET /health` local API endpoint;
 * RackUnit backend tests;
+* exact-money, immutable cash-sale transaction domain behavior;
+* transaction domain events and deterministic replay;
+* strict, language-independent Transaction Event Schema v1 JSON;
+* append-only SQLite transaction journal with migration v1, per-stream
+  sequencing, atomic batch append, and optimistic stream-version checks;
+* persistent transaction application service with file-backed restart
+  recovery;
 * Flutter Linux ARM64 POS terminal;
 * Flutter widget tests;
 * Flutter-to-Racket local health connection;
@@ -311,23 +321,17 @@ The project follows:
 
 Generated local state, credentials, secrets, databases, support bundles, and other environment-specific data must not be committed.
 
-## Next Milestone
+## Implemented Transaction Milestones
 
-The next major implementation milestone is the **in-memory Racket transaction core**.
+The first cash-sale vertical slice now includes the pure in-memory Racket
+transaction domain and its durable local transaction journal. Accepted live
+commands emit domain events, SQLite stores those events in ordered per-
+transaction streams, and deterministic replay recovers state after a process
+or connection restart.
 
-Its first vertical slice will establish:
-
-1. a money/value representation;
-2. a small fake catalog;
-3. transaction creation;
-4. item scanning;
-5. subtotal calculation;
-6. cash tender;
-7. change calculation;
-8. transaction completion;
-9. rejection of invalid state transitions.
-
-This domain model will be established under tests before SQLite persistence, production payment integration, promotions, hardware agents, or cloud synchronization are layered on.
+This transaction workflow is not yet exposed through HTTP routes or a full
+Flutter checkout interface. Those integrations require separately scoped and
+tested milestones; the existing API surface remains `GET /health`.
 
 ## Status
 

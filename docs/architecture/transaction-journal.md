@@ -68,8 +68,11 @@ ON transaction_events (transaction_id, stream_sequence);
 The implementation also uses `typeof(...)` checks so values are stored with
 the intended SQLite storage classes. Migration 1 is recorded as
 `create_transaction_events`. Re-running migration against version 1 is safe
-and validates that the expected table and unique index still exist. Unknown or
-inconsistent migration histories fail rather than being silently adopted.
+and validates the exact recorded `(version, name)` migration identity, the
+expected table, and an actually unique stream index over exactly
+`(transaction_id, stream_sequence)`. Unknown or inconsistent migration
+histories and drifted index definitions fail rather than being silently
+adopted.
 
 Table creation is not hidden inside append or load. Application composition is
 responsible for running migrations explicitly before using the store.
@@ -270,8 +273,8 @@ catalog dependency.
 Process restart recovery opens the same SQLite database using a new connection,
 loads and decodes the stream, and replays it from the first event. No mutable
 in-memory transaction snapshot is required. File-backed tests cover creation
-and scan on one connection, tender and completion after a first restart, and
-final recovery after a second restart.
+and scan on one connection, tender after a first restart, completion after a
+second restart, and final recovery after a third restart.
 
 ## Deliberately Deferred
 

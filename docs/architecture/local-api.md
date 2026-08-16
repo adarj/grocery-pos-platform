@@ -293,6 +293,9 @@ Currently implemented:
 GET /health
 ```
 
-The next API surface will be introduced alongside the in-memory transaction core rather than defining a large speculative REST API in advance.
+The in-memory transaction domain and persistent transaction application
+service are implemented, but they are deliberately not exposed as HTTP routes
+yet. A transaction API contract will be introduced as a separately scoped,
+tested checkpoint rather than as a large speculative REST surface.
 
 The domain model should drive the interface, not the reverse.
