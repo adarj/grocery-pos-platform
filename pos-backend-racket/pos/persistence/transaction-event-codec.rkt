@@ -122,6 +122,19 @@
                  duplicate-or-failure))]
        [else (jsexpr->transaction-event parsed)])]))
 
+(define (read-complete-json input-port malformed-message)
+  (define (malformed-json)
+    (event-decode-failure 'malformed-json malformed-message))
+  (with-handlers ([exn:fail? (lambda (_exception) (malformed-json))])
+    (define parsed (read-json input-port))
+    (let consume-trailing-whitespace ()
+      (define next-character (read-char input-port))
+      (cond
+        [(eof-object? next-character) parsed]
+        [(memv next-character '(#\space #\tab #\newline #\return))
+         (consume-trailing-whitespace)]
+        [else (malformed-json)]))))
+
 (define (transaction-event->jsexpr event)
   (unless (transaction-event? event)
     (raise-argument-error
@@ -316,12 +329,9 @@
      "string?"
      text))
   (define parsed
-    (with-handlers ([exn:fail?
-                     (lambda (_exception)
-                       (event-decode-failure
-                        'malformed-json
-                        "transaction event is not valid JSON"))])
-      (string->jsexpr text)))
+    (read-complete-json
+     (open-input-string text)
+     "transaction event is not valid JSON"))
   (finish-raw-json-decode
    parsed
    (string->bytes/utf-8 text)
@@ -334,12 +344,9 @@
      "bytes?"
      bytes))
   (define parsed
-    (with-handlers ([exn:fail?
-                     (lambda (_exception)
-                       (event-decode-failure
-                        'malformed-json
-                        "transaction event is not valid UTF-8 JSON"))])
-      (bytes->jsexpr bytes)))
+    (read-complete-json
+     (open-input-bytes bytes)
+     "transaction event is not valid UTF-8 JSON"))
   (finish-raw-json-decode
    parsed
    bytes

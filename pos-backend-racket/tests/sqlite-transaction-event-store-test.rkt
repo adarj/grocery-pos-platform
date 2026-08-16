@@ -234,6 +234,29 @@ SQL
        (check-equal? (journal-load-failed-stream-sequence result) 2)
        (check-equal? (journal-load-failed-detail result) 'malformed-json))))
 
+  (test-case "persisted JSON with trailing content fails as corruption"
+    (call-with-store
+     (lambda (connection)
+       (append-transaction-events! connection "txn-001" 0 (list started))
+       (query-exec
+        connection
+        insert-event-sql
+        "txn-001"
+        2
+        1
+        "sale_item_added"
+        (string-append
+         (transaction-event->json-string item-added)
+         " trailing-garbage"))
+
+       (define result
+         (load-transaction-events connection "txn-001"))
+       (check-pred journal-load-failed? result)
+       (check-equal? (journal-load-failed-code result)
+                     'event-decode-failure)
+       (check-equal? (journal-load-failed-stream-sequence result) 2)
+       (check-equal? (journal-load-failed-detail result) 'malformed-json))))
+
   (test-case "duplicate persisted JSON fields produce a stable load failure"
     (call-with-store
      (lambda (connection)

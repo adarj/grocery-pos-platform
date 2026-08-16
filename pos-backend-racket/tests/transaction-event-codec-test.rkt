@@ -110,6 +110,29 @@
     (check-equal? (event-decode-failure-code bytes-result) 'malformed-json)
     (check-pred string? (event-decode-failure-message bytes-result)))
 
+  (test-case "raw JSON decoding requires end-of-input after one event"
+    (define completed-json
+      (transaction-event->json-string completed-event))
+    (check-raw-json-failure
+     (string-append completed-json " trailing-garbage")
+     'malformed-json)
+    (check-raw-json-failure
+     (string-append completed-json completed-json)
+     'malformed-json)
+
+    ;; JSON whitespace after the single value remains valid.
+    (define with-trailing-whitespace
+      (string-append completed-json " \t\r\n"))
+    (for ([result
+           (in-list
+            (list
+             (json-string->transaction-event with-trailing-whitespace)
+             (json-bytes->transaction-event
+              (string->bytes/utf-8 with-trailing-whitespace))))])
+      (check-pred event-decode-success? result)
+      (check-equal? (event-decode-success-event result)
+                    completed-event)))
+
   (test-case "duplicate JSON object fields are rejected before decoding"
     (check-raw-json-failure
      #<<JSON
