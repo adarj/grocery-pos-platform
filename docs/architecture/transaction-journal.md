@@ -176,10 +176,107 @@ After a successful load, `replay-transaction` checks the complete business
 lifecycle and reconstructs the transaction. Replay remains pure: it performs
 no SQLite access, catalog lookup, clock read, ID generation, or network call.
 
+## Persistent Transaction Service
+
+The persistent transaction service is the application-layer coordinator
+between pure domain decisions and the SQLite journal. It depends on both
+layers, while neither the domain nor the journal depends on it:
+
+```text
+                 transaction service
+                    /          \
+          pure transaction    SQLite journal
+               domain         and event codec
+```
+
+`make-transaction-service` receives an already-open, already-migrated SQLite
+connection. It neither owns a global connection nor runs migrations on every
+command. Bootstrap composition remains responsible for opening the configured
+database and migrating it once.
+
+The service provides operations to:
+
+- start a transaction;
+- load/recover a transaction;
+- scan a barcode;
+- tender sufficient cash;
+- complete a paid transaction.
+
+### Load, Replay, Decide, Append
+
+An existing-transaction command follows this sequence:
+
+```text
+load ordered journal stream
+  -> decode and validate journal records
+  -> replay domain events
+  -> decide command against recovered state
+     -> rejected: append nothing
+     -> accepted: append emitted events at loaded stream version
+        -> append succeeds: report committed state
+        -> append fails/conflicts: report failure, not provisional state
+```
+
+Starting a transaction uses the corresponding empty-stream flow. It verifies
+that load reports no existing stream, asks the domain for the
+`transaction-started` decision, and appends at expected version 0. An existing
+stream is never overwritten or reset.
+
+The state produced by an accepted domain command is **provisional** until the
+exact emitted event list has been committed. The service returns that state as
+success only after append succeeds. It is safe to avoid a redundant post-write
+reload because the domain already produced the state by applying those exact
+events through the same reducer used for replay. Tests separately prove that a
+fresh load and replay returns an equal transaction.
+
+### Result Classes
+
+Explicit service results distinguish:
+
+- committed success, containing transaction state and committed stream
+  version;
+- domain rejection, containing the business rejection code, unchanged
+  recovered state, and unchanged version;
+- transaction not found;
+- transaction already exists;
+- optimistic stream-version conflict;
+- non-conflict persistence rejection;
+- journal-load or replay recovery failure.
+
+A domain rejection means the command was understood and business rules refused
+it; no domain event is appended. Corrupt data, invalid replay history, and
+concurrent writes are not presented as business rejections.
+
+When append reports `stream-version-conflict`, the service exposes the expected
+and actual versions without the provisional accepted transaction. It does not
+silently reload or rerun the command. The caller must explicitly recover and
+decide what to do next. This rule prevents future commands involving external
+effects or user-visible choices from being repeated automatically.
+
+Journal decoding/corruption failures identify the load stage and retain stable
+journal diagnostics. A syntactically valid journal whose events violate the
+domain lifecycle fails at the replay stage. Neither failure path invokes the
+requested domain command or returns partial state as success. Genuine SQLite
+operational exceptions continue to propagate as infrastructure failures.
+
+### Catalog Boundary and Restart Recovery
+
+The service does not hard-code a catalog. A scan receives a current catalog
+lookup function explicitly. The lookup is used once by the live domain
+decision; an accepted `sale-item-added` event persists the sale-time barcode,
+description, and exact unit price snapshot. Historical load and replay have no
+catalog dependency.
+
+Process restart recovery opens the same SQLite database using a new connection,
+loads and decodes the stream, and replays it from the first event. No mutable
+in-memory transaction snapshot is required. File-backed tests cover creation
+and scan on one connection, tender and completion after a first restart, and
+final recovery after a second restart.
+
 ## Deliberately Deferred
 
-This checkpoint does not connect the journal to live transaction commands. It
-also does not add:
+The persistent service is not yet exposed through HTTP or Flutter. This
+checkpoint also does not add:
 
 - authoritative snapshots or projections;
 - timestamps, event UUIDs, or command IDs;
