@@ -252,10 +252,22 @@ Run Flutter tests:
 just test-flutter
 ```
 
+Run Flutter static analysis:
+
+```bash
+just analyze-flutter
+```
+
 Run the combined project test suite:
 
 ```bash
 just test
+```
+
+Run the complete local quality gate, including Flutter static analysis and both test suites:
+
+```bash
+just check
 ```
 
 The canonical development command surface is the repository `justfile`; prefer adding reusable commands there rather than relying on undocumented shell invocations.

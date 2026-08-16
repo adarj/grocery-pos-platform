@@ -56,6 +56,8 @@ Important commands include:
 
 ```text
 just doctor
+just check
+just analyze-flutter
 just test
 just test-racket
 just test-flutter
@@ -68,10 +70,10 @@ Prefer existing `just` recipes over inventing undocumented command sequences whe
 
 Before considering a code change complete, run the relevant focused tests.
 
-Run:
+Run the complete local quality gate:
 
 ```text
-just test
+just check
 ```
 
 before a change is considered broadly ready for commit unless there is a documented reason that a portion of the suite cannot run.
