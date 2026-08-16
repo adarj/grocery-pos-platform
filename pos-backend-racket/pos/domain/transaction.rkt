@@ -4,7 +4,11 @@
          "money.rkt"
          "transaction-event.rkt")
 
-(provide make-transaction
+(provide start-transaction
+         start-accepted?
+         start-accepted-transaction
+         start-accepted-events
+         make-transaction
          transaction?
          transaction-id
          transaction-status
@@ -20,21 +24,27 @@
          scan-barcode
          scan-accepted?
          scan-accepted-transaction
+         scan-accepted-events
          scan-rejected?
          scan-rejected-code
          scan-rejected-transaction
+         scan-rejected-events
          tender-cash
          tender-accepted?
          tender-accepted-transaction
+         tender-accepted-events
          tender-rejected?
          tender-rejected-code
          tender-rejected-transaction
+         tender-rejected-events
          complete-transaction
          completion-accepted?
          completion-accepted-transaction
+         completion-accepted-events
          completion-rejected?
          completion-rejected-code
          completion-rejected-transaction
+         completion-rejected-events
          apply-transaction-event
          event-applied?
          event-applied-transaction
@@ -69,22 +79,25 @@
 (struct cash-tender (amount)
   #:transparent)
 
-(struct scan-accepted (transaction)
+(struct start-accepted (transaction events)
   #:transparent)
 
-(struct scan-rejected (code transaction)
+(struct scan-accepted (transaction events)
   #:transparent)
 
-(struct tender-accepted (transaction)
+(struct scan-rejected (code transaction events)
   #:transparent)
 
-(struct tender-rejected (code transaction)
+(struct tender-accepted (transaction events)
   #:transparent)
 
-(struct completion-accepted (transaction)
+(struct tender-rejected (code transaction events)
   #:transparent)
 
-(struct completion-rejected (code transaction)
+(struct completion-accepted (transaction events)
+  #:transparent)
+
+(struct completion-rejected (code transaction events)
   #:transparent)
 
 (struct event-applied (transaction)
@@ -119,10 +132,36 @@
   (struct-copy transaction current-transaction
                [status 'completed]))
 
+(define (transaction-open? current-transaction)
+  (eq? (transaction-status current-transaction) 'open))
+
+(define (decision-from-event current-transaction
+                             event
+                             make-accepted
+                             make-rejected)
+  (define application
+    (apply-transaction-event current-transaction event))
+  (cond
+    [(event-applied? application)
+     (make-accepted (event-applied-transaction application)
+                    (list event))]
+    [else
+     (make-rejected (event-rejected-code application)
+                    (event-rejected-transaction application)
+                    '())]))
+
+(define (start-transaction id)
+  (unless (string? id)
+    (raise-argument-error 'start-transaction "string?" id))
+  (define event (transaction-started id))
+  (define application (apply-transaction-event #f event))
+  (start-accepted (event-applied-transaction application)
+                  (list event)))
+
 (define (make-transaction id)
   (unless (string? id)
     (raise-argument-error 'make-transaction "string?" id))
-  (make-open-transaction id))
+  (start-accepted-transaction (start-transaction id)))
 
 (define (transaction-subtotal current-transaction)
   (unless (transaction? current-transaction)
@@ -167,20 +206,23 @@
     (raise-argument-error 'scan-barcode "procedure?" catalog-lookup))
 
   (cond
-    [(not (eq? (transaction-status current-transaction) 'open))
-     (scan-rejected 'invalid-transaction-state current-transaction)]
+    [(not (transaction-open? current-transaction))
+     (scan-rejected 'invalid-transaction-state current-transaction '())]
     [else
      (define item (catalog-lookup barcode))
      (cond
        [(not item)
-        (scan-rejected 'unknown-barcode current-transaction)]
+        (scan-rejected 'unknown-barcode current-transaction '())]
        [else
-        (scan-accepted
-         (add-sale-line-item
-          current-transaction
-          (catalog-item-barcode item)
-          (catalog-item-description item)
-          (catalog-item-unit-price item)))])]))
+        (define event
+          (sale-item-added
+           (catalog-item-barcode item)
+           (catalog-item-description item)
+           (catalog-item-unit-price item)))
+        (decision-from-event current-transaction
+                             event
+                             scan-accepted
+                             scan-rejected)])]))
 
 (define (tender-cash current-transaction amount)
   (unless (transaction? current-transaction)
@@ -188,18 +230,10 @@
   (unless (money? amount)
     (raise-argument-error 'tender-cash "money?" amount))
 
-  (cond
-    [(not (eq? (transaction-status current-transaction) 'open))
-     (tender-rejected 'invalid-transaction-state current-transaction)]
-    [(empty? (transaction-line-items current-transaction))
-     (tender-rejected 'empty-transaction current-transaction)]
-    [(< (money-minor-units amount)
-        (money-minor-units (transaction-total current-transaction)))
-     ;; v0 deliberately rejects partial cash rather than recording partial state.
-     (tender-rejected 'insufficient-tender current-transaction)]
-    [else
-     (tender-accepted
-      (record-sufficient-cash current-transaction amount))]))
+  (decision-from-event current-transaction
+                       (cash-tendered amount)
+                       tender-accepted
+                       tender-rejected))
 
 (define (complete-transaction current-transaction)
   (unless (transaction? current-transaction)
@@ -208,14 +242,10 @@
      "transaction?"
      current-transaction))
 
-  (cond
-    [(not (eq? (transaction-status current-transaction) 'paid))
-     (completion-rejected
-      'invalid-transaction-state
-      current-transaction)]
-    [else
-     (completion-accepted
-      (mark-transaction-completed current-transaction))]))
+  (decision-from-event current-transaction
+                       (transaction-completed)
+                       completion-accepted
+                       completion-rejected))
 
 (define (apply-transaction-event current-transaction event)
   (unless (or (not current-transaction)
@@ -242,7 +272,7 @@
     [(not current-transaction)
      (event-rejected 'transaction-not-started #f)]
     [(sale-item-added? event)
-     (if (eq? (transaction-status current-transaction) 'open)
+     (if (transaction-open? current-transaction)
          (event-applied
           (add-sale-line-item
            current-transaction
@@ -255,7 +285,7 @@
     [(cash-tendered? event)
      (define amount (cash-tendered-amount event))
      (cond
-       [(not (eq? (transaction-status current-transaction) 'open))
+       [(not (transaction-open? current-transaction))
         (event-rejected
          'invalid-transaction-state
          current-transaction)]
