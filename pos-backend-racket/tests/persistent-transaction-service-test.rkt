@@ -3,13 +3,11 @@
 (require (prefix-in db: db)
          rackunit
          "../pos/application/transaction-service.rkt"
-         "../pos/domain/catalog-item.rkt"
          "../pos/domain/fake-catalog.rkt"
          "../pos/domain/money.rkt"
          "../pos/domain/transaction-event.rkt"
          "../pos/domain/transaction.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt"
-         "../pos/persistence/transaction-event-codec.rkt"
          "../pos/persistence/transaction-journal-migrations.rkt")
 
 (define test-barcode "049000001234")
