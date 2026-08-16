@@ -114,7 +114,14 @@ The local Racket POS Core owns:
 
 ### SQLite owns local durability
 
-SQLite is the planned durable source for local register state and recovery information.
+SQLite is the implemented durable local journal for accepted transaction facts
+in the current cash-sale slice. Racket reconstructs authoritative transaction
+state from that journal.
+
+As additional subsystems are implemented, SQLite will also hold other local
+durable register concerns such as payment recovery, receipts, drawers, catalog
+cache, and synchronization state. SQLite owns durability, not business
+semantics.
 
 Racket is the normal application writer.
 
