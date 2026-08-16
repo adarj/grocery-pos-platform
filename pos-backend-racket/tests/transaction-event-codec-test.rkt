@@ -51,6 +51,16 @@
   (check-equal? (event-decode-failure-code result) expected-code)
   (check-pred string? (event-decode-failure-message result)))
 
+(define (check-raw-json-failure text expected-code)
+  (for ([result
+         (in-list
+          (list (json-string->transaction-event text)
+                (json-bytes->transaction-event
+                 (string->bytes/utf-8 text))))])
+    (check-pred event-decode-failure? result)
+    (check-equal? (event-decode-failure-code result) expected-code)
+    (check-pred string? (event-decode-failure-message result))))
+
 (module+ test
   (test-case "schema v1 encodes exact golden representations"
     (check-equal? (transaction-event->jsexpr started-event)
@@ -99,6 +109,24 @@
     (check-pred event-decode-failure? bytes-result)
     (check-equal? (event-decode-failure-code bytes-result) 'malformed-json)
     (check-pred string? (event-decode-failure-message bytes-result)))
+
+  (test-case "duplicate JSON object fields are rejected before decoding"
+    (check-raw-json-failure
+     #<<JSON
+{"schema_version":999,"schema_version":1,"event_type":"transaction_completed","payload":{}}
+JSON
+     'duplicate-field)
+    (check-raw-json-failure
+     #<<JSON
+{"schema_version":1,"event_type":"sale_item_added","payload":{"barcode":"049000001234","description":"Test Apples","unit_price_minor_units":999,"unit_price_minor_units":199}}
+JSON
+     'duplicate-field)
+    ;; JSON escape spelling does not make a member name distinct.
+    (check-raw-json-failure
+     #<<JSON
+{"schema_version":999,"schema_\u0076ersion":1,"event_type":"transaction_completed","payload":{}}
+JSON
+     'duplicate-field))
 
   (test-case "top-level schema shape is strict"
     (check-failure "transaction_started" 'expected-object)

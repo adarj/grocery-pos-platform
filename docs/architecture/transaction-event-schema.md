@@ -32,7 +32,8 @@ persisted JSON
     -> pure transaction replay
 ```
 
-JSON object field order is not significant. Field names, field presence,
+JSON object field order is not significant. Object member names must be
+unique, including after JSON escape decoding. Field names, field presence,
 field types, event-type strings, and schema-version numbers are significant.
 
 ## Domain events and journal records
@@ -163,6 +164,8 @@ semantics.
 Persisted event data is untrusted. The Schema v1 decoder rejects:
 
 - malformed or invalid UTF-8 JSON;
+- duplicate object member names at any nesting level, including names with
+  different but escape-equivalent source spellings;
 - a non-object top-level value;
 - missing or extra top-level fields;
 - a missing, non-integer, or unsupported `schema_version`;
@@ -182,6 +185,7 @@ diagnostic message. Current failure codes are:
 
 ```text
 malformed-json
+duplicate-field
 expected-object
 missing-field
 unexpected-field

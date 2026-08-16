@@ -26,6 +26,102 @@
 (define envelope-fields
   '(schema_version event_type payload))
 
+;; Racket's JSON reader represents objects as hashes, so a repeated member
+;; name would otherwise be collapsed before the strict schema checks see it.
+;; This pass inspects the already syntax-validated raw JSON and compares decoded
+;; member names, including names whose source spelling uses JSON escapes.
+(define (find-duplicate-json-field raw-bytes)
+  (define byte-count (bytes-length raw-bytes))
+  (define quote-byte (char->integer #\"))
+  (define backslash-byte (char->integer #\\))
+  (define left-brace-byte (char->integer #\{))
+  (define right-brace-byte (char->integer #\}))
+  (define colon-byte (char->integer #\:))
+
+  (define (json-whitespace-byte? byte)
+    (member byte '(32 9 10 13)))
+
+  (define (skip-whitespace position)
+    (let loop ([position position])
+      (if (and (< position byte-count)
+               (json-whitespace-byte?
+                (bytes-ref raw-bytes position)))
+          (loop (add1 position))
+          position)))
+
+  (define (scan-string start)
+    (unless (and (< start byte-count)
+                 (= (bytes-ref raw-bytes start) quote-byte))
+      (error 'find-duplicate-json-field "expected a JSON string"))
+    (let loop ([position (add1 start)])
+      (when (>= position byte-count)
+        (error 'find-duplicate-json-field "unterminated JSON string"))
+      (define byte (bytes-ref raw-bytes position))
+      (cond
+        [(= byte quote-byte) (add1 position)]
+        [(= byte backslash-byte)
+         (when (>= (add1 position) byte-count)
+           (error 'find-duplicate-json-field "unterminated JSON escape"))
+         (loop (+ position 2))]
+        [else (loop (add1 position))])))
+
+  (define (decode-key start end)
+    (bytes->jsexpr (subbytes raw-bytes start end)))
+
+  (let loop ([position 0]
+             [object-scopes '()])
+    (cond
+      [(>= position byte-count) #f]
+      [else
+       (define byte (bytes-ref raw-bytes position))
+       (cond
+         [(= byte left-brace-byte)
+          (loop (add1 position) (cons (hash) object-scopes))]
+         [(= byte right-brace-byte)
+          (loop (add1 position)
+                (if (null? object-scopes)
+                    object-scopes
+                    (rest object-scopes)))]
+         [(= byte quote-byte)
+          (define key-end (scan-string position))
+          (define after-string (skip-whitespace key-end))
+          (cond
+            [(and (< after-string byte-count)
+                  (= (bytes-ref raw-bytes after-string) colon-byte))
+             (unless (pair? object-scopes)
+               (error 'find-duplicate-json-field
+                      "JSON member name is outside an object"))
+             (define key (decode-key position key-end))
+             (define current-scope (first object-scopes))
+             (if (hash-has-key? current-scope key)
+                 key
+                 (loop key-end
+                       (cons (hash-set current-scope key #t)
+                             (rest object-scopes))))]
+            [else (loop key-end object-scopes)])]
+         [else (loop (add1 position) object-scopes)])])))
+
+(define (finish-raw-json-decode parsed raw-bytes malformed-message)
+  (cond
+    [(event-decode-failure? parsed) parsed]
+    [else
+     (define duplicate-or-failure
+       (with-handlers ([exn:fail?
+                        (lambda (_exception)
+                          (event-decode-failure
+                           'malformed-json
+                           malformed-message))])
+         (find-duplicate-json-field raw-bytes)))
+     (cond
+       [(event-decode-failure? duplicate-or-failure)
+        duplicate-or-failure]
+       [duplicate-or-failure
+        (event-decode-failure
+         'duplicate-field
+         (format "JSON object contains duplicate field ~s"
+                 duplicate-or-failure))]
+       [else (jsexpr->transaction-event parsed)])]))
+
 (define (transaction-event->jsexpr event)
   (unless (transaction-event? event)
     (raise-argument-error
@@ -226,9 +322,10 @@
                         'malformed-json
                         "transaction event is not valid JSON"))])
       (string->jsexpr text)))
-  (if (event-decode-failure? parsed)
-      parsed
-      (jsexpr->transaction-event parsed)))
+  (finish-raw-json-decode
+   parsed
+   (string->bytes/utf-8 text)
+   "transaction event is not valid JSON"))
 
 (define (json-bytes->transaction-event bytes)
   (unless (bytes? bytes)
@@ -243,6 +340,7 @@
                         'malformed-json
                         "transaction event is not valid UTF-8 JSON"))])
       (bytes->jsexpr bytes)))
-  (if (event-decode-failure? parsed)
-      parsed
-      (jsexpr->transaction-event parsed)))
+  (finish-raw-json-decode
+   parsed
+   bytes
+   "transaction event is not valid UTF-8 JSON"))

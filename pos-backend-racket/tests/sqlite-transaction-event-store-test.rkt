@@ -234,6 +234,30 @@ SQL
        (check-equal? (journal-load-failed-stream-sequence result) 2)
        (check-equal? (journal-load-failed-detail result) 'malformed-json))))
 
+  (test-case "duplicate persisted JSON fields produce a stable load failure"
+    (call-with-store
+     (lambda (connection)
+       (append-transaction-events! connection "txn-001" 0 (list started))
+       (query-exec
+        connection
+        insert-event-sql
+        "txn-001"
+        2
+        1
+        "sale_item_added"
+        #<<JSON
+{"schema_version":1,"event_type":"sale_item_added","payload":{"barcode":"049000001234","description":"Test Apples","unit_price_minor_units":999,"unit_price_minor_units":199}}
+JSON
+        )
+
+       (define result
+         (load-transaction-events connection "txn-001"))
+       (check-pred journal-load-failed? result)
+       (check-equal? (journal-load-failed-code result)
+                     'event-decode-failure)
+       (check-equal? (journal-load-failed-stream-sequence result) 2)
+       (check-equal? (journal-load-failed-detail result) 'duplicate-field))))
+
   (test-case "malformed journal envelope produces a stable load failure"
     (call-with-store
      (lambda (connection)
