@@ -56,6 +56,8 @@ Important commands include:
 
 ```text
 just doctor
+just check
+just analyze-flutter
 just test
 just test-racket
 just test-flutter
@@ -68,10 +70,10 @@ Prefer existing `just` recipes over inventing undocumented command sequences whe
 
 Before considering a code change complete, run the relevant focused tests.
 
-Run:
+Run the complete local quality gate:
 
 ```text
-just test
+just check
 ```
 
 before a change is considered broadly ready for commit unless there is a documented reason that a portion of the suite cannot run.
@@ -112,7 +114,14 @@ The local Racket POS Core owns:
 
 ### SQLite owns local durability
 
-SQLite is the planned durable source for local register state and recovery information.
+SQLite is the implemented durable local journal for accepted transaction facts
+in the current cash-sale slice. Racket reconstructs authoritative transaction
+state from that journal.
+
+As additional subsystems are implemented, SQLite will also hold other local
+durable register concerns such as payment recovery, receipts, drawers, catalog
+cache, and synchronization state. SQLite owns durability, not business
+semantics.
 
 Racket is the normal application writer.
 

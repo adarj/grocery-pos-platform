@@ -117,8 +117,8 @@ The initial development environment and walking skeleton are operational.
 Verified capabilities currently include:
 
 * Fedora Kinoite development VM on Apple Silicon through VMware Fusion;
-* VSCodium as the primary editor;
 * a Fedora-based `dev` Distrobox development environment;
+* native VSCodium inside the `dev` Distrobox as the primary editor;
 * Nix flakes with `direnv` / `nix-direnv`;
 * `just` as the canonical development command interface;
 * Racket POS Core process;
@@ -135,7 +135,8 @@ Verified capabilities currently include:
 * Flutter widget tests;
 * Flutter-to-Racket local health connection;
 * nixGL-based Flutter GUI launch in the current VM environment;
-* GitHub Actions continuous integration;
+* GitHub Actions workflow definitions for scaffold/Nix validation, Racket
+  tests, and Flutter analysis/tests;
 * Architecture Decision Records under `docs/adr/`.
 
 ## Development Environment
@@ -149,14 +150,24 @@ VMware Fusion
   ↓
 Fedora Kinoite aarch64 VM
   ↓
-VSCodium Flatpak
-  ↓
 Distrobox: dev
-  ↓
-Nix flake development environment
+  ├── Native VSCodium
+  │   └── project extensions / language servers
+  └── Nix flake development environment
+      ├── Racket
+      ├── Flutter / Dart
+      ├── Rust
+      ├── SQLite
+      ├── Supabase CLI
+      ├── OpenTofu
+      └── nixd
 ```
 
-Enter the project normally through the configured VSCodium terminal or:
+VSCodium, its project extensions, the integrated terminal, and Codex run in
+the same `dev` Distrobox and observe the project toolchain activated by
+Nix/direnv.
+
+Enter the project normally through the native VSCodium terminal or:
 
 ```bash
 cd ~/Projects/grocery-pos-platform
@@ -252,10 +263,22 @@ Run Flutter tests:
 just test-flutter
 ```
 
+Run Flutter static analysis:
+
+```bash
+just analyze-flutter
+```
+
 Run the combined project test suite:
 
 ```bash
 just test
+```
+
+Run the complete local quality gate, including Flutter static analysis and both test suites:
+
+```bash
+just check
 ```
 
 The canonical development command surface is the repository `justfile`; prefer adding reusable commands there rather than relying on undocumented shell invocations.

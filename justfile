@@ -6,15 +6,12 @@ default:
 doctor:
     ./scripts/dev/doctor.sh
 
-fmt:
-    @echo "TODO: format all project code"
-
 test:
     just test-racket
     just test-flutter
 
 check:
-    just fmt
+    just analyze-flutter
     just test
 
 run-racket:
@@ -32,9 +29,11 @@ run-pos-plain:
 test-flutter:
     cd flutter/apps/pos_terminal && flutter test
 
+analyze-flutter:
+    cd flutter/apps/pos_terminal && flutter analyze
+
 supabase-start:
     @echo "TODO: start local Supabase"
 
 tofu-plan ENV:
     @echo "TODO: OpenTofu plan for {{ENV}}"
-

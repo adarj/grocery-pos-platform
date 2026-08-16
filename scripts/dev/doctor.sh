@@ -90,6 +90,11 @@ check_cmd yq
 check_cmd sqlite3
 echo
 
+echo "Nix development"
+echo "---------------"
+check_cmd nixd
+echo
+
 echo "Flutter"
 echo "------"
 check_cmd flutter
