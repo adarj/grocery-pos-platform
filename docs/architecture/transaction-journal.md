@@ -202,8 +202,9 @@ stream versions, and the unique index. It does not introduce a process-global
 lock or a larger distributed-concurrency framework. SQLite permits one active
 writer, so appends to different transaction streams can briefly contend even
 though their expected versions are independent. The batches in this milestone
-are deliberately short; connection-pool and higher-throughput policy remain
-future composition concerns.
+are deliberately short. Runtime composition now supplies a bounded pool and a
+thread-mapped virtual connection; automatic busy handling and higher-throughput
+policy remain future concerns.
 
 ## Ordered Load and Corruption Detection
 
@@ -256,10 +257,13 @@ layers, while neither the domain nor the journal depends on it:
                domain         and event codec
 ```
 
-`make-transaction-service` receives an already-open, already-migrated SQLite
-connection and an injected catalog lookup. It neither owns a global connection
-nor runs migrations on every command. Bootstrap composition remains
-responsible for opening the configured database and migrating it once.
+`make-transaction-service` receives an already-prepared SQLite connection value
+and an injected catalog lookup. At runtime that value is a virtual connection
+backed by a bounded pool of actual connections. The service neither owns a
+global physical connection nor runs migrations on every command. The process
+composition root opens a dedicated startup connection, migrates the configured
+database once, disconnects that connection, and only then creates request-time
+resources.
 
 The service provides operations to:
 
@@ -359,11 +363,12 @@ checkpoint also does not add:
 - partial/split tender or other new transaction behavior;
 - HTTP or Flutter integration.
 
-Connection paths and ownership remain composition concerns. Persistence code
-does not hard-code `SQLITE_DB_PATH` and does not hide a global mutable database
-connection. Automated tests use isolated temporary databases rather than the
-developer's normal local database. Runtime HTTP composition must still choose
-and test a connection-ownership model. Automatic SQLite busy retry/backoff is
-also deferred; a lock failure is currently an infrastructure failure, and
-tests establish that it cannot produce a false durable success or partial
-command write.
+Persistence code does not hard-code `SQLITE_DB_PATH` and does not hide a global
+mutable database connection. The runtime resolves the configured path once,
+migrates with a dedicated startup connection, and gives request threads actual
+connections through a bounded pool and virtual connection. See
+[Racket POS Core Runtime Composition](racket-runtime.md). Automated tests use
+isolated temporary databases rather than the developer's normal local
+database. Automatic SQLite busy retry/backoff remains deferred; a lock failure
+is currently an infrastructure failure, and tests establish that it cannot
+produce a false durable success or partial command write.

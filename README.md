@@ -135,6 +135,8 @@ Verified capabilities currently include:
   atomic accepted-event/command-outcome persistence;
 * idempotent persistent transaction application service with deterministic
   two-connection concurrency and file-backed restart/retry coverage;
+* Racket runtime composition with startup migration, a bounded SQLite pool,
+  thread-mapped virtual request connections, and explicit shutdown ownership;
 * Flutter Linux ARM64 POS terminal;
 * Flutter widget tests;
 * Flutter-to-Racket local health connection;

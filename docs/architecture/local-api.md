@@ -80,6 +80,21 @@ The service should remain bound to loopback by default unless a future architect
 
 Localhost is still treated as an application trust boundary. Backend authorization and business rules must never rely solely on a Flutter UI hiding a control.
 
+## Runtime Composition
+
+The Racket process now constructs its durable transaction service before the
+HTTP listener starts. Startup resolves `SQLITE_DB_PATH`, migrates and validates
+the journal through schema v2 using a dedicated connection, and then builds a
+bounded SQLite pool plus one thread-mapped virtual connection for request use.
+The service held by the application uses that virtual connection; unrelated
+request threads therefore do not share one physical transaction context.
+
+The server application is created through `make-app` with the transaction
+service as an explicit dependency. Transaction routes are still deliberately
+absent, so the dependency is currently only a composition seam. The detailed
+ownership and shutdown contract is documented in
+[Racket POS Core Runtime Composition](racket-runtime.md).
+
 ## Health Endpoint
 
 ### `GET /health`
@@ -100,6 +115,8 @@ Example:
 The health endpoint confirms that the service is reachable and able to construct its health response.
 
 It does not by itself guarantee that every checkout dependency or peripheral is operational.
+It remains a liveness endpoint rather than a full database or peripheral
+readiness probe.
 
 ## JSON Conventions
 

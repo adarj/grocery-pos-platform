@@ -3,9 +3,10 @@
 (require json
          net/url
          web-server/http
+         "../application/transaction-service.rkt"
          "../support/health.rkt")
 
-(provide app
+(provide make-app
          json-response
          not-found-response)
 
@@ -36,14 +37,21 @@
   (map path/param-path
        (url-path (request-uri req))))
 
-(define (app req)
-  (define method (request-method req))
-  (define path (request-path-segments req))
+(define (make-app transaction-service)
+  (unless (transaction-service? transaction-service)
+    (raise-argument-error
+     'make-app "transaction-service?" transaction-service))
 
-  (cond
-    [(and (equal? method #"GET")
-          (equal? path '("health")))
-     (json-response (current-health))]
+  ;; The service is intentionally captured before transaction routes exist.
+  ;; This establishes explicit composition without turning it into a global.
+  (lambda (req)
+    (define method (request-method req))
+    (define path (request-path-segments req))
 
-    [else
-     (not-found-response)]))
+    (cond
+      [(and (equal? method #"GET")
+            (equal? path '("health")))
+       (json-response (current-health))]
+
+      [else
+       (not-found-response)])))
