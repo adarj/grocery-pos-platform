@@ -168,10 +168,28 @@ composition contract requires an active caller-owned database transaction and
 is enforced using Racket DB's transaction-state predicate.
 
 The public `append-transaction-events!` remains the normal standalone API and
-continues to own one `BEGIN IMMEDIATE` transaction. Future persistence
-composition may prepare first and invoke the same transaction-scoped mechanics
-inside a larger caller-owned transaction. Atomic command-receipt and event
-commit is not yet implemented.
+continues to own one `BEGIN IMMEDIATE` transaction. Persistence composition can
+prepare first and invoke the same transaction-scoped mechanics
+inside a larger caller-owned transaction.
+
+The transaction-command unit of work now uses that composition seam. It
+serializes accepted events before reserving the writer, then uses one
+`BEGIN IMMEDIATE` for the final command-ID lookup, stream-version check, event
+append, and receipt insertion. A receipt-only deterministic outcome uses the
+same writer transaction without appending a transaction fact. If the receipt
+cannot be inserted after events were written, the callback aborts so the event
+inserts roll back rather than committing alone.
+
+`transaction-stream-version/in-transaction` exposes the same current-version
+query to this persistence composition and requires an active caller-owned
+transaction. The event append core repeats the final expected-version check
+before its inserts; both checks therefore occur under the same SQLite writer
+reservation.
+
+The existing transaction service does not use this unit of work yet. The
+atomic persistence primitive is implemented, but application-level duplicate
+avoidance, caller expected-version enforcement, and retry-safe service results
+remain the next integration checkpoint.
 
 The initial design relies on SQLite's local writer serialization, optimistic
 stream versions, and the unique index. It does not introduce a process-global
@@ -325,7 +343,6 @@ checkpoint also does not add:
 - timestamps or event UUIDs;
 - hash chaining or integrity signatures;
 - application/service use of durable receipts for command idempotency;
-- atomic transaction-event and command-receipt commit;
 - outbox or cloud synchronization tables;
 - sale-receipt, tender, inventory, or card-payment tables;
 - partial/split tender or other new transaction behavior;

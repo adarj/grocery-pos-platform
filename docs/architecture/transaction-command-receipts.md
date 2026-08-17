@@ -8,8 +8,10 @@ associates one fully typed
 its original deterministic outcome metadata.
 
 Receipts provide persistence groundwork for later retry deduplication. The
-transaction service does not yet write or consult them, and this checkpoint
-does not yet atomically commit a receipt with transaction events.
+transaction-command unit of work now resolves duplicate identities and can
+atomically commit accepted events plus their receipt, or a receipt-only
+deterministic outcome. The transaction service does not yet use that unit of
+work, so end-to-end retry-safe application behavior remains a later checkpoint.
 
 ## Boundary from transaction truth
 
@@ -59,8 +61,11 @@ The outcome stream version means:
 - already exists: the observed existing version;
 - version conflict: the actual observed version.
 
-This checkpoint validates and persists these fields but does not yet produce
-them from service operations.
+The unit of work also receives a `decision_stream_version`: the actual stream
+version against which the application made its provisional decision. This is
+distinct from the caller-supplied `expected_version` stored in the command.
+For example, a start command can expect version zero while an already-existing
+outcome was decided against actual version four.
 
 ## Migration v2 schema
 
@@ -144,10 +149,45 @@ unchanged.
 
 The low-level insert deliberately does **not** start or commit a SQLite
 transaction. It executes inside the caller's current transaction or SQLite
-autocommit context. This is groundwork for a later unit of work that can append
-transaction events and insert the receipt inside one caller-owned
-`BEGIN IMMEDIATE` transaction. That event-plus-receipt atomicity is not yet
-implemented.
+autocommit context. `commit-transaction-command-outcome!` is the higher-level
+persistence operation that supplies the required transaction ownership when a
+command outcome is committed.
+
+## Atomic command-outcome unit of work
+
+The immutable `transaction-command-commit-plan` contains:
+
+- the fully typed command;
+- the decision stream version;
+- the provisional outcome kind and code;
+- a non-empty ordered event list for an accepted outcome, or no events for a
+  non-accepted outcome.
+
+Those shape rules prevent accepted commands without facts and prevent rejected
+commands from smuggling events into transaction truth.
+
+For an accepted plan, event serialization finishes before the SQLite writer
+transaction begins. The unit of work then owns one `BEGIN IMMEDIATE` and:
+
+1. looks up the global command ID before inspecting the stream;
+2. returns the original receipt for the same structurally equal typed command;
+3. rejects the same ID with a different typed command without writing;
+4. fails closed if an existing receipt is corrupt;
+5. re-reads the current stream version and compares it with
+   `decision_stream_version`;
+6. atomically appends accepted events and inserts their receipt, or inserts a
+   receipt-only deterministic outcome.
+
+If the final stream version changed after the application made its provisional
+decision, the obsolete outcome and any provisional events are discarded. The
+unit of work instead records `version_conflict / stream_version_conflict` at
+the newly observed version. It never reloads or re-decides the command.
+
+An event-append rejection or receipt-insert conflict takes an abnormal rollback
+path so SQLite cannot commit only one half. Genuine SQLite exceptions also
+propagate through `call-with-transaction`, which rolls back the whole unit.
+Transaction events remain authoritative facts; the receipt contains no
+transaction state and replay remains independent of it.
 
 ## Load and corruption handling
 
@@ -188,10 +228,8 @@ infrastructure exceptions, consistent with the transaction event store.
 
 This persistence contract does not yet implement:
 
-- duplicate-first service processing;
-- same-ID/same-command outcome replay;
-- same-ID/different-command rejection;
+- transaction-service use of duplicate-first processing;
 - service expected-version enforcement;
-- atomic event append plus receipt insert;
+- conditional catalog/domain decision avoidance for known retries;
 - HTTP command routes or responses;
 - receipt expiration or cleanup.

@@ -62,6 +62,35 @@
         (db:query-value connection "SELECT COUNT(*) FROM transaction_events")
         0))))
 
+  (test-case "transaction-scoped version reads require and observe caller transaction"
+    (call-with-store
+     (lambda (connection)
+       (check-exn
+        exn:fail:contract?
+        (lambda ()
+          (transaction-stream-version/in-transaction
+           connection "txn-001")))
+
+       (db:call-with-transaction
+        connection
+        (lambda ()
+          (define version-before
+            (transaction-stream-version/in-transaction
+             connection "txn-001"))
+          (define appended
+            (append-prepared-transaction-events/in-transaction!
+             connection
+             "txn-001"
+             0
+             (prepare-transaction-events (list started))))
+          (define version-after
+            (transaction-stream-version/in-transaction
+             connection "txn-001"))
+          (check-equal? version-before 0)
+          (check-pred journal-append-succeeded? appended)
+          (check-equal? version-after 1))
+        #:option 'immediate))))
+
   (test-case "transaction-scoped append remains subject to caller rollback"
     (call-with-store
      (lambda (connection)

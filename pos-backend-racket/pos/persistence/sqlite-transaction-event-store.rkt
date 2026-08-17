@@ -7,6 +7,7 @@
 (provide append-transaction-events!
          prepare-transaction-events
          prepared-transaction-event-batch?
+         transaction-stream-version/in-transaction
          append-prepared-transaction-events/in-transaction!
          load-transaction-events
          journal-append-succeeded?
@@ -105,15 +106,28 @@ SQL
    events
    (map encode-event events)))
 
-(define (current-stream-version connection transaction-id)
-  (db:query-value
-   connection
-   #<<SQL
+(define (transaction-stream-version/in-transaction connection transaction-id)
+  (define who 'transaction-stream-version/in-transaction)
+  (check-connection who connection)
+  (check-transaction-id who transaction-id)
+  (unless (db:in-transaction? connection)
+    (raise-arguments-error
+     who
+     "requires an active caller-owned database transaction"
+     "connection"
+     connection))
+  (define version
+    (db:query-value
+     connection
+     #<<SQL
 SELECT COALESCE(MAX(stream_sequence), 0)
 FROM transaction_events
 WHERE transaction_id = ?
 SQL
-   transaction-id))
+     transaction-id))
+  (unless (exact-nonnegative-integer? version)
+    (error who "journal stream version is invalid: ~e" version))
+  version)
 
 (define (validate-stream-identity transaction-id actual-version events)
   (cond
@@ -168,7 +182,8 @@ SQL
   (define encoded-events
     (prepared-transaction-event-batch-encoded-events prepared-batch))
   (define actual-version
-    (current-stream-version connection transaction-id))
+    (transaction-stream-version/in-transaction
+     connection transaction-id))
   (cond
     [(not (= actual-version expected-version))
      (journal-append-rejected
