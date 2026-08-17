@@ -117,7 +117,8 @@ State-changing POS operations are modeled internally as strict typed commands
 rather than allowing callers to mutate domain state directly. The durable
 application-service boundary now requires the Transaction Command Schema v1
 identity and version fields, although HTTP transaction routes are not yet
-implemented.
+implemented. Future HTTP handlers must preserve the established application
+semantics rather than implementing a separate idempotency policy.
 
 A future HTTP request will need to preserve a command envelope resembling:
 
@@ -134,13 +135,33 @@ A future HTTP request will need to preserve a command envelope resembling:
 }
 ```
 
-### Command IDs
+The exact transport-independent schema is documented in
+[Transaction Command Schema v1](transaction-command-schema.md), and its
+idempotency decision is recorded in
+[ADR-0011](../adr/0011-use-durable-command-receipts-and-expected-stream-versions.md).
 
-Every consequential mutating command should have a unique `command_id`.
+### Command IDs and expected versions
 
-`command_id` provides the basis for idempotency and retry handling.
+Every mutating transaction command has a `command_id` that is globally unique
+within the local register database. A retry of the same logical intent must
+reuse the same command ID; response uncertainty is not a reason to generate a
+replacement ID.
 
-Receiving the same command more than once must not accidentally apply the same business action multiple times.
+The command also carries the caller's `expected_version`, identifying the last
+transaction stream version on which a genuinely new intent was based. The
+backend must not silently replace that precondition with the newest stream
+version.
+
+The same command ID with the same decoded typed command returns its original
+durable outcome and version. The same ID with a different transaction, expected
+version, command type, or typed payload is command-ID reuse and executes no
+business action. Logical equality is based on the decoded typed command, not
+raw JSON bytes.
+
+Known durable retries bypass transaction replay, catalog lookup, domain
+decision, and event append. Two simultaneous first submissions can both finish
+pure optimistic work before either receipt exists, but final atomic persistence
+prevents duplicate accepted facts.
 
 This requirement becomes especially important for:
 
@@ -150,6 +171,19 @@ This requirement becomes especially important for:
 * voids;
 * drawer operations;
 * remote management commands.
+
+### Mutation outcomes and current state
+
+A future mutation response must represent the command's original durable
+outcome kind, stable machine-readable code, and outcome stream version. It must
+not substitute current transaction state for a delayed command retry or expose
+provisional state before persistence succeeds.
+
+Current authoritative transaction state and version are obtained through a
+separate transaction read. HTTP handlers should strictly decode the command,
+delegate to `transaction-service-execute-command`, and map its stable result;
+they must not reimplement duplicate lookup, expected-version checks, domain
+decision, or receipt/event persistence.
 
 ## Transaction State
 

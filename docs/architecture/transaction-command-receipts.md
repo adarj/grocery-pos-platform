@@ -14,6 +14,9 @@ deterministic outcome. The transaction service now uses that unit of work and
 performs an early durable receipt lookup before transaction recovery or domain
 decision, making its typed-command mutation boundary retry-safe.
 
+The architectural decision and its tradeoffs are recorded in
+[ADR-0011](../adr/0011-use-durable-command-receipts-and-expected-stream-versions.md).
+
 ## Boundary from transaction truth
 
 The two durable records have different meanings:

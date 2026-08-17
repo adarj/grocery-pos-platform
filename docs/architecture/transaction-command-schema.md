@@ -9,7 +9,9 @@ It defines transport-independent command values and their logical identity. It
 does not define HTTP routes. The persistent transaction application service
 accepts these typed values through one idempotent mutation boundary. The
 separate [Transaction Command Receipts](transaction-command-receipts.md)
-contract uses this schema as its durable command representation.
+contract uses this schema as its durable command representation. The governing
+identity and retry decision is recorded in
+[ADR-0011](../adr/0011-use-durable-command-receipts-and-expected-stream-versions.md).
 
 ## Purpose and boundary
 
@@ -43,7 +45,9 @@ Every Schema v1 command is a JSON object containing exactly these fields:
 ```
 
 - `schema_version` is the exact JSON integer `1`.
-- `command_id` is a non-empty opaque string identifying one logical intent.
+- `command_id` is a non-empty opaque string identifying one logical intent. The
+  application/persistence contract treats it as globally unique within the
+  local register database.
 - `transaction_id` is a non-empty opaque string naming the target transaction.
 - `expected_version` is an exact nonnegative integer supplied by the caller.
 - `command_type` is one of the four strings defined below.

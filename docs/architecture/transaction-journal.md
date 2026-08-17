@@ -20,6 +20,12 @@ Racket replay   = authoritative transaction-state reconstruction
 This keeps transaction meaning in the Racket domain and durability in SQLite,
 consistent with the repository's architecture boundaries.
 
+The authoritative event-history decision is recorded in
+[ADR-0010](../adr/0010-use-append-only-event-journal-for-transaction-truth.md).
+The command retry and concurrency decision that safely coordinates with this
+journal is recorded in
+[ADR-0011](../adr/0011-use-durable-command-receipts-and-expected-stream-versions.md).
+
 ## Three Representations
 
 The implementation deliberately separates three related representations:
