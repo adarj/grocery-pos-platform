@@ -6,8 +6,9 @@ Transaction Command Schema v1 defines the stable JSON representation of the
 four mutating commands supported by the current cash-sale transaction slice.
 
 It defines transport-independent command values and their logical identity. It
-does not define HTTP routes, durable command receipts, or idempotent service
-processing.
+does not define HTTP routes or idempotent service processing. The separate
+[Transaction Command Receipts](transaction-command-receipts.md) contract uses
+this schema as its durable command representation.
 
 ## Purpose and boundary
 
@@ -172,14 +173,25 @@ invalid-money
 Schema evolution must use an explicit new schema version rather than silently
 changing the meaning of Schema v1.
 
+## Durable receipt relationship
+
+Migration v2 can store a Schema v1 command inside a durable command receipt.
+The receipt duplicates selected envelope values for lookup and diagnostics,
+but load strictly decodes `command_json` through this codec and rejects any
+metadata disagreement. Typed command equality remains the request-identity
+rule; raw JSON formatting is not identity.
+
+The receipt is idempotency and outcome metadata. It does not make a requested
+command an accepted transaction fact, and transaction replay does not consult
+receipts.
+
 ## Deliberately deferred
 
 Schema v1 does not implement or define:
 
-- SQLite command receipts;
-- duplicate-command lookup;
+- application-level duplicate-command orchestration;
 - service-level expected-version enforcement;
-- durable command outcomes;
+- application production and reuse of durable receipt outcomes;
 - HTTP request or response mappings;
 - server-side command-ID generation;
 - cryptographic request hashes or canonical JSON.

@@ -67,19 +67,29 @@ ON transaction_events (transaction_id, stream_sequence);
 
 The implementation also uses `typeof(...)` checks so values are stored with
 the intended SQLite storage classes. Migration 1 is recorded as
-`create_transaction_events`. Re-running migration against version 1 is safe
-and validates the exact recorded `(version, name)` migration identity, the
-expected table, and an actually unique stream index over exactly
-`(transaction_id, stream_sequence)`. Unknown or inconsistent migration
-histories and drifted index definitions fail rather than being silently
-adopted.
+`create_transaction_events`.
+
+Migration version 2 creates `transaction_command_receipts`, the durable store
+for typed command identity and original deterministic outcome metadata. Its
+full schema and persistence contract are documented in
+[Transaction Command Receipts](transaction-command-receipts.md). These
+receipts are not transaction facts and are never replayed as transaction
+state.
+
+The migration runner treats recorded history as an exact prefix of the known
+ordered migration list. A fresh database applies versions 1 and 2. A real v1
+database validates and preserves its event schema and rows before applying only
+version 2. A correct v2 database is validated without schema mutation. Unknown,
+skipped, reordered, renamed, or drifted migration state fails rather than being
+silently repaired. This ordered-prefix mechanism can extend to migration 3
+without adding another historical-version conditional.
 
 Table creation is not hidden inside append or load. Application composition is
 responsible for running migrations explicitly before using the store.
 
-No recorded timestamp is present in version 1. A future timestamp would be
-persistence metadata only; it must never determine event order or affect
-replay.
+No recorded timestamp is present in either current table. A future timestamp
+would be persistence metadata only; it must never determine event order or
+affect replay.
 
 ## Stream Sequence and Identity
 
@@ -282,11 +292,12 @@ The persistent service is not yet exposed through HTTP or Flutter. This
 checkpoint also does not add:
 
 - authoritative snapshots or projections;
-- timestamps, event UUIDs, or command IDs;
+- timestamps or event UUIDs;
 - hash chaining or integrity signatures;
-- command idempotency;
+- application/service use of durable receipts for command idempotency;
+- atomic transaction-event and command-receipt commit;
 - outbox or cloud synchronization tables;
-- receipt, tender, inventory, or card-payment tables;
+- sale-receipt, tender, inventory, or card-payment tables;
 - partial/split tender or other new transaction behavior;
 - HTTP or Flutter integration.
 
