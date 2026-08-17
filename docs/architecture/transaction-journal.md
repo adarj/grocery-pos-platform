@@ -143,6 +143,36 @@ The batch is then inserted at consecutive sequence numbers in one SQLite
 transaction. If any insert fails, SQLite rolls back every insert from that
 batch and preserves the earlier stream unchanged.
 
+### Internal transaction ownership split
+
+The public append operation is implemented as:
+
+```text
+validate arguments and reject an empty list
+  -> prepare and serialize the complete event batch
+  -> BEGIN IMMEDIATE
+  -> transaction-scoped version/identity checks and inserts
+  -> COMMIT
+```
+
+`prepare-transaction-events` accepts only a non-empty list of domain events and
+returns an opaque prepared batch. Its constructor and encoded fields are not
+public, so persistence composition code cannot supply arbitrary schema
+versions, event types, or event JSON. Preparation performs no database access
+or transaction management.
+
+`append-prepared-transaction-events/in-transaction!` performs the final stream
+version read, identity checks, sequence allocation, and inserts without
+starting, committing, or rolling back a transaction. Its explicitly internal
+composition contract requires an active caller-owned database transaction and
+is enforced using Racket DB's transaction-state predicate.
+
+The public `append-transaction-events!` remains the normal standalone API and
+continues to own one `BEGIN IMMEDIATE` transaction. Future persistence
+composition may prepare first and invoke the same transaction-scoped mechanics
+inside a larger caller-owned transaction. Atomic command-receipt and event
+commit is not yet implemented.
+
 The initial design relies on SQLite's local writer serialization, optimistic
 stream versions, and the unique index. It does not introduce a process-global
 lock or a larger distributed-concurrency framework. SQLite permits one active
