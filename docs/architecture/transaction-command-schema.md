@@ -6,9 +6,10 @@ Transaction Command Schema v1 defines the stable JSON representation of the
 four mutating commands supported by the current cash-sale transaction slice.
 
 It defines transport-independent command values and their logical identity. It
-does not define HTTP routes or idempotent service processing. The separate
-[Transaction Command Receipts](transaction-command-receipts.md) contract uses
-this schema as its durable command representation.
+does not define HTTP routes. The persistent transaction application service
+accepts these typed values through one idempotent mutation boundary. The
+separate [Transaction Command Receipts](transaction-command-receipts.md)
+contract uses this schema as its durable command representation.
 
 ## Purpose and boundary
 
@@ -19,7 +20,7 @@ not in authoritative transaction state:
 untrusted JSON
     -> strict Transaction Command Schema v1 decoding
     -> immutable typed Racket command
-    -> future application command processing
+    -> idempotent application command processing
 ```
 
 Transaction events remain the accepted business facts from which authoritative
@@ -189,9 +190,6 @@ receipts.
 
 Schema v1 does not implement or define:
 
-- application-level duplicate-command orchestration;
-- service-level expected-version enforcement;
-- application production and reuse of durable receipt outcomes;
 - HTTP request or response mappings;
 - server-side command-ID generation;
 - cryptographic request hashes or canonical JSON.

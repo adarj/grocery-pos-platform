@@ -113,15 +113,21 @@ Clients must tolerate JSON object field ordering differences.
 
 ## Command Model
 
-State-changing POS operations should be modeled as explicit commands rather than allowing clients to mutate domain state directly.
+State-changing POS operations are modeled internally as strict typed commands
+rather than allowing callers to mutate domain state directly. The durable
+application-service boundary now requires the Transaction Command Schema v1
+identity and version fields, although HTTP transaction routes are not yet
+implemented.
 
-A future command may resemble:
+A future HTTP request will need to preserve a command envelope resembling:
 
 ```json
 {
+  "schema_version": 1,
   "command_id": "cmd_01ABC...",
   "transaction_id": "txn_01ABC...",
-  "command": "scan_barcode",
+  "expected_version": 2,
+  "command_type": "scan_barcode",
   "payload": {
     "barcode": "049000001234"
   }
@@ -293,9 +299,9 @@ Currently implemented:
 GET /health
 ```
 
-The in-memory transaction domain and persistent transaction application
-service are implemented, but they are deliberately not exposed as HTTP routes
-yet. A transaction API contract will be introduced as a separately scoped,
-tested checkpoint rather than as a large speculative REST surface.
+The in-memory transaction domain and durable idempotent typed-command
+application service are implemented, but they are deliberately not exposed as
+HTTP routes yet. A transaction API contract will be introduced as a separately
+scoped, tested checkpoint rather than as a large speculative REST surface.
 
 The domain model should drive the interface, not the reverse.

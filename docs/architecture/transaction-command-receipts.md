@@ -7,11 +7,12 @@ associates one fully typed
 [Transaction Command Schema v1](transaction-command-schema.md) command with
 its original deterministic outcome metadata.
 
-Receipts provide persistence groundwork for later retry deduplication. The
-transaction-command unit of work now resolves duplicate identities and can
+Receipts provide durable retry deduplication metadata. The transaction-command
+unit of work resolves duplicate identities and can
 atomically commit accepted events plus their receipt, or a receipt-only
-deterministic outcome. The transaction service does not yet use that unit of
-work, so end-to-end retry-safe application behavior remains a later checkpoint.
+deterministic outcome. The transaction service now uses that unit of work and
+performs an early durable receipt lookup before transaction recovery or domain
+decision, making its typed-command mutation boundary retry-safe.
 
 ## Boundary from transaction truth
 
@@ -189,6 +190,40 @@ propagate through `call-with-transaction`, which rolls back the whole unit.
 Transaction events remain authoritative facts; the receipt contains no
 transaction state and replay remains independent of it.
 
+## Application service behavior
+
+`transaction-service-execute-command` is the only public transaction mutation
+entry point. It accepts an immutable typed Transaction Command Schema v1 value.
+The prior identity-free start, scan, tender, and completion functions are no
+longer exported.
+
+For every mutation, the service first loads the durable receipt by global
+command ID:
+
+- the same structurally equal typed command returns the original receipt before
+  journal load, replay, catalog lookup, or domain decision;
+- a different typed command with the same ID returns command-ID reuse without
+  transaction work;
+- corrupt receipt data returns a recovery failure and stops processing;
+- only an unused command ID proceeds to transaction recovery and decision.
+
+For a genuinely new non-start command, the caller's `expected_version` must
+equal the recovered journal version. A mismatch produces the deterministic
+`stale_expected_version` outcome without domain or catalog work. Start commands
+require expected version zero; a nonzero value produces
+`invalid_expected_version` after the real stream version has been observed.
+
+Fresh commands delegate transaction validity to the existing pure domain
+operations. The application explicitly maps their closed rejection symbols to
+stable snake-case receipt codes. Every deterministic accepted or rejected
+decision becomes a commit plan and is passed to the atomic unit of work. The
+service does not append events or insert receipts independently.
+
+Mutation success contains only the durable original receipt. It does not expose
+a transaction snapshot or whether the receipt was newly committed versus found
+for a retry. Current authoritative state remains available separately through
+`transaction-service-load-transaction`, which reads only the event journal.
+
 ## Load and corruption handling
 
 Lookup by global command ID returns found, not-found, or failed. Not-found is a
@@ -228,8 +263,5 @@ infrastructure exceptions, consistent with the transaction event store.
 
 This persistence contract does not yet implement:
 
-- transaction-service use of duplicate-first processing;
-- service expected-version enforcement;
-- conditional catalog/domain decision avoidance for known retries;
 - HTTP command routes or responses;
 - receipt expiration or cleanup.

@@ -1,96 +1,91 @@
 #lang racket
 
 (require (prefix-in db: db)
-         "../domain/money.rkt"
+         "transaction-command-receipt.rkt"
+         "transaction-command.rkt"
          "../domain/transaction.rkt"
-         "../persistence/sqlite-transaction-event-store.rkt")
+         "../persistence/sqlite-transaction-event-store.rkt"
+         "../persistence/transaction-command-receipt-store.rkt"
+         "../persistence/transaction-command-unit-of-work.rkt")
 
 (provide make-transaction-service
          transaction-service?
          transaction-service-load-transaction
-         transaction-service-start-transaction
-         transaction-service-scan-barcode
-         transaction-service-tender-cash
-         transaction-service-complete-transaction
+         transaction-service-execute-command
          transaction-service-success?
          transaction-service-success-transaction
          transaction-service-success-version
-         transaction-service-domain-rejected?
-         transaction-service-domain-rejected-code
-         transaction-service-domain-rejected-transaction
-         transaction-service-domain-rejected-version
          transaction-service-not-found?
          transaction-service-not-found-transaction-id
-         transaction-service-already-exists?
-         transaction-service-already-exists-transaction-id
-         transaction-service-already-exists-version
-         transaction-service-stream-conflict?
-         transaction-service-stream-conflict-transaction-id
-         transaction-service-stream-conflict-expected-version
-         transaction-service-stream-conflict-actual-version
-         transaction-service-persistence-failed?
-         transaction-service-persistence-failed-transaction-id
-         transaction-service-persistence-failed-code
-         transaction-service-persistence-failed-detail
          transaction-service-recovery-failed?
          transaction-service-recovery-failed-transaction-id
          transaction-service-recovery-failed-stage
          transaction-service-recovery-failed-code
          transaction-service-recovery-failed-position
          transaction-service-recovery-failed-detail
-         transaction-service-recovery-failed-message)
+         transaction-service-recovery-failed-message
+         transaction-service-command-resolved?
+         transaction-service-command-resolved-receipt
+         transaction-service-command-id-reused?
+         transaction-service-command-id-reused-command-id
+         transaction-service-command-persistence-failed?
+         transaction-service-command-persistence-failed-command-id
+         transaction-service-command-persistence-failed-code
+         transaction-service-command-persistence-failed-detail
+         transaction-service-command-persistence-failed-message)
 
-(struct transaction-service (connection load-events append-events!))
+(struct transaction-service
+  (connection catalog-lookup load-events load-receipt commit-command!))
 
+;; Query results expose authoritative reconstructed transaction state.
 (struct transaction-service-success (transaction version)
   #:transparent)
 
-(struct transaction-service-domain-rejected (code transaction version)
-  #:transparent)
-
 (struct transaction-service-not-found (transaction-id)
-  #:transparent)
-
-(struct transaction-service-already-exists (transaction-id version)
-  #:transparent)
-
-(struct transaction-service-stream-conflict
-  (transaction-id expected-version actual-version)
-  #:transparent)
-
-(struct transaction-service-persistence-failed (transaction-id code detail)
   #:transparent)
 
 (struct transaction-service-recovery-failed
   (transaction-id stage code position detail message)
   #:transparent)
 
-(struct accepted-domain-decision (transaction events)
+;; Mutation results expose only the durable command outcome. In particular, a
+;; resolved result does not reveal whether it was newly committed or recovered
+;; for an identical retry.
+(struct transaction-service-command-resolved (receipt)
   #:transparent)
 
-(struct rejected-domain-decision (code transaction)
+(struct transaction-service-command-id-reused (command-id)
   #:transparent)
+
+(struct transaction-service-command-persistence-failed
+  (command-id code detail message)
+  #:transparent)
+
+(define (check-procedure who value argument-name)
+  (unless (procedure? value)
+    (raise-arguments-error
+     who
+     "expected a procedure"
+     argument-name
+     value)))
 
 (define (make-transaction-service
          connection
+         #:catalog-lookup catalog-lookup
          #:load-events [load-events load-transaction-events]
-         #:append-events! [append-events! append-transaction-events!])
+         #:load-receipt
+         [load-receipt load-transaction-command-receipt]
+         #:commit-command!
+         [commit-command! commit-transaction-command-outcome!])
+  (define who 'make-transaction-service)
   (unless (db:connection? connection)
-    (raise-argument-error
-     'make-transaction-service
-     "connection?"
-     connection))
-  (unless (procedure? load-events)
-    (raise-argument-error
-     'make-transaction-service
-     "procedure?"
-     load-events))
-  (unless (procedure? append-events!)
-    (raise-argument-error
-     'make-transaction-service
-     "procedure?"
-     append-events!))
-  (transaction-service connection load-events append-events!))
+    (raise-argument-error who "connection?" connection))
+  (check-procedure who catalog-lookup "catalog-lookup")
+  (check-procedure who load-events "load-events")
+  (check-procedure who load-receipt "load-receipt")
+  (check-procedure who commit-command! "commit-command!")
+  (transaction-service
+   connection catalog-lookup load-events load-receipt commit-command!))
 
 (define (check-service who service)
   (unless (transaction-service? service)
@@ -152,167 +147,233 @@
      (error who "event store returned an unsupported load result: ~e"
             journal-result)]))
 
-(define (commit-domain-decision service
-                                transaction-id
-                                expected-version
-                                decision)
-  (define events
-    (accepted-domain-decision-events decision))
-  (define provisional-transaction
-    (accepted-domain-decision-transaction decision))
-  (define append-result
-    ((transaction-service-append-events! service)
-     (transaction-service-connection service)
-     transaction-id
-     expected-version
-     events))
-  (cond
-    [(journal-append-succeeded? append-result)
-     (define committed-version
-       (journal-append-succeeded-new-version append-result))
-     (define expected-committed-version
-       (+ expected-version (length events)))
-     (if (= committed-version expected-committed-version)
-         (transaction-service-success
-          provisional-transaction
-          committed-version)
-         (transaction-service-persistence-failed
-          transaction-id
-          'unexpected-stream-version
-          committed-version))]
-    [(journal-append-rejected? append-result)
-     (define code
-       (journal-append-rejected-code append-result))
-     (define actual-version
-       (journal-append-rejected-actual-version append-result))
-     (if (eq? code 'stream-version-conflict)
-         (transaction-service-stream-conflict
-          transaction-id
-          expected-version
-          actual-version)
-         (transaction-service-persistence-failed
-          transaction-id
-          code
-          actual-version))]
+(define (domain-rejection-code->outcome-code code)
+  (case code
+    [(unknown-barcode) "unknown_barcode"]
+    [(invalid-transaction-state) "invalid_transaction_state"]
+    [(empty-transaction) "empty_transaction"]
+    [(insufficient-tender) "insufficient_tender"]
     [else
-     (error 'commit-domain-decision
-            "event store returned an unsupported append result: ~e"
-            append-result)]))
+     (error
+      'domain-rejection-code->outcome-code
+      "domain returned an unmapped durable rejection code: ~e"
+      code)]))
 
-(define (transaction-service-start-transaction service transaction-id)
-  (define who 'transaction-service-start-transaction)
-  (check-service who service)
-  (check-transaction-id who transaction-id)
+(define (accepted-plan command decision-version events)
+  (transaction-command-commit-plan
+   command decision-version 'accepted "accepted" events))
 
-  (define current
-    (transaction-service-load-transaction service transaction-id))
+(define (receipt-only-plan command decision-version kind code)
+  (transaction-command-commit-plan
+   command decision-version kind code '()))
+
+(define (map-commit-result command result)
   (cond
-    [(transaction-service-not-found? current)
-     (define domain-result
-       (start-transaction transaction-id))
-     (commit-domain-decision
-      service
-      transaction-id
-      0
-      (accepted-domain-decision
-       (start-accepted-transaction domain-result)
-       (start-accepted-events domain-result)))]
-    [(transaction-service-success? current)
-     (transaction-service-already-exists
-      transaction-id
-      (transaction-service-success-version current))]
-    [else current]))
+    [(transaction-command-commit-resolved? result)
+     (transaction-service-command-resolved
+      (transaction-command-commit-resolved-receipt result))]
+    [(transaction-command-commit-id-reused? result)
+     (transaction-service-command-id-reused
+      (transaction-command-commit-id-reused-command-id result))]
+    [(transaction-command-commit-failed? result)
+     (transaction-service-command-persistence-failed
+      (transaction-command-command-id command)
+      (transaction-command-commit-failed-code result)
+      (transaction-command-commit-failed-detail result)
+      (transaction-command-commit-failed-message result))]
+    [else
+     (error
+      'map-commit-result
+      "command unit of work returned an unsupported result: ~e"
+      result)]))
 
-(define (persist-existing-command service transaction-id decide)
+(define (commit-plan service plan)
+  (define command
+    (transaction-command-commit-plan-command plan))
+  (map-commit-result
+   command
+   ((transaction-service-commit-command! service)
+    (transaction-service-connection service)
+    plan)))
+
+(define (dispatch-start-command service command)
+  ;; Even a structurally valid start command with a nonzero expected version
+  ;; must observe the real stream before its deterministic receipt is frozen.
   (define current
-    (transaction-service-load-transaction service transaction-id))
+    (transaction-service-load-transaction
+     service
+     (transaction-command-transaction-id command)))
   (cond
-    [(transaction-service-success? current)
-     (define current-transaction
-       (transaction-service-success-transaction current))
-     (define current-version
-       (transaction-service-success-version current))
-     (define decision (decide current-transaction))
+    [(transaction-service-recovery-failed? current) current]
+    [else
+     (define actual-version
+       (if (transaction-service-not-found? current)
+           0
+           (transaction-service-success-version current)))
      (cond
-       [(accepted-domain-decision? decision)
-        (commit-domain-decision
+       [(not (zero? (transaction-command-expected-version command)))
+        (commit-plan
          service
-         transaction-id
-         current-version
-         decision)]
-       [(rejected-domain-decision? decision)
-        (transaction-service-domain-rejected
-         (rejected-domain-decision-code decision)
-         (rejected-domain-decision-transaction decision)
-         current-version)]
+         (receipt-only-plan
+          command
+          actual-version
+          'version-conflict
+          "invalid_expected_version"))]
+       [(transaction-service-success? current)
+        (commit-plan
+         service
+         (receipt-only-plan
+          command
+          actual-version
+          'already-exists
+          "transaction_already_exists"))]
+       [(transaction-service-not-found? current)
+        (define result
+          (start-transaction
+           (transaction-command-transaction-id command)))
+        (commit-plan
+         service
+         (accepted-plan command 0 (start-accepted-events result)))]
        [else
-        (error 'persist-existing-command
-               "domain adapter returned an unsupported decision: ~e"
-               decision)])]
-    [else current]))
+        (error
+         'dispatch-start-command
+         "transaction query returned an unsupported result: ~e"
+         current)])]))
 
-(define (transaction-service-scan-barcode service
-                                          transaction-id
-                                          barcode
-                                          catalog-lookup)
-  (define who 'transaction-service-scan-barcode)
+(define (scan-command->plan service command transaction version)
+  (define result
+    (scan-barcode
+     transaction
+     (scan-barcode-command-barcode command)
+     (transaction-service-catalog-lookup service)))
+  (if (scan-accepted? result)
+      (accepted-plan command version (scan-accepted-events result))
+      (receipt-only-plan
+       command
+       version
+       'domain-rejected
+       (domain-rejection-code->outcome-code
+        (scan-rejected-code result)))))
+
+(define (tender-command->plan command transaction version)
+  (define result
+    (tender-cash transaction (tender-cash-command-amount command)))
+  (if (tender-accepted? result)
+      (accepted-plan command version (tender-accepted-events result))
+      (receipt-only-plan
+       command
+       version
+       'domain-rejected
+       (domain-rejection-code->outcome-code
+        (tender-rejected-code result)))))
+
+(define (completion-command->plan command transaction version)
+  (define result
+    (complete-transaction transaction))
+  (if (completion-accepted? result)
+      (accepted-plan command version (completion-accepted-events result))
+      (receipt-only-plan
+       command
+       version
+       'domain-rejected
+       (domain-rejection-code->outcome-code
+        (completion-rejected-code result)))))
+
+(define (fresh-existing-command-plan service command transaction version)
+  (cond
+    [(scan-barcode-command? command)
+     (scan-command->plan service command transaction version)]
+    [(tender-cash-command? command)
+     (tender-command->plan command transaction version)]
+    [(complete-transaction-command? command)
+     (completion-command->plan command transaction version)]
+    [else
+     (error
+      'fresh-existing-command-plan
+      "unsupported existing-transaction command: ~e"
+      command)]))
+
+(define (dispatch-existing-transaction-command service command)
+  (define current
+    (transaction-service-load-transaction
+     service
+     (transaction-command-transaction-id command)))
+  (cond
+    [(transaction-service-recovery-failed? current) current]
+    [(transaction-service-not-found? current)
+     (commit-plan
+      service
+      (receipt-only-plan
+       command 0 'not-found "transaction_not_found"))]
+    [(transaction-service-success? current)
+     (define actual-version
+       (transaction-service-success-version current))
+     (cond
+       [(not (= actual-version
+                (transaction-command-expected-version command)))
+        (commit-plan
+         service
+         (receipt-only-plan
+          command
+          actual-version
+          'version-conflict
+          "stale_expected_version"))]
+       [else
+        (commit-plan
+         service
+         (fresh-existing-command-plan
+          service
+          command
+          (transaction-service-success-transaction current)
+          actual-version))])]
+    [else
+     (error
+      'dispatch-existing-transaction-command
+      "transaction query returned an unsupported result: ~e"
+      current)]))
+
+(define (dispatch-new-command service command)
+  (if (start-transaction-command? command)
+      (dispatch-start-command service command)
+      (dispatch-existing-transaction-command service command)))
+
+(define (receipt-recovery-failure command result)
+  (transaction-service-recovery-failed
+   (transaction-command-transaction-id command)
+   'receipt-load
+   (receipt-load-failed-code result)
+   #f
+   (receipt-load-failed-detail result)
+   (receipt-load-failed-message result)))
+
+(define (transaction-service-execute-command service command)
+  (define who 'transaction-service-execute-command)
   (check-service who service)
-  (check-transaction-id who transaction-id)
-  (unless (string? barcode)
-    (raise-argument-error who "string?" barcode))
-  (unless (procedure? catalog-lookup)
-    (raise-argument-error who "procedure?" catalog-lookup))
+  (unless (transaction-command? command)
+    (raise-argument-error who "transaction-command?" command))
 
-  (persist-existing-command
-   service
-   transaction-id
-   (lambda (current-transaction)
-     (define result
-       (scan-barcode current-transaction barcode catalog-lookup))
-     (if (scan-accepted? result)
-         (accepted-domain-decision
-          (scan-accepted-transaction result)
-          (scan-accepted-events result))
-         (rejected-domain-decision
-          (scan-rejected-code result)
-          (scan-rejected-transaction result))))))
-
-(define (transaction-service-tender-cash service transaction-id amount)
-  (define who 'transaction-service-tender-cash)
-  (check-service who service)
-  (check-transaction-id who transaction-id)
-  (unless (money? amount)
-    (raise-argument-error who "money?" amount))
-
-  (persist-existing-command
-   service
-   transaction-id
-   (lambda (current-transaction)
-     (define result
-       (tender-cash current-transaction amount))
-     (if (tender-accepted? result)
-         (accepted-domain-decision
-          (tender-accepted-transaction result)
-          (tender-accepted-events result))
-         (rejected-domain-decision
-          (tender-rejected-code result)
-          (tender-rejected-transaction result))))))
-
-(define (transaction-service-complete-transaction service transaction-id)
-  (define who 'transaction-service-complete-transaction)
-  (check-service who service)
-  (check-transaction-id who transaction-id)
-
-  (persist-existing-command
-   service
-   transaction-id
-   (lambda (current-transaction)
-     (define result
-       (complete-transaction current-transaction))
-     (if (completion-accepted? result)
-         (accepted-domain-decision
-          (completion-accepted-transaction result)
-          (completion-accepted-events result))
-         (rejected-domain-decision
-          (completion-rejected-code result)
-          (completion-rejected-transaction result))))))
+  ;; Known identity is resolved before journal recovery, catalog access, or
+  ;; domain decision. The unit of work repeats this check under the final
+  ;; writer transaction to close the race after this optimistic read.
+  (define receipt-result
+    ((transaction-service-load-receipt service)
+     (transaction-service-connection service)
+     (transaction-command-command-id command)))
+  (cond
+    [(receipt-load-found? receipt-result)
+     (define existing
+       (receipt-load-found-receipt receipt-result))
+     (if (equal? (transaction-command-receipt-command existing)
+                 command)
+         (transaction-service-command-resolved existing)
+         (transaction-service-command-id-reused
+          (transaction-command-command-id command)))]
+    [(receipt-load-failed? receipt-result)
+     (receipt-recovery-failure command receipt-result)]
+    [(receipt-load-not-found? receipt-result)
+     (dispatch-new-command service command)]
+    [else
+     (error
+      who
+      "receipt store returned an unsupported load result: ~e"
+      receipt-result)]))

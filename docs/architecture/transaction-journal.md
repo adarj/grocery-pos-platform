@@ -186,10 +186,10 @@ transaction. The event append core repeats the final expected-version check
 before its inserts; both checks therefore occur under the same SQLite writer
 reservation.
 
-The existing transaction service does not use this unit of work yet. The
-atomic persistence primitive is implemented, but application-level duplicate
-avoidance, caller expected-version enforcement, and retry-safe service results
-remain the next integration checkpoint.
+The transaction service uses this unit of work for every mutation. It performs
+an optimistic early receipt lookup to avoid repeating work for a known command,
+while the unit of work repeats identity and version validation inside the final
+writer transaction to close races.
 
 The initial design relies on SQLite's local writer serialization, optimistic
 stream versions, and the unique index. It does not introduce a process-global
@@ -251,68 +251,57 @@ layers, while neither the domain nor the journal depends on it:
 ```
 
 `make-transaction-service` receives an already-open, already-migrated SQLite
-connection. It neither owns a global connection nor runs migrations on every
-command. Bootstrap composition remains responsible for opening the configured
-database and migrating it once.
+connection and an injected catalog lookup. It neither owns a global connection
+nor runs migrations on every command. Bootstrap composition remains
+responsible for opening the configured database and migrating it once.
 
 The service provides operations to:
 
-- start a transaction;
-- load/recover a transaction;
-- scan a barcode;
-- tender sufficient cash;
-- complete a paid transaction.
+- execute one of the four typed mutating transaction commands;
+- load/recover current authoritative transaction state.
 
-### Load, Replay, Decide, Append
+### Duplicate, Recover, Decide, Commit
 
-An existing-transaction command follows this sequence:
+A mutation follows this sequence:
 
 ```text
-load ordered journal stream
-  -> decode and validate journal records
-  -> replay domain events
-  -> decide command against recovered state
-     -> rejected: append nothing
-     -> accepted: append emitted events at loaded stream version
-        -> append succeeds: report committed state
-        -> append fails/conflicts: report failure, not provisional state
+load receipt by command_id
+  -> known equal command: return original receipt
+  -> known different command: reject command-ID reuse
+  -> corrupt receipt: fail recovery
+  -> unused ID:
+       load and replay ordered journal stream
+         -> enforce caller expected_version
+         -> decide through the pure domain when fresh
+         -> create accepted or receipt-only commit plan
+         -> atomically commit through the command unit of work
 ```
 
-Starting a transaction uses the corresponding empty-stream flow. It verifies
-that load reports no existing stream, asks the domain for the
-`transaction-started` decision, and appends at expected version 0. An existing
-stream is never overwritten or reset.
+The unit of work repeats command-ID and stream-version checks under
+`BEGIN IMMEDIATE`. A final race can replace any provisional outcome with a
+durable `stream_version_conflict`; the service does not reload, retry, or
+re-decide automatically.
 
-The state produced by an accepted domain command is **provisional** until the
-exact emitted event list has been committed. The service returns that state as
-success only after append succeeds. It is safe to avoid a redundant post-write
-reload because the domain already produced the state by applying those exact
-events through the same reducer used for replay. Tests separately prove that a
-fresh load and replay returns an equal transaction.
+The application never silently substitutes the latest stream version for a
+new command's caller-supplied expected version. A stale command becomes a
+receipt-only `stale_expected_version` outcome without domain or catalog work.
 
 ### Result Classes
 
-Explicit service results distinguish:
+Mutation results distinguish:
 
-- committed success, containing transaction state and committed stream
-  version;
-- domain rejection, containing the business rejection code, unchanged
-  recovered state, and unchanged version;
-- transaction not found;
-- transaction already exists;
-- optimistic stream-version conflict;
-- non-conflict persistence rejection;
-- journal-load or replay recovery failure.
+- resolved command containing its durable original receipt;
+- command-ID reuse;
+- stable command persistence failure;
+- receipt/journal/replay recovery failure.
 
-A domain rejection means the command was understood and business rules refused
-it; no domain event is appended. Corrupt data, invalid replay history, and
-concurrent writes are not presented as business rejections.
+Mutation results never contain provisional transaction state or a duplicate
+flag. A deterministic domain rejection is represented by its durable receipt
+and writes no transaction event.
 
-When append reports `stream-version-conflict`, the service exposes the expected
-and actual versions without the provisional accepted transaction. It does not
-silently reload or rerun the command. The caller must explicitly recover and
-decide what to do next. This rule prevents future commands involving external
-effects or user-visible choices from being repeated automatically.
+Transaction queries retain their separate result classes for recovered state,
+not-found, and recovery failure. Querying transaction state does not read
+command receipts, preserving the journal as transaction truth.
 
 Journal decoding/corruption failures identify the load stage and retain stable
 journal diagnostics. A syntactically valid journal whose events violate the
@@ -322,11 +311,12 @@ operational exceptions continue to propagate as infrastructure failures.
 
 ### Catalog Boundary and Restart Recovery
 
-The service does not hard-code a catalog. A scan receives a current catalog
-lookup function explicitly. The lookup is used once by the live domain
-decision; an accepted `sale-item-added` event persists the sale-time barcode,
-description, and exact unit price snapshot. Historical load and replay have no
-catalog dependency.
+The service does not hard-code a catalog. Composition injects the current
+catalog lookup when constructing the service. A fresh, version-matched scan
+uses it through the live domain decision; an accepted `sale-item-added` event
+persists the sale-time barcode, description, and exact unit price snapshot.
+Known retries, command-ID reuse, missing transactions, stale commands, and
+historical replay do not consult the catalog.
 
 Process restart recovery opens the same SQLite database using a new connection,
 loads and decodes the stream, and replays it from the first event. No mutable
@@ -342,7 +332,6 @@ checkpoint also does not add:
 - authoritative snapshots or projections;
 - timestamps or event UUIDs;
 - hash chaining or integrity signatures;
-- application/service use of durable receipts for command idempotency;
 - outbox or cloud synchronization tables;
 - sale-receipt, tender, inventory, or card-payment tables;
 - partial/split tender or other new transaction behavior;
