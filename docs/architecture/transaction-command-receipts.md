@@ -224,6 +224,36 @@ a transaction snapshot or whether the receipt was newly committed versus found
 for a retry. Current authoritative state remains available separately through
 `transaction-service-load-transaction`, which reads only the event journal.
 
+## Concurrent submissions and uncertain caller observations
+
+The service's early receipt lookup is optimistic. Two simultaneous first
+submissions can both observe an unused command ID, recover the same stream
+version, and form provisional decisions. The atomic unit of work remains the
+authoritative boundary:
+
+- the same ID and same typed command converge on one receipt and one set of
+  accepted facts;
+- the same ID with a different typed command preserves the winner and returns
+  command-ID reuse for the loser;
+- different command IDs decided at the same stream version cannot both append
+  their provisional facts;
+- a provisional rejection based on a stream that later changes is replaced by
+  `stream_version_conflict`, not frozen against obsolete state.
+
+Because both simultaneous first submissions can finish optimistic application
+work before either receipt exists, a side-effect-free catalog lookup can occur
+twice. Once a receipt is durable, later retries resolve before catalog lookup,
+journal recovery, or domain decision. This contract does not claim exactly-once
+execution for payment or device effects; those edges require persisted intent
+and explicit unknown-outcome recovery.
+
+A caller-observed exception after the unit of work returns does not prove that
+SQLite failed to commit. The recovery protocol is to retry the **same** typed
+command with the same command ID. If the original commit landed, receipt lookup
+returns its original outcome and version without another business action. If a
+failure occurred before the atomic unit of work, no receipt or event exists and
+the same command ID remains eligible for execution.
+
 ## Load and corruption handling
 
 Lookup by global command ID returns found, not-found, or failed. Not-found is a
@@ -264,4 +294,8 @@ infrastructure exceptions, consistent with the transaction event store.
 This persistence contract does not yet implement:
 
 - HTTP command routes or responses;
+- a finalized HTTP/runtime SQLite connection-ownership model;
+- automatic SQLite busy retry or backoff;
+- exactly-once external payment or device effects and `PaymentUnknown`
+  recovery;
 - receipt expiration or cleanup.

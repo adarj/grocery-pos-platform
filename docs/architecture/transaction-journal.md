@@ -282,6 +282,14 @@ The unit of work repeats command-ID and stream-version checks under
 durable `stream_version_conflict`; the service does not reload, retry, or
 re-decide automatically.
 
+Deterministic two-connection tests force two services to complete optimistic
+recovery and decision before either final commit. They establish that
+simultaneous same-command submissions converge on one durable receipt and one
+set of facts, same-ID/different-command submissions preserve only the winner,
+and distinct commands at the same expected version cannot both append their
+provisional facts. A losing deterministic rejection is likewise not frozen if
+the stream changes before its final receipt commit.
+
 The application never silently substitutes the latest stream version for a
 new command's caller-supplied expected version. A stale command becomes a
 receipt-only `stale_expected_version` outcome without domain or catalog work.
@@ -324,6 +332,14 @@ in-memory transaction snapshot is required. File-backed tests cover creation
 and scan on one connection, tender after a first restart, completion after a
 second restart, and final recovery after a third restart.
 
+File-backed tests also simulate a caller-observed exception immediately after
+the real command unit of work has committed. After closing that connection, a
+new service resolves the same command ID from its durable receipt and does not
+append the fact or consult the catalog again. Conversely, a simulated failure
+before the unit of work leaves no event or receipt, so retrying that same ID can
+execute normally. This is a retry-based recovery protocol for uncertain caller
+observation; it is not a claim of arbitrary distributed exactly-once execution.
+
 ## Deliberately Deferred
 
 The persistent service is not yet exposed through HTTP or Flutter. This
@@ -340,4 +356,8 @@ checkpoint also does not add:
 Connection paths and ownership remain composition concerns. Persistence code
 does not hard-code `SQLITE_DB_PATH` and does not hide a global mutable database
 connection. Automated tests use isolated temporary databases rather than the
-developer's normal local database.
+developer's normal local database. Runtime HTTP composition must still choose
+and test a connection-ownership model. Automatic SQLite busy retry/backoff is
+also deferred; a lock failure is currently an infrastructure failure, and
+tests establish that it cannot produce a false durable success or partial
+command write.
