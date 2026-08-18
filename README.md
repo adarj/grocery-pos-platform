@@ -127,10 +127,18 @@ Verified capabilities currently include:
 * exact-money, immutable cash-sale transaction domain behavior;
 * transaction domain events and deterministic replay;
 * strict, language-independent Transaction Event Schema v1 JSON;
+* strict, language-independent Transaction Command Schema v1 with typed logical
+  request identity and caller-supplied expected stream versions;
 * append-only SQLite transaction journal with migration v1, per-stream
   sequencing, atomic batch append, and optimistic stream-version checks;
-* persistent transaction application service with file-backed restart
-  recovery;
+* migration v2 durable command receipts with database-global command IDs and
+  atomic accepted-event/command-outcome persistence;
+* idempotent persistent transaction application service with deterministic
+  two-connection concurrency and file-backed restart/retry coverage;
+* Racket runtime composition with startup migration, a bounded SQLite pool,
+  thread-mapped virtual request connections, and explicit shutdown ownership;
+* Transaction HTTP API v1 with one strict idempotent command route and one
+  authoritative transaction-state query route;
 * Flutter Linux ARM64 POS terminal;
 * Flutter widget tests;
 * Flutter-to-Racket local health connection;
@@ -352,9 +360,15 @@ commands emit domain events, SQLite stores those events in ordered per-
 transaction streams, and deterministic replay recovers state after a process
 or connection restart.
 
-This transaction workflow is not yet exposed through HTTP routes or a full
-Flutter checkout interface. Those integrations require separately scoped and
-tested milestones; the existing API surface remains `GET /health`.
+Mutations now enter through strict typed commands carrying durable command
+identity and caller-observed stream versions. SQLite command receipts preserve
+the original deterministic outcome across retries, while accepted events remain
+the authoritative transaction facts. Concurrent and lost-response tests prove
+that retrying the same command cannot duplicate the current cash-sale facts.
+
+This transaction workflow is now exposed through the narrow Transaction HTTP
+API v1 command and query routes. A full Flutter checkout interface remains a
+separately scoped and tested future milestone.
 
 ## Status
 

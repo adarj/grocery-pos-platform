@@ -5,6 +5,10 @@
          "transaction-event-codec.rkt")
 
 (provide append-transaction-events!
+         prepare-transaction-events
+         prepared-transaction-event-batch?
+         transaction-stream-version/in-transaction
+         append-prepared-transaction-events/in-transaction!
          load-transaction-events
          journal-append-succeeded?
          journal-append-succeeded-new-version
@@ -34,6 +38,11 @@
 
 (struct encoded-event (schema-version type json)
   #:transparent)
+
+;; The constructor and fields remain private. Persistence composition code can
+;; only obtain a prepared batch by serializing valid domain events through
+;; prepare-transaction-events.
+(struct prepared-transaction-event-batch (events encoded-events))
 
 (define insert-event-sql
   #<<SQL
@@ -84,15 +93,41 @@ SQL
    (hash-ref representation 'event_type)
    (transaction-event->json-string event)))
 
-(define (current-stream-version connection transaction-id)
-  (db:query-value
-   connection
-   #<<SQL
+(define (prepare-transaction-events events)
+  (define who 'prepare-transaction-events)
+  (check-event-list who events)
+  (when (null? events)
+    (raise-arguments-error
+     who
+     "event batch must not be empty"
+     "events"
+     events))
+  (prepared-transaction-event-batch
+   events
+   (map encode-event events)))
+
+(define (transaction-stream-version/in-transaction connection transaction-id)
+  (define who 'transaction-stream-version/in-transaction)
+  (check-connection who connection)
+  (check-transaction-id who transaction-id)
+  (unless (db:in-transaction? connection)
+    (raise-arguments-error
+     who
+     "requires an active caller-owned database transaction"
+     "connection"
+     connection))
+  (define version
+    (db:query-value
+     connection
+     #<<SQL
 SELECT COALESCE(MAX(stream_sequence), 0)
 FROM transaction_events
 WHERE transaction_id = ?
 SQL
-   transaction-id))
+     transaction-id))
+  (unless (exact-nonnegative-integer? version)
+    (error who "journal stream version is invalid: ~e" version))
+  version)
 
 (define (validate-stream-identity transaction-id actual-version events)
   (cond
@@ -120,6 +155,62 @@ SQL
       actual-version)]
     [else #f]))
 
+(define (append-prepared-transaction-events/in-transaction!
+         connection
+         transaction-id
+         expected-version
+         prepared-batch)
+  (define who
+    'append-prepared-transaction-events/in-transaction!)
+  (check-connection who connection)
+  (check-transaction-id who transaction-id)
+  (check-expected-version who expected-version)
+  (unless (prepared-transaction-event-batch? prepared-batch)
+    (raise-argument-error
+     who
+     "prepared-transaction-event-batch?"
+     prepared-batch))
+  (unless (db:in-transaction? connection)
+    (raise-arguments-error
+     who
+     "requires an active caller-owned database transaction"
+     "connection"
+     connection))
+
+  (define events
+    (prepared-transaction-event-batch-events prepared-batch))
+  (define encoded-events
+    (prepared-transaction-event-batch-encoded-events prepared-batch))
+  (define actual-version
+    (transaction-stream-version/in-transaction
+     connection transaction-id))
+  (cond
+    [(not (= actual-version expected-version))
+     (journal-append-rejected
+      'stream-version-conflict
+      actual-version)]
+    [else
+     (define identity-failure
+       (validate-stream-identity
+        transaction-id
+        actual-version
+        events))
+     (cond
+       [identity-failure identity-failure]
+       [else
+        (for ([encoded (in-list encoded-events)]
+              [sequence (in-naturals (add1 actual-version))])
+          (db:query-exec
+           connection
+           insert-event-sql
+           transaction-id
+           sequence
+           (encoded-event-schema-version encoded)
+           (encoded-event-type encoded)
+           (encoded-event-json encoded)))
+        (journal-append-succeeded
+         (+ actual-version (length events)))])]))
+
 (define (append-transaction-events! connection
                                     transaction-id
                                     expected-version
@@ -136,40 +227,17 @@ SQL
     [else
      ;; Complete serialization before opening the write transaction. A codec
      ;; failure therefore cannot leave even the first event of a batch stored.
-     (define encoded-events (map encode-event events))
+     (define prepared-batch (prepare-transaction-events events))
      (db:call-with-transaction
       connection
       (lambda ()
         ;; BEGIN IMMEDIATE reserves the SQLite writer before this read, so a
-        ;; competing writer cannot commit between the check and inserts.
-        (define actual-version
-          (current-stream-version connection transaction-id))
-        (cond
-          [(not (= actual-version expected-version))
-           (journal-append-rejected
-            'stream-version-conflict
-            actual-version)]
-          [else
-           (define identity-failure
-             (validate-stream-identity
-              transaction-id
-              actual-version
-              events))
-           (cond
-             [identity-failure identity-failure]
-             [else
-              (for ([encoded (in-list encoded-events)]
-                    [sequence (in-naturals (add1 actual-version))])
-                (db:query-exec
-                 connection
-                 insert-event-sql
-                 transaction-id
-                 sequence
-                 (encoded-event-schema-version encoded)
-                 (encoded-event-type encoded)
-                 (encoded-event-json encoded)))
-              (journal-append-succeeded
-               (+ actual-version (length events)))])]))
+        ;; competing writer cannot commit between the version check and inserts.
+        (append-prepared-transaction-events/in-transaction!
+         connection
+         transaction-id
+         expected-version
+         prepared-batch))
       #:option 'immediate)]))
 
 (define (load-failure code sequence detail message)

@@ -154,7 +154,13 @@ Treat the transaction state machine as a critical correctness boundary.
 
 Invalid state transitions must be rejected explicitly.
 
-Commands that can be retried must be designed with idempotency in mind.
+Consequential transaction mutations must use the typed, idempotent application
+command boundary with a stable command identity and caller-supplied expected
+stream version. Do not bypass that boundary with identity-free mutation paths.
+
+Retry the same logical command with the same command ID. Transaction events
+remain authoritative transaction truth; command receipts are retry identity
+and original-outcome metadata, not transaction snapshots.
 
 Never represent money with binary floating-point values.
 

@@ -151,6 +151,17 @@ JSON
 JSON
      'duplicate-field))
 
+  (test-case "strict JSON accepts a unique field written with a legal escape"
+    (define result
+      (json-string->transaction-event
+       #<<JSON
+{"schema_\u0076ersion":1,"event_type":"transaction_completed","payload":{}}
+JSON
+       ))
+    (check-pred event-decode-success? result)
+    (check-equal? (event-decode-success-event result)
+                  completed-event))
+
   (test-case "top-level schema shape is strict"
     (check-failure "transaction_started" 'expected-object)
     (check-failure

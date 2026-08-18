@@ -6,7 +6,9 @@
 
 This document defines the initial communication boundary between local Flutter applications and the Racket POS Core.
 
-Only the health endpoint is implemented at the time of writing. Transaction APIs will be added incrementally alongside the tested transaction domain model.
+The health endpoint and Transaction HTTP API v1 are implemented. The detailed
+transaction command/query contract is documented in
+[Transaction HTTP API v1](transaction-http-api-v1.md).
 
 ## Purpose
 
@@ -80,6 +82,21 @@ The service should remain bound to loopback by default unless a future architect
 
 Localhost is still treated as an application trust boundary. Backend authorization and business rules must never rely solely on a Flutter UI hiding a control.
 
+## Runtime Composition
+
+The Racket process now constructs its durable transaction service before the
+HTTP listener starts. Startup resolves `SQLITE_DB_PATH`, migrates and validates
+the journal through schema v2 using a dedicated connection, and then builds a
+bounded SQLite pool plus one thread-mapped virtual connection for request use.
+The service held by the application uses that virtual connection; unrelated
+request threads therefore do not share one physical transaction context.
+
+The server application is created through `make-app` with the transaction
+service as an explicit dependency. Transaction routes delegate through that
+same service rather than reimplementing its idempotency or transaction
+semantics. The detailed ownership and shutdown contract is documented in
+[Racket POS Core Runtime Composition](racket-runtime.md).
+
 ## Health Endpoint
 
 ### `GET /health`
@@ -100,6 +117,8 @@ Example:
 The health endpoint confirms that the service is reachable and able to construct its health response.
 
 It does not by itself guarantee that every checkout dependency or peripheral is operational.
+It remains a liveness endpoint rather than a full database or peripheral
+readiness probe.
 
 ## JSON Conventions
 
@@ -113,28 +132,55 @@ Clients must tolerate JSON object field ordering differences.
 
 ## Command Model
 
-State-changing POS operations should be modeled as explicit commands rather than allowing clients to mutate domain state directly.
+State-changing POS operations are modeled internally as strict typed commands
+rather than allowing callers to mutate domain state directly. The durable
+application-service boundary requires the Transaction Command Schema v1
+identity and version fields. `POST /transaction-commands` exposes that boundary
+by strictly decoding Schema v1 and delegating to the service without
+implementing a separate idempotency policy.
 
-A future command may resemble:
+The implemented HTTP request preserves a command envelope resembling:
 
 ```json
 {
+  "schema_version": 1,
   "command_id": "cmd_01ABC...",
   "transaction_id": "txn_01ABC...",
-  "command": "scan_barcode",
+  "expected_version": 2,
+  "command_type": "scan_barcode",
   "payload": {
     "barcode": "049000001234"
   }
 }
 ```
 
-### Command IDs
+The exact transport-independent schema is documented in
+[Transaction Command Schema v1](transaction-command-schema.md), and its
+idempotency decision is recorded in
+[ADR-0011](../adr/0011-use-durable-command-receipts-and-expected-stream-versions.md).
 
-Every consequential mutating command should have a unique `command_id`.
+### Command IDs and expected versions
 
-`command_id` provides the basis for idempotency and retry handling.
+Every mutating transaction command has a `command_id` that is globally unique
+within the local register database. A retry of the same logical intent must
+reuse the same command ID; response uncertainty is not a reason to generate a
+replacement ID.
 
-Receiving the same command more than once must not accidentally apply the same business action multiple times.
+The command also carries the caller's `expected_version`, identifying the last
+transaction stream version on which a genuinely new intent was based. The
+backend must not silently replace that precondition with the newest stream
+version.
+
+The same command ID with the same decoded typed command returns its original
+durable outcome and version. The same ID with a different transaction, expected
+version, command type, or typed payload is command-ID reuse and executes no
+business action. Logical equality is based on the decoded typed command, not
+raw JSON bytes.
+
+Known durable retries bypass transaction replay, catalog lookup, domain
+decision, and event append. Two simultaneous first submissions can both finish
+pure optimistic work before either receipt exists, but final atomic persistence
+prevents duplicate accepted facts.
 
 This requirement becomes especially important for:
 
@@ -144,6 +190,20 @@ This requirement becomes especially important for:
 * voids;
 * drawer operations;
 * remote management commands.
+
+### Mutation outcomes and current state
+
+A mutation response represents the command's original durable
+outcome kind, stable machine-readable code, and outcome stream version. It must
+not substitute current transaction state for a delayed command retry or expose
+provisional state before persistence succeeds.
+
+Current authoritative transaction state and version are obtained through
+`GET /transactions/{transaction_id}`. HTTP handlers strictly decode commands,
+delegate to `transaction-service-execute-command`, and map its stable result;
+they do not reimplement duplicate lookup, expected-version checks, domain
+decision, or receipt/event persistence. Exact payloads and status mappings are
+specified in [Transaction HTTP API v1](transaction-http-api-v1.md).
 
 ## Transaction State
 
@@ -189,7 +249,8 @@ Payment APIs will receive a dedicated contract before production payment integra
 
 API errors should be machine-readable and stable enough for Flutter to map them to appropriate user-facing behavior.
 
-A future error response should follow a structure similar to:
+Implemented API errors use the common structure below. Individual routes may
+add documented stable fields such as `reason` or `retry_same_command_id`:
 
 ```json
 {
@@ -291,11 +352,12 @@ Currently implemented:
 
 ```text
 GET /health
+POST /transaction-commands
+GET /transactions/{transaction_id}
 ```
 
-The in-memory transaction domain and persistent transaction application
-service are implemented, but they are deliberately not exposed as HTTP routes
-yet. A transaction API contract will be introduced as a separately scoped,
-tested checkpoint rather than as a large speculative REST surface.
+The two transaction routes expose only the implemented durable typed-command
+mutation and authoritative journal-replay query. Command-specific mutation
+routes and speculative transaction operations are deliberately absent.
 
 The domain model should drive the interface, not the reverse.

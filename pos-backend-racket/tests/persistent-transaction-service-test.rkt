@@ -2,533 +2,827 @@
 
 (require (prefix-in db: db)
          rackunit
+         "../pos/application/transaction-command-receipt.rkt"
+         "../pos/application/transaction-command.rkt"
          "../pos/application/transaction-service.rkt"
          "../pos/domain/fake-catalog.rkt"
          "../pos/domain/money.rkt"
          "../pos/domain/transaction-event.rkt"
          "../pos/domain/transaction.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt"
+         "../pos/persistence/transaction-command-receipt-store.rkt"
+         "../pos/persistence/transaction-command-unit-of-work.rkt"
          "../pos/persistence/transaction-journal-migrations.rkt")
 
 (define test-barcode "049000001234")
+(define unknown-barcode "000000000000")
 
-(define (call-with-service procedure)
+(define (call-with-store procedure)
   (define connection
     (db:sqlite3-connect #:database 'memory))
   (dynamic-wind
     void
     (lambda ()
       (migrate-transaction-journal! connection)
-      (procedure connection (make-transaction-service connection)))
+      (procedure connection))
     (lambda () (db:disconnect connection))))
 
-(define (check-success result expected-version)
+(define (make-test-service connection
+                           #:catalog-lookup
+                           [catalog-lookup fake-catalog-lookup]
+                           #:load-events
+                           [load-events load-transaction-events]
+                           #:load-receipt
+                           [load-receipt load-transaction-command-receipt]
+                           #:commit-command!
+                           [commit-command! commit-transaction-command-outcome!])
+  (make-transaction-service
+   connection
+   #:catalog-lookup catalog-lookup
+   #:load-events load-events
+   #:load-receipt load-receipt
+   #:commit-command! commit-command!))
+
+(define (resolved-receipt result)
+  (check-pred transaction-service-command-resolved? result)
+  (transaction-service-command-resolved-receipt result))
+
+(define (check-outcome receipt command kind code version)
+  (check-equal? (transaction-command-receipt-command receipt) command)
+  (check-equal? (transaction-command-receipt-outcome-kind receipt) kind)
+  (check-equal? (transaction-command-receipt-outcome-code receipt) code)
+  (check-equal?
+   (transaction-command-receipt-outcome-stream-version receipt)
+   version))
+
+(define (query-transaction service transaction-id expected-version)
+  (define result
+    (transaction-service-load-transaction service transaction-id))
   (check-pred transaction-service-success? result)
   (check-equal? (transaction-service-success-version result)
                 expected-version)
   (transaction-service-success-transaction result))
 
-(define (start-and-scan service transaction-id)
-  (check-success
-   (transaction-service-start-transaction service transaction-id)
-   1)
-  (check-success
-   (transaction-service-scan-barcode
-    service
-    transaction-id
-    test-barcode
-    fake-catalog-lookup)
-   2))
+(define (journal-events connection transaction-id)
+  (define result
+    (load-transaction-events connection transaction-id))
+  (check-pred journal-load-succeeded? result)
+  (journal-load-succeeded-events result))
+
+(define (journal-version connection transaction-id)
+  (define result
+    (load-transaction-events connection transaction-id))
+  (check-pred journal-load-succeeded? result)
+  (journal-load-succeeded-version result))
+
+(define (receipt-row-count connection)
+  (db:query-value
+   connection
+   "SELECT COUNT(*) FROM transaction_command_receipts"))
+
+(define (execute-start! service transaction-id command-id
+                        #:expected-version [expected-version 0])
+  (transaction-service-execute-command
+   service
+   (start-transaction-command command-id transaction-id expected-version)))
+
+(define (execute-scan! service transaction-id command-id expected-version barcode)
+  (transaction-service-execute-command
+   service
+   (scan-barcode-command
+    command-id transaction-id expected-version barcode)))
+
+(define (start-and-scan! service transaction-id command-prefix)
+  (resolved-receipt
+   (execute-start! service transaction-id (format "~a-start" command-prefix)))
+  (resolved-receipt
+   (execute-scan! service
+                  transaction-id
+                  (format "~a-scan" command-prefix)
+                  1
+                  test-barcode)))
 
 (module+ test
-  (test-case "persistent start commits before returning success"
-    (call-with-service
-     (lambda (connection service)
+  (test-case "accepted start returns receipt and query returns transaction"
+    (call-with-store
+     (lambda (connection)
+       (define service (make-test-service connection))
+       (define command
+         (start-transaction-command "cmd-start" "txn-start" 0))
        (define result
-         (transaction-service-start-transaction service "txn-001"))
-       (define started (check-success result 1))
+         (transaction-service-execute-command service command))
+       (define receipt (resolved-receipt result))
 
-       (check-equal? (transaction-id started) "txn-001")
-       (check-equal? (transaction-status started) 'open)
-       (check-equal? (transaction-line-items started) '())
-       (check-equal? (transaction-subtotal started) (money 0))
+       (check-outcome receipt command 'accepted "accepted" 1)
+       (check-false (transaction-service-success? result))
+       (check-equal? (journal-events connection "txn-start")
+                     (list (transaction-started "txn-start")))
+       (define transaction
+         (query-transaction service "txn-start" 1))
+       (check-equal? (transaction-id transaction) "txn-start")
+       (check-equal? (transaction-status transaction) 'open)
+       (check-equal? (transaction-line-items transaction) '()))))
 
-       (define journal-result
-         (load-transaction-events connection "txn-001"))
-       (check-pred journal-load-succeeded? journal-result)
-       (check-equal? (journal-load-succeeded-events journal-result)
-                     (list (transaction-started "txn-001")))
-
-       (define recovered-result
-         (transaction-service-load-transaction service "txn-001"))
-       (define recovered (check-success recovered-result 1))
-       (check-equal? recovered started))))
-
-  (test-case "duplicate start is a service-level already-exists result"
-    (call-with-service
-     (lambda (connection service)
-       (transaction-service-start-transaction service "txn-duplicate")
-       (define result
-         (transaction-service-start-transaction service "txn-duplicate"))
-
-       (check-pred transaction-service-already-exists? result)
-       (check-equal?
-        (transaction-service-already-exists-transaction-id result)
-        "txn-duplicate")
-       (check-equal? (transaction-service-already-exists-version result) 1)
-
-       (define loaded
-         (load-transaction-events connection "txn-duplicate"))
-       (check-equal? (journal-load-succeeded-version loaded) 1)
-       (check-equal? (length (journal-load-succeeded-events loaded)) 1))))
-
-  (test-case "persistent scan snapshots one live lookup and recovery needs none"
-    (call-with-service
-     (lambda (_connection service)
-       (transaction-service-start-transaction service "txn-scan")
+  (test-case "accepted scan uses one catalog lookup and persists one event"
+    (call-with-store
+     (lambda (connection)
        (define lookup-count 0)
-       (define result
-         (transaction-service-scan-barcode
-          service
-          "txn-scan"
-          test-barcode
+       (define service
+         (make-test-service
+          connection
+          #:catalog-lookup
           (lambda (barcode)
             (set! lookup-count (add1 lookup-count))
             (fake-catalog-lookup barcode))))
-       (define scanned (check-success result 2))
+       (execute-start! service "txn-scan" "cmd-scan-start")
+       (define command
+         (scan-barcode-command
+          "cmd-scan" "txn-scan" 1 test-barcode))
+       (define receipt
+         (resolved-receipt
+          (transaction-service-execute-command service command)))
 
+       (check-outcome receipt command 'accepted "accepted" 2)
        (check-equal? lookup-count 1)
-       (check-equal? (transaction-status scanned) 'open)
-       (check-equal? (transaction-subtotal scanned) (money 199))
        (check-equal?
-        (transaction-line-item-description
-         (first (transaction-line-items scanned)))
-        "Test Apples")
-
-       ;; Recovery has no catalog dependency and cannot repeat the lookup.
-       (define recovered-result
-         (transaction-service-load-transaction service "txn-scan"))
-       (define recovered (check-success recovered-result 2))
-       (check-equal? recovered scanned)
+        (journal-events connection "txn-scan")
+        (list (transaction-started "txn-scan")
+              (sale-item-added test-barcode "Test Apples" (money 199))))
+       (define recovered
+         (query-transaction service "txn-scan" 2))
+       (check-equal? (transaction-subtotal recovered) (money 199))
        (check-equal? lookup-count 1))))
 
-  (test-case "unknown barcode is a domain rejection and appends nothing"
-    (call-with-service
-     (lambda (connection service)
-       (define started
-         (check-success
-          (transaction-service-start-transaction service "txn-unknown")
-          1))
-       (define result
-         (transaction-service-scan-barcode
-          service
-          "txn-unknown"
-          "000000000000"
-          fake-catalog-lookup))
+  (test-case "accepted tender persists exactly one cash event"
+    (call-with-store
+     (lambda (connection)
+       (define service (make-test-service connection))
+       (start-and-scan! service "txn-tender" "cmd-tender")
+       (define command
+         (tender-cash-command
+          "cmd-cash" "txn-tender" 2 (money 500)))
+       (define receipt
+         (resolved-receipt
+          (transaction-service-execute-command service command)))
 
-       (check-pred transaction-service-domain-rejected? result)
-       (check-equal? (transaction-service-domain-rejected-code result)
-                     'unknown-barcode)
-       (check-equal? (transaction-service-domain-rejected-transaction result)
-                     started)
-       (check-equal? (transaction-service-domain-rejected-version result) 1)
-
-       (define loaded
-         (load-transaction-events connection "txn-unknown"))
-       (check-equal? (journal-load-succeeded-version loaded) 1)
-       (check-equal? (length (journal-load-succeeded-events loaded)) 1))))
-
-  (test-case "sufficient cash is committed and recoverable"
-    (call-with-service
-     (lambda (_connection service)
-       (start-and-scan service "txn-tender")
-       (define result
-         (transaction-service-tender-cash
-          service
-          "txn-tender"
-          (money 500)))
-       (define paid (check-success result 3))
-
-       (check-equal? (transaction-status paid) 'paid)
-       (check-equal? (transaction-tendered-cash paid) (money 500))
-       (check-equal? (transaction-change-due paid) (money 301))
-
-       (define recovered
-         (check-success
-          (transaction-service-load-transaction service "txn-tender")
-          3))
-       (check-equal? recovered paid))))
-
-  (test-case "insufficient cash is a domain rejection and preserves version"
-    (call-with-service
-     (lambda (connection service)
-       (define open (start-and-scan service "txn-insufficient"))
-       (define result
-         (transaction-service-tender-cash
-          service
-          "txn-insufficient"
-          (money 198)))
-
-       (check-pred transaction-service-domain-rejected? result)
-       (check-equal? (transaction-service-domain-rejected-code result)
-                     'insufficient-tender)
-       (check-equal? (transaction-service-domain-rejected-transaction result)
-                     open)
-       (check-equal? (transaction-service-domain-rejected-version result) 2)
-
-       (define loaded
-         (load-transaction-events connection "txn-insufficient"))
-       (check-equal? (journal-load-succeeded-version loaded) 2)
-       (check-equal? (length (journal-load-succeeded-events loaded)) 2))))
-
-  (test-case "paid completion is committed and recoverable"
-    (call-with-service
-     (lambda (_connection service)
-       (start-and-scan service "txn-complete")
-       (transaction-service-tender-cash
-        service
-        "txn-complete"
-        (money 500))
-       (define result
-         (transaction-service-complete-transaction service "txn-complete"))
-       (define completed (check-success result 4))
-
-       (check-equal? (transaction-status completed) 'completed)
-       (define recovered
-         (check-success
-          (transaction-service-load-transaction service "txn-complete")
-          4))
-       (check-equal? recovered completed))))
-
-  (test-case "invalid completion is a domain rejection and writes nothing"
-    (call-with-service
-     (lambda (connection service)
-       (define open (start-and-scan service "txn-invalid-complete"))
-       (define result
-         (transaction-service-complete-transaction
-          service
-          "txn-invalid-complete"))
-
-       (check-pred transaction-service-domain-rejected? result)
-       (check-equal? (transaction-service-domain-rejected-code result)
-                     'invalid-transaction-state)
-       (check-equal? (transaction-service-domain-rejected-transaction result)
-                     open)
-       (check-equal? (transaction-service-domain-rejected-version result) 2)
-
-       (define loaded
-         (load-transaction-events connection "txn-invalid-complete"))
-       (check-equal? (journal-load-succeeded-version loaded) 2)
-       (check-equal? (length (journal-load-succeeded-events loaded)) 2))))
-
-  (test-case "commands do not implicitly create a missing transaction"
-    (call-with-service
-     (lambda (connection service)
-       (define lookup-called? #f)
-       (define scan-result
-         (transaction-service-scan-barcode
-          service
-          "txn-missing"
-          test-barcode
-          (lambda (_barcode)
-            (set! lookup-called? #t)
-            (error 'test "missing transaction performed catalog lookup"))))
-       (define tender-result
-         (transaction-service-tender-cash
-          service
-          "txn-missing"
-          (money 500)))
-       (define completion-result
-         (transaction-service-complete-transaction
-          service
-          "txn-missing"))
-       (define load-result
-         (transaction-service-load-transaction service "txn-missing"))
-
-       (for ([result (in-list (list load-result
-                                    scan-result
-                                    tender-result
-                                    completion-result))])
-         (check-pred transaction-service-not-found? result)
-         (check-equal? (transaction-service-not-found-transaction-id result)
-                       "txn-missing"))
-       (check-false lookup-called?)
+       (check-outcome receipt command 'accepted "accepted" 3)
        (check-equal?
-        (db:query-value connection "SELECT COUNT(*) FROM transaction_events")
-        0))))
+        (journal-events connection "txn-tender")
+        (list (transaction-started "txn-tender")
+              (sale-item-added test-barcode "Test Apples" (money 199))
+              (cash-tendered (money 500)))))))
 
-  (test-case "journal corruption stops recovery before domain decision"
-    (call-with-service
-     (lambda (connection service)
-       (transaction-service-start-transaction service "txn-corrupt")
+  (test-case "accepted completion persists exactly one completion event"
+    (call-with-store
+     (lambda (connection)
+       (define service (make-test-service connection))
+       (start-and-scan! service "txn-complete" "cmd-complete")
+       (resolved-receipt
+        (transaction-service-execute-command
+         service
+         (tender-cash-command
+          "cmd-complete-cash" "txn-complete" 2 (money 500))))
+       (define command
+         (complete-transaction-command
+          "cmd-completion" "txn-complete" 3))
+       (define receipt
+         (resolved-receipt
+          (transaction-service-execute-command service command)))
+
+       (check-outcome receipt command 'accepted "accepted" 4)
+       (check-equal?
+        (journal-events connection "txn-complete")
+        (list (transaction-started "txn-complete")
+              (sale-item-added test-barcode "Test Apples" (money 199))
+              (cash-tendered (money 500))
+              (transaction-completed))))))
+
+  (test-case "known accepted scan retry returns original receipt without work"
+    (call-with-store
+     (lambda (connection)
+       (define lookup-count 0)
+       (define journal-load-count 0)
+       (define commit-count 0)
+       (define (counting-load connection* transaction-id)
+         (set! journal-load-count (add1 journal-load-count))
+         (load-transaction-events connection* transaction-id))
+       (define (counting-commit connection* plan)
+         (set! commit-count (add1 commit-count))
+         (commit-transaction-command-outcome! connection* plan))
+       (define service
+         (make-test-service
+          connection
+          #:catalog-lookup
+          (lambda (barcode)
+            (set! lookup-count (add1 lookup-count))
+            (fake-catalog-lookup barcode))
+          #:load-events counting-load
+          #:commit-command! counting-commit))
+
+       (execute-start! service "txn-retry" "cmd-retry-start")
+       (define command-C1
+         (scan-barcode-command
+          "cmd-C1" "txn-retry" 1 test-barcode))
+       (define original
+         (resolved-receipt
+          (transaction-service-execute-command service command-C1)))
+       (resolved-receipt
+        (execute-scan! service "txn-retry" "cmd-C2" 2 test-barcode))
+       (define loads-before journal-load-count)
+       (define commits-before commit-count)
+       (define lookups-before lookup-count)
+
+       (define retried
+         (resolved-receipt
+          (transaction-service-execute-command service command-C1)))
+
+       (check-equal? retried original)
+       (check-equal?
+        (transaction-command-receipt-outcome-stream-version retried)
+        2)
+       (check-equal? journal-load-count loads-before)
+       (check-equal? commit-count commits-before)
+       (check-equal? lookup-count lookups-before)
+       (check-equal? (journal-version connection "txn-retry") 3))))
+
+  (test-case "known rejected scan retry does not repeat catalog lookup"
+    (call-with-store
+     (lambda (connection)
+       (define lookup-count 0)
+       (define service
+         (make-test-service
+          connection
+          #:catalog-lookup
+          (lambda (barcode)
+            (set! lookup-count (add1 lookup-count))
+            (fake-catalog-lookup barcode))))
+       (execute-start! service "txn-rejected-retry" "cmd-rejected-start")
+       (define command
+         (scan-barcode-command
+          "cmd-rejected" "txn-rejected-retry" 1 unknown-barcode))
+       (define first-receipt
+         (resolved-receipt
+          (transaction-service-execute-command service command)))
+       (define second-receipt
+         (resolved-receipt
+          (transaction-service-execute-command service command)))
+
+       (check-outcome
+        first-receipt command 'domain-rejected "unknown_barcode" 1)
+       (check-equal? second-receipt first-receipt)
+       (check-equal? lookup-count 1)
+       (check-equal? (journal-version connection "txn-rejected-retry") 1))))
+
+  (test-case "same ID with different typed command is rejected before work"
+    (call-with-store
+     (lambda (connection)
+       (define lookup-count 0)
+       (define journal-load-count 0)
+       (define commit-count 0)
+       (define service
+         (make-test-service
+          connection
+          #:catalog-lookup
+          (lambda (barcode)
+            (set! lookup-count (add1 lookup-count))
+            (fake-catalog-lookup barcode))
+          #:load-events
+          (lambda (connection* transaction-id)
+            (set! journal-load-count (add1 journal-load-count))
+            (load-transaction-events connection* transaction-id))
+          #:commit-command!
+          (lambda (connection* plan)
+            (set! commit-count (add1 commit-count))
+            (commit-transaction-command-outcome! connection* plan))))
+       (execute-start! service "txn-reuse" "cmd-reuse-start")
+       (define original-command
+         (scan-barcode-command
+          "cmd-reuse" "txn-reuse" 1 unknown-barcode))
+       (resolved-receipt
+        (transaction-service-execute-command service original-command))
+       (define loads-before journal-load-count)
+       (define lookups-before lookup-count)
+       (define commits-before commit-count)
+       (define receipt-count-before (receipt-row-count connection))
+       (define reused-command
+         (scan-barcode-command
+          "cmd-reuse" "txn-reuse" 1 test-barcode))
+
+       (define result
+         (transaction-service-execute-command service reused-command))
+
+       (check-pred transaction-service-command-id-reused? result)
+       (check-equal?
+        (transaction-service-command-id-reused-command-id result)
+        "cmd-reuse")
+       (check-equal? journal-load-count loads-before)
+       (check-equal? lookup-count lookups-before)
+       (check-equal? commit-count commits-before)
+       (check-equal? (receipt-row-count connection) receipt-count-before))))
+
+  (test-case "corrupt known receipt stops before journal catalog and commit"
+    (call-with-store
+     (lambda (connection)
+       (define catalog-count 0)
+       (define journal-count 0)
+       (define commit-count 0)
+       (define service
+         (make-test-service
+          connection
+          #:catalog-lookup
+          (lambda (barcode)
+            (set! catalog-count (add1 catalog-count))
+            (fake-catalog-lookup barcode))
+          #:load-events
+          (lambda (connection* transaction-id)
+            (set! journal-count (add1 journal-count))
+            (load-transaction-events connection* transaction-id))
+          #:commit-command!
+          (lambda (connection* plan)
+            (set! commit-count (add1 commit-count))
+            (commit-transaction-command-outcome! connection* plan))))
+       (execute-start! service "txn-receipt-corrupt" "cmd-corrupt-start")
+       (define command
+         (scan-barcode-command
+          "cmd-corrupt" "txn-receipt-corrupt" 1 unknown-barcode))
+       (resolved-receipt
+        (transaction-service-execute-command service command))
+       (db:query-exec connection "PRAGMA ignore_check_constraints = ON")
+       (db:query-exec
+        connection
+        "UPDATE transaction_command_receipts SET outcome_code = '' WHERE command_id = 'cmd-corrupt'")
+       (define catalog-before catalog-count)
+       (define journal-before journal-count)
+       (define commit-before commit-count)
+
+       (define result
+         (transaction-service-execute-command service command))
+
+       (check-pred transaction-service-recovery-failed? result)
+       (check-equal? (transaction-service-recovery-failed-stage result)
+                     'receipt-load)
+       (check-equal? (transaction-service-recovery-failed-code result)
+                     'invalid-outcome-code)
+       (check-equal? catalog-count catalog-before)
+       (check-equal? journal-count journal-before)
+       (check-equal? commit-count commit-before))))
+
+  (test-case "start with nonzero expected version persists invalid version"
+    (call-with-store
+     (lambda (connection)
+       (define service (make-test-service connection))
+       (define missing-command
+         (start-transaction-command "cmd-invalid-missing" "txn-missing" 1))
+       (define missing-receipt
+         (resolved-receipt
+          (transaction-service-execute-command service missing-command)))
+       (check-outcome missing-receipt
+                      missing-command
+                      'version-conflict
+                      "invalid_expected_version"
+                      0)
+       (check-equal? (journal-version connection "txn-missing") 0)
+
+       (execute-start! service "txn-existing-invalid" "cmd-existing-start")
+       (define existing-command
+         (start-transaction-command
+          "cmd-invalid-existing" "txn-existing-invalid" 7))
+       (define existing-receipt
+         (resolved-receipt
+          (transaction-service-execute-command service existing-command)))
+       (check-outcome existing-receipt
+                      existing-command
+                      'version-conflict
+                      "invalid_expected_version"
+                      1)
+       (check-equal? (journal-version connection "txn-existing-invalid") 1))))
+
+  (test-case "start at version zero on existing stream is already exists"
+    (call-with-store
+     (lambda (connection)
+       (define service (make-test-service connection))
+       (execute-start! service "txn-already" "cmd-already-first")
+       (define command
+         (start-transaction-command "cmd-already-second" "txn-already" 0))
+       (define receipt
+         (resolved-receipt
+          (transaction-service-execute-command service command)))
+
+       (check-outcome receipt
+                      command
+                      'already-exists
+                      "transaction_already_exists"
+                      1)
+       (check-equal? (journal-version connection "txn-already") 1))))
+
+  (test-case "non-start commands against missing transaction are durable not found"
+    (call-with-store
+     (lambda (connection)
+       (define catalog-count 0)
+       (define service
+         (make-test-service
+          connection
+          #:catalog-lookup
+          (lambda (_barcode)
+            (set! catalog-count (add1 catalog-count))
+            (error 'test "missing transaction consulted catalog"))))
+       (define scan-command
+         (scan-barcode-command
+          "cmd-missing-scan" "txn-missing-commands" 0 test-barcode))
+       (define tender-command
+         (tender-cash-command
+          "cmd-missing-tender" "txn-missing-commands" 8 (money 500)))
+
+       (check-outcome
+        (resolved-receipt
+         (transaction-service-execute-command service scan-command))
+        scan-command 'not-found "transaction_not_found" 0)
+       (check-outcome
+        (resolved-receipt
+         (transaction-service-execute-command service tender-command))
+        tender-command 'not-found "transaction_not_found" 0)
+       (check-equal? catalog-count 0)
+       (check-equal? (journal-version connection "txn-missing-commands") 0))))
+
+  (test-case "stale scan is rejected before catalog and retry keeps old version"
+    (call-with-store
+     (lambda (connection)
+       (define catalog-count 0)
+       (define service
+         (make-test-service
+          connection
+          #:catalog-lookup
+          (lambda (barcode)
+            (set! catalog-count (add1 catalog-count))
+            (fake-catalog-lookup barcode))))
+       (execute-start! service "txn-stale" "cmd-stale-start")
+       (execute-scan! service "txn-stale" "cmd-stale-scan-1" 1 test-barcode)
+       (execute-scan! service "txn-stale" "cmd-stale-scan-2" 2 test-barcode)
+       (define stale-command
+         (scan-barcode-command
+          "cmd-stale" "txn-stale" 2 test-barcode))
+       (define lookups-before catalog-count)
+       (define stale-receipt
+         (resolved-receipt
+          (transaction-service-execute-command service stale-command)))
+
+       (check-outcome stale-receipt
+                      stale-command
+                      'version-conflict
+                      "stale_expected_version"
+                      3)
+       (check-equal? catalog-count lookups-before)
+       (execute-scan! service "txn-stale" "cmd-stale-winner" 3 test-barcode)
+       (define retry-lookups-before catalog-count)
+       (define retried
+         (resolved-receipt
+          (transaction-service-execute-command service stale-command)))
+       (check-equal? retried stale-receipt)
+       (check-equal? (transaction-command-receipt-outcome-stream-version retried)
+                     3)
+       (check-equal? catalog-count retry-lookups-before)
+       (check-equal? (journal-version connection "txn-stale") 4))))
+
+  (test-case "cash and lifecycle domain rejections become durable codes"
+    (call-with-store
+     (lambda (connection)
+       (define service (make-test-service connection))
+
+       (execute-start! service "txn-empty" "cmd-empty-start")
+       (define empty-command
+         (tender-cash-command "cmd-empty" "txn-empty" 1 (money 500)))
+       (check-outcome
+        (resolved-receipt
+         (transaction-service-execute-command service empty-command))
+        empty-command 'domain-rejected "empty_transaction" 1)
+
+       (start-and-scan! service "txn-insufficient" "cmd-insufficient")
+       (define insufficient-command
+         (tender-cash-command
+          "cmd-insufficient-cash" "txn-insufficient" 2 (money 198)))
+       (check-outcome
+        (resolved-receipt
+         (transaction-service-execute-command service insufficient-command))
+        insufficient-command 'domain-rejected "insufficient_tender" 2)
+
+       (start-and-scan! service "txn-invalid" "cmd-invalid")
+       (define invalid-command
+         (complete-transaction-command
+          "cmd-invalid-complete" "txn-invalid" 2))
+       (check-outcome
+        (resolved-receipt
+         (transaction-service-execute-command service invalid-command))
+        invalid-command 'domain-rejected "invalid_transaction_state" 2)
+
+       (check-equal? (journal-version connection "txn-empty") 1)
+       (check-equal? (journal-version connection "txn-insufficient") 2)
+       (check-equal? (journal-version connection "txn-invalid") 2))))
+
+  (test-case "invalid-state scan rejects before catalog lookup"
+    (call-with-store
+     (lambda (connection)
+       (define catalog-count 0)
+       (define service
+         (make-test-service
+          connection
+          #:catalog-lookup
+          (lambda (barcode)
+            (set! catalog-count (add1 catalog-count))
+            (fake-catalog-lookup barcode))))
+       (start-and-scan! service "txn-paid-scan" "cmd-paid-scan")
+       (resolved-receipt
+        (transaction-service-execute-command
+         service
+         (tender-cash-command
+          "cmd-paid-cash" "txn-paid-scan" 2 (money 500))))
+       (define command
+         (scan-barcode-command
+          "cmd-paid-rescan" "txn-paid-scan" 3 test-barcode))
+       (define catalog-before catalog-count)
+       (define receipt
+         (resolved-receipt
+          (transaction-service-execute-command service command)))
+
+       (check-outcome receipt
+                      command
+                      'domain-rejected
+                      "invalid_transaction_state"
+                      3)
+       (check-equal? catalog-count catalog-before)
+       (check-equal? (journal-version connection "txn-paid-scan") 3))))
+
+  (test-case "invalid start version is not frozen over corrupt journal"
+    (call-with-store
+     (lambda (connection)
+       (append-transaction-events!
+        connection
+        "txn-corrupt-start"
+        0
+        (list (transaction-started "txn-corrupt-start")))
        (db:query-exec
         connection
         #<<SQL
 INSERT INTO transaction_events
   (transaction_id, stream_sequence, schema_version, event_type, event_json)
-VALUES ('txn-corrupt', 2, 1, 'sale_item_added', '{not-json')
+VALUES ('txn-corrupt-start', 2, 1, 'sale_item_added', '{not-json')
 SQL
         )
-
-       (define load-result
-         (transaction-service-load-transaction service "txn-corrupt"))
-       (check-pred transaction-service-recovery-failed? load-result)
-       (check-equal? (transaction-service-recovery-failed-stage load-result)
-                     'journal-load)
-       (check-equal? (transaction-service-recovery-failed-code load-result)
-                     'event-decode-failure)
-       (check-equal? (transaction-service-recovery-failed-position load-result)
-                     2)
-       (check-equal? (transaction-service-recovery-failed-detail load-result)
-                     'malformed-json)
-
-       (define lookup-called? #f)
-       (define command-result
-         (transaction-service-scan-barcode
-          service
-          "txn-corrupt"
-          test-barcode
-          (lambda (_barcode)
-            (set! lookup-called? #t)
-            (error 'test "corrupt recovery performed catalog lookup"))))
-       (check-pred transaction-service-recovery-failed? command-result)
-       (check-false lookup-called?)
-       (check-equal?
-        (db:query-value connection "SELECT COUNT(*) FROM transaction_events")
-        2))))
-
-  (test-case "semantically invalid journal stops at replay recovery"
-    (call-with-service
-     (lambda (connection service)
-       (append-transaction-events!
-        connection
-        "txn-invalid-replay"
-        0
-        (list (transaction-started "txn-invalid-replay")
-              (transaction-completed)))
+       (define service (make-test-service connection))
+       (define command
+         (start-transaction-command
+          "cmd-corrupt-start" "txn-corrupt-start" 9))
 
        (define result
-         (transaction-service-load-transaction service "txn-invalid-replay"))
+         (transaction-service-execute-command service command))
+
        (check-pred transaction-service-recovery-failed? result)
        (check-equal? (transaction-service-recovery-failed-stage result)
-                     'replay)
-       (check-equal? (transaction-service-recovery-failed-code result)
-                     'invalid-transaction-state)
-       (check-equal? (transaction-service-recovery-failed-position result) 1)
+                     'journal-load)
+       (check-pred
+        receipt-load-not-found?
+        (load-transaction-command-receipt
+         connection "cmd-corrupt-start")))))
 
-       (define lookup-called? #f)
-       (define command-result
-         (transaction-service-scan-barcode
-          service
-          "txn-invalid-replay"
-          test-barcode
+  (test-case "journal and replay corruption prevent command persistence"
+    (call-with-store
+     (lambda (connection)
+       (define catalog-count 0)
+       (define commit-count 0)
+       (define service
+         (make-test-service
+          connection
+          #:catalog-lookup
           (lambda (_barcode)
-            (set! lookup-called? #t)
-            (error 'test "invalid replay performed catalog lookup"))))
-       (check-pred transaction-service-recovery-failed? command-result)
-       (check-false lookup-called?)
-       (check-equal?
-        (db:query-value connection "SELECT COUNT(*) FROM transaction_events")
-        2))))
+            (set! catalog-count (add1 catalog-count))
+            (error 'test "corrupt transaction consulted catalog"))
+          #:commit-command!
+          (lambda (connection* plan)
+            (set! commit-count (add1 commit-count))
+            (commit-transaction-command-outcome! connection* plan))))
+       (append-transaction-events!
+        connection "txn-corrupt-json" 0
+        (list (transaction-started "txn-corrupt-json")))
+       (db:query-exec
+        connection
+        #<<SQL
+INSERT INTO transaction_events
+  (transaction_id, stream_sequence, schema_version, event_type, event_json)
+VALUES ('txn-corrupt-json', 2, 1, 'sale_item_added', '{not-json')
+SQL
+        )
+       (append-transaction-events!
+        connection "txn-corrupt-replay" 0
+        (list (transaction-started "txn-corrupt-replay")
+              (transaction-completed)))
 
-  (test-case "stream conflict never reports provisional accepted state"
-    (call-with-service
-     (lambda (connection normal-service)
-       (transaction-service-start-transaction normal-service "txn-conflict")
-       (define append-call-count 0)
-       (define requested-lookup-count 0)
-       (define (conflicting-append connection* transaction-id version events)
-         (set! append-call-count (add1 append-call-count))
-         (append-transaction-events!
-          connection*
-          transaction-id
-          version
-          (list (sale-item-added "000000000002"
-                                 "Concurrent Bananas"
-                                 (money 250))))
-         (append-transaction-events!
-          connection*
-          transaction-id
-          version
-          events))
-       (define conflict-service
-         (make-transaction-service
+       (for ([transaction-id (in-list '("txn-corrupt-json"
+                                        "txn-corrupt-replay"))]
+             [command-id (in-list '("cmd-corrupt-json"
+                                    "cmd-corrupt-replay"))]
+             [expected-stage (in-list '(journal-load replay))])
+         (define result
+           (transaction-service-execute-command
+            service
+            (scan-barcode-command
+             command-id transaction-id 1 test-barcode)))
+         (check-pred transaction-service-recovery-failed? result)
+         (check-equal? (transaction-service-recovery-failed-stage result)
+                       expected-stage))
+       (check-equal? catalog-count 0)
+       (check-equal? commit-count 0)
+       (check-equal? (receipt-row-count connection) 0))))
+
+  (test-case "catalog infrastructure failure is retryable with same command ID"
+    (call-with-store
+     (lambda (connection)
+       (define catalog-available? #f)
+       (define service
+         (make-test-service
           connection
-          #:append-events! conflicting-append))
-
-       (define result
-         (transaction-service-scan-barcode
-          conflict-service
-          "txn-conflict"
-          test-barcode
+          #:catalog-lookup
           (lambda (barcode)
-            (set! requested-lookup-count (add1 requested-lookup-count))
-            (fake-catalog-lookup barcode))))
+            (if catalog-available?
+                (fake-catalog-lookup barcode)
+                (error 'catalog "temporarily unavailable")))))
+       (execute-start! service "txn-catalog-retry" "cmd-catalog-start")
+       (define command
+         (scan-barcode-command
+          "cmd-catalog-retry" "txn-catalog-retry" 1 test-barcode))
 
-       (check-pred transaction-service-stream-conflict? result)
-       (check-equal?
-        (transaction-service-stream-conflict-transaction-id result)
-        "txn-conflict")
-       (check-equal?
-        (transaction-service-stream-conflict-expected-version result)
-        1)
-       (check-equal?
-        (transaction-service-stream-conflict-actual-version result)
-        2)
-       (check-false (transaction-service-success? result))
-       (check-equal? append-call-count 1)
-       (check-equal? requested-lookup-count 1)
+       (check-exn
+        exn:fail?
+        (lambda ()
+          (transaction-service-execute-command service command)))
+       (check-pred
+        receipt-load-not-found?
+        (load-transaction-command-receipt connection "cmd-catalog-retry"))
+       (check-equal? (journal-version connection "txn-catalog-retry") 1)
 
-       (define recovered
-         (check-success
-          (transaction-service-load-transaction normal-service "txn-conflict")
-          2))
-       (check-equal? (transaction-subtotal recovered) (money 250))
-       (check-equal?
-        (transaction-line-item-description
-         (first (transaction-line-items recovered)))
-        "Concurrent Bananas")
+       (set! catalog-available? #t)
+       (define receipt
+         (resolved-receipt
+          (transaction-service-execute-command service command)))
+       (check-outcome receipt command 'accepted "accepted" 2))))
 
-       (define persisted
-         (load-transaction-events connection "txn-conflict"))
-       (check-equal? (journal-load-succeeded-version persisted) 2)
-       (check-equal?
-        (journal-load-succeeded-events persisted)
-        (list (transaction-started "txn-conflict")
-              (sale-item-added "000000000002"
-                               "Concurrent Bananas"
-                               (money 250)))))))
-
-  (test-case "non-conflict append rejection is a persistence failure"
-    (call-with-service
-     (lambda (connection normal-service)
-       (transaction-service-start-transaction normal-service "txn-append-fail")
-       (define failure-service
-         (make-transaction-service
+  (test-case "stable unit-of-work failure maps without provisional success"
+    (call-with-store
+     (lambda (connection)
+       (define service
+         (make-test-service
           connection
-          #:append-events!
-          (lambda (connection* transaction-id version _events)
-            (append-transaction-events!
-             connection*
-             transaction-id
-             version
-             '()))))
-
+          #:commit-command!
+          (lambda (_connection _plan)
+            (transaction-command-commit-failed
+             'receipt-insert-conflict
+             'command-id-conflict
+             "test persistence failure"))))
+       (define command
+         (start-transaction-command "cmd-uow-fail" "txn-uow-fail" 0))
        (define result
-         (transaction-service-scan-barcode
-          failure-service
-          "txn-append-fail"
-          test-barcode
-          fake-catalog-lookup))
-       (check-pred transaction-service-persistence-failed? result)
-       (check-equal? (transaction-service-persistence-failed-code result)
-                     'empty-event-list)
-       (check-false (transaction-service-success? result))
+         (transaction-service-execute-command service command))
 
-       (define recovered
-         (check-success
-          (transaction-service-load-transaction
-           normal-service
-           "txn-append-fail")
+       (check-pred transaction-service-command-persistence-failed? result)
+       (check-equal?
+        (transaction-service-command-persistence-failed-command-id result)
+        "cmd-uow-fail")
+       (check-equal?
+        (transaction-service-command-persistence-failed-code result)
+        'receipt-insert-conflict)
+       (check-false (transaction-service-command-resolved? result))
+       (check-equal? (journal-version connection "txn-uow-fail") 0))))
+
+  (test-case "final unit-of-work race receipt passes through without redecision"
+    (call-with-store
+     (lambda (connection)
+       (define command
+         (start-transaction-command "cmd-final-race" "txn-final-race" 0))
+       (define final-receipt
+         (transaction-command-receipt
+          command
+          'version-conflict
+          "stream_version_conflict"
           1))
-       (check-equal? (transaction-line-items recovered) '()))))
+       (define commit-count 0)
+       (define service
+         (make-test-service
+          connection
+          #:commit-command!
+          (lambda (_connection _plan)
+            (set! commit-count (add1 commit-count))
+            (transaction-command-commit-resolved final-receipt))))
 
-  (test-case "SQLite load exceptions propagate as infrastructure failures"
-    (call-with-service
-     (lambda (connection _normal-service)
-       (define load-call-count 0)
-       (define failure-service
-         (make-transaction-service
+       (define receipt
+         (resolved-receipt
+          (transaction-service-execute-command service command)))
+
+       (check-equal? receipt final-receipt)
+       (check-equal? commit-count 1)
+       (check-equal? (journal-version connection "txn-final-race") 0))))
+
+  (test-case "transaction query remains independent of corrupt receipts"
+    (call-with-store
+     (lambda (connection)
+       (append-transaction-events!
+        connection
+        "txn-query-only"
+        0
+        (list (transaction-started "txn-query-only")))
+       (insert-transaction-command-receipt!
+        connection
+        (transaction-command-receipt
+         (start-transaction-command "cmd-unrelated" "txn-other" 0)
+         'accepted
+         "accepted"
+         1))
+       (db:query-exec connection "PRAGMA ignore_check_constraints = ON")
+       (db:query-exec
+        connection
+        "UPDATE transaction_command_receipts SET outcome_code = '' WHERE command_id = 'cmd-unrelated'")
+       (define service (make-test-service connection))
+
+       (define transaction
+         (query-transaction service "txn-query-only" 1))
+       (check-equal? (transaction-id transaction) "txn-query-only")
+       (check-equal? (transaction-status transaction) 'open))))
+
+  (test-case "SQLite load exceptions remain infrastructure failures"
+    (call-with-store
+     (lambda (connection)
+       (define service
+         (make-test-service
           connection
           #:load-events
           (lambda (connection* _transaction-id)
-            (set! load-call-count (add1 load-call-count))
             (db:query-exec connection* "SELECT * FROM missing_load_table"))))
+       (check-exn
+        db:exn:fail:sql?
+        (lambda ()
+          (transaction-service-load-transaction service "txn-load-failure"))))))
+
+  (test-case "SQLite command-commit exceptions never become resolved outcomes"
+    (call-with-store
+     (lambda (connection)
+       (define service
+         (make-test-service
+          connection
+          #:commit-command!
+          (lambda (connection* _plan)
+            (db:query-exec
+             connection* "INSERT INTO missing_commit_table VALUES (1)"))))
+       (define command
+         (start-transaction-command
+          "cmd-operational-failure" "txn-operational-failure" 0))
 
        (check-exn
         db:exn:fail:sql?
         (lambda ()
-          (transaction-service-load-transaction
-           failure-service
-           "txn-load-operational-failure")))
-       (check-equal? load-call-count 1))))
+          (transaction-service-execute-command service command)))
+       (check-equal? (journal-version connection "txn-operational-failure") 0)
+       (check-pred
+        receipt-load-not-found?
+        (load-transaction-command-receipt
+         connection "cmd-operational-failure")))))
 
-  (test-case "SQLite append exceptions never expose provisional success"
-    (call-with-service
-     (lambda (connection normal-service)
-       (transaction-service-start-transaction
-        normal-service
-        "txn-append-operational-failure")
-       (define append-call-count 0)
-       (define lookup-call-count 0)
-       (define failure-service
-         (make-transaction-service
-          connection
-          #:append-events!
-          (lambda (connection* _transaction-id _version _events)
-            (set! append-call-count (add1 append-call-count))
-            (db:query-exec connection*
-                           "INSERT INTO missing_append_table VALUES (1)"))))
+  (test-case "typed commands keep transaction streams isolated"
+    (call-with-store
+     (lambda (connection)
+       (define service (make-test-service connection))
+       (execute-start! service "txn-A" "cmd-A-start")
+       (execute-start! service "txn-B" "cmd-B-start")
+       (execute-scan! service "txn-A" "cmd-A-scan" 1 test-barcode)
+       (execute-scan! service "txn-B" "cmd-B-scan-1" 1 test-barcode)
+       (execute-scan! service "txn-B" "cmd-B-scan-2" 2 test-barcode)
+       (resolved-receipt
+        (transaction-service-execute-command
+         service
+         (tender-cash-command "cmd-A-cash" "txn-A" 2 (money 500))))
 
-       (check-exn
-        db:exn:fail:sql?
-        (lambda ()
-          (transaction-service-scan-barcode
-           failure-service
-           "txn-append-operational-failure"
-           test-barcode
-           (lambda (barcode)
-             (set! lookup-call-count (add1 lookup-call-count))
-             (fake-catalog-lookup barcode)))))
-       (check-equal? lookup-call-count 1)
-       (check-equal? append-call-count 1)
-
-       (define persisted
-         (load-transaction-events
-          connection
-          "txn-append-operational-failure"))
-       (check-equal? (journal-load-succeeded-version persisted) 1)
-       (check-equal?
-        (journal-load-succeeded-events persisted)
-        (list (transaction-started "txn-append-operational-failure"))))))
-
-  (test-case "transactions remain isolated through the service"
-    (call-with-service
-     (lambda (connection service)
-       (transaction-service-start-transaction service "txn-A")
-       (transaction-service-start-transaction service "txn-B")
-       (transaction-service-scan-barcode
-        service "txn-A" test-barcode fake-catalog-lookup)
-       (transaction-service-scan-barcode
-        service "txn-B" test-barcode fake-catalog-lookup)
-       (transaction-service-scan-barcode
-        service "txn-B" test-barcode fake-catalog-lookup)
-       (transaction-service-tender-cash service "txn-A" (money 500))
-
-       (define transaction-A
-         (check-success
-          (transaction-service-load-transaction service "txn-A")
-          3))
-       (define transaction-B
-         (check-success
-          (transaction-service-load-transaction service "txn-B")
-          3))
+       (define transaction-A (query-transaction service "txn-A" 3))
+       (define transaction-B (query-transaction service "txn-B" 3))
        (check-equal? (transaction-status transaction-A) 'paid)
        (check-equal? (transaction-subtotal transaction-A) (money 199))
        (check-equal? (transaction-status transaction-B) 'open)
        (check-equal? (transaction-subtotal transaction-B) (money 398))
-
-       (define stream-A (load-transaction-events connection "txn-A"))
-       (define stream-B (load-transaction-events connection "txn-B"))
-       (check-equal? (journal-load-succeeded-version stream-A) 3)
-       (check-equal? (journal-load-succeeded-version stream-B) 3)
        (check-equal?
-        (journal-load-succeeded-events stream-A)
+        (journal-events connection "txn-A")
         (list (transaction-started "txn-A")
               (sale-item-added test-barcode "Test Apples" (money 199))
               (cash-tendered (money 500))))
        (check-equal?
-        (journal-load-succeeded-events stream-B)
+        (journal-events connection "txn-B")
         (list (transaction-started "txn-B")
               (sale-item-added test-barcode "Test Apples" (money 199))
-              (sale-item-added test-barcode "Test Apples" (money 199))))))))
+              (sale-item-added test-barcode "Test Apples" (money 199)))))))
+
+  (test-case "unsafe identity-free mutation functions are no longer exported"
+    (for ([name (in-list '(transaction-service-start-transaction
+                           transaction-service-scan-barcode
+                           transaction-service-tender-cash
+                           transaction-service-complete-transaction))])
+      (check-exn
+       exn:fail?
+       (lambda ()
+         (dynamic-require
+          "../pos/application/transaction-service.rkt"
+          name)))))
+)

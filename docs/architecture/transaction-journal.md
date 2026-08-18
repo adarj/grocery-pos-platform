@@ -20,6 +20,12 @@ Racket replay   = authoritative transaction-state reconstruction
 This keeps transaction meaning in the Racket domain and durability in SQLite,
 consistent with the repository's architecture boundaries.
 
+The authoritative event-history decision is recorded in
+[ADR-0010](../adr/0010-use-append-only-event-journal-for-transaction-truth.md).
+The command retry and concurrency decision that safely coordinates with this
+journal is recorded in
+[ADR-0011](../adr/0011-use-durable-command-receipts-and-expected-stream-versions.md).
+
 ## Three Representations
 
 The implementation deliberately separates three related representations:
@@ -67,19 +73,29 @@ ON transaction_events (transaction_id, stream_sequence);
 
 The implementation also uses `typeof(...)` checks so values are stored with
 the intended SQLite storage classes. Migration 1 is recorded as
-`create_transaction_events`. Re-running migration against version 1 is safe
-and validates the exact recorded `(version, name)` migration identity, the
-expected table, and an actually unique stream index over exactly
-`(transaction_id, stream_sequence)`. Unknown or inconsistent migration
-histories and drifted index definitions fail rather than being silently
-adopted.
+`create_transaction_events`.
+
+Migration version 2 creates `transaction_command_receipts`, the durable store
+for typed command identity and original deterministic outcome metadata. Its
+full schema and persistence contract are documented in
+[Transaction Command Receipts](transaction-command-receipts.md). These
+receipts are not transaction facts and are never replayed as transaction
+state.
+
+The migration runner treats recorded history as an exact prefix of the known
+ordered migration list. A fresh database applies versions 1 and 2. A real v1
+database validates and preserves its event schema and rows before applying only
+version 2. A correct v2 database is validated without schema mutation. Unknown,
+skipped, reordered, renamed, or drifted migration state fails rather than being
+silently repaired. This ordered-prefix mechanism can extend to migration 3
+without adding another historical-version conditional.
 
 Table creation is not hidden inside append or load. Application composition is
 responsible for running migrations explicitly before using the store.
 
-No recorded timestamp is present in version 1. A future timestamp would be
-persistence metadata only; it must never determine event order or affect
-replay.
+No recorded timestamp is present in either current table. A future timestamp
+would be persistence metadata only; it must never determine event order or
+affect replay.
 
 ## Stream Sequence and Identity
 
@@ -133,13 +149,62 @@ The batch is then inserted at consecutive sequence numbers in one SQLite
 transaction. If any insert fails, SQLite rolls back every insert from that
 batch and preserves the earlier stream unchanged.
 
+### Internal transaction ownership split
+
+The public append operation is implemented as:
+
+```text
+validate arguments and reject an empty list
+  -> prepare and serialize the complete event batch
+  -> BEGIN IMMEDIATE
+  -> transaction-scoped version/identity checks and inserts
+  -> COMMIT
+```
+
+`prepare-transaction-events` accepts only a non-empty list of domain events and
+returns an opaque prepared batch. Its constructor and encoded fields are not
+public, so persistence composition code cannot supply arbitrary schema
+versions, event types, or event JSON. Preparation performs no database access
+or transaction management.
+
+`append-prepared-transaction-events/in-transaction!` performs the final stream
+version read, identity checks, sequence allocation, and inserts without
+starting, committing, or rolling back a transaction. Its explicitly internal
+composition contract requires an active caller-owned database transaction and
+is enforced using Racket DB's transaction-state predicate.
+
+The public `append-transaction-events!` remains the normal standalone API and
+continues to own one `BEGIN IMMEDIATE` transaction. Persistence composition can
+prepare first and invoke the same transaction-scoped mechanics
+inside a larger caller-owned transaction.
+
+The transaction-command unit of work now uses that composition seam. It
+serializes accepted events before reserving the writer, then uses one
+`BEGIN IMMEDIATE` for the final command-ID lookup, stream-version check, event
+append, and receipt insertion. A receipt-only deterministic outcome uses the
+same writer transaction without appending a transaction fact. If the receipt
+cannot be inserted after events were written, the callback aborts so the event
+inserts roll back rather than committing alone.
+
+`transaction-stream-version/in-transaction` exposes the same current-version
+query to this persistence composition and requires an active caller-owned
+transaction. The event append core repeats the final expected-version check
+before its inserts; both checks therefore occur under the same SQLite writer
+reservation.
+
+The transaction service uses this unit of work for every mutation. It performs
+an optimistic early receipt lookup to avoid repeating work for a known command,
+while the unit of work repeats identity and version validation inside the final
+writer transaction to close races.
+
 The initial design relies on SQLite's local writer serialization, optimistic
 stream versions, and the unique index. It does not introduce a process-global
 lock or a larger distributed-concurrency framework. SQLite permits one active
 writer, so appends to different transaction streams can briefly contend even
 though their expected versions are independent. The batches in this milestone
-are deliberately short; connection-pool and higher-throughput policy remain
-future composition concerns.
+are deliberately short. Runtime composition now supplies a bounded pool and a
+thread-mapped virtual connection; automatic busy handling and higher-throughput
+policy remain future concerns.
 
 ## Ordered Load and Corruption Detection
 
@@ -192,69 +257,69 @@ layers, while neither the domain nor the journal depends on it:
                domain         and event codec
 ```
 
-`make-transaction-service` receives an already-open, already-migrated SQLite
-connection. It neither owns a global connection nor runs migrations on every
-command. Bootstrap composition remains responsible for opening the configured
-database and migrating it once.
+`make-transaction-service` receives an already-prepared SQLite connection value
+and an injected catalog lookup. At runtime that value is a virtual connection
+backed by a bounded pool of actual connections. The service neither owns a
+global physical connection nor runs migrations on every command. The process
+composition root opens a dedicated startup connection, migrates the configured
+database once, disconnects that connection, and only then creates request-time
+resources.
 
 The service provides operations to:
 
-- start a transaction;
-- load/recover a transaction;
-- scan a barcode;
-- tender sufficient cash;
-- complete a paid transaction.
+- execute one of the four typed mutating transaction commands;
+- load/recover current authoritative transaction state.
 
-### Load, Replay, Decide, Append
+### Duplicate, Recover, Decide, Commit
 
-An existing-transaction command follows this sequence:
+A mutation follows this sequence:
 
 ```text
-load ordered journal stream
-  -> decode and validate journal records
-  -> replay domain events
-  -> decide command against recovered state
-     -> rejected: append nothing
-     -> accepted: append emitted events at loaded stream version
-        -> append succeeds: report committed state
-        -> append fails/conflicts: report failure, not provisional state
+load receipt by command_id
+  -> known equal command: return original receipt
+  -> known different command: reject command-ID reuse
+  -> corrupt receipt: fail recovery
+  -> unused ID:
+       load and replay ordered journal stream
+         -> enforce caller expected_version
+         -> decide through the pure domain when fresh
+         -> create accepted or receipt-only commit plan
+         -> atomically commit through the command unit of work
 ```
 
-Starting a transaction uses the corresponding empty-stream flow. It verifies
-that load reports no existing stream, asks the domain for the
-`transaction-started` decision, and appends at expected version 0. An existing
-stream is never overwritten or reset.
+The unit of work repeats command-ID and stream-version checks under
+`BEGIN IMMEDIATE`. A final race can replace any provisional outcome with a
+durable `stream_version_conflict`; the service does not reload, retry, or
+re-decide automatically.
 
-The state produced by an accepted domain command is **provisional** until the
-exact emitted event list has been committed. The service returns that state as
-success only after append succeeds. It is safe to avoid a redundant post-write
-reload because the domain already produced the state by applying those exact
-events through the same reducer used for replay. Tests separately prove that a
-fresh load and replay returns an equal transaction.
+Deterministic two-connection tests force two services to complete optimistic
+recovery and decision before either final commit. They establish that
+simultaneous same-command submissions converge on one durable receipt and one
+set of facts, same-ID/different-command submissions preserve only the winner,
+and distinct commands at the same expected version cannot both append their
+provisional facts. A losing deterministic rejection is likewise not frozen if
+the stream changes before its final receipt commit.
+
+The application never silently substitutes the latest stream version for a
+new command's caller-supplied expected version. A stale command becomes a
+receipt-only `stale_expected_version` outcome without domain or catalog work.
 
 ### Result Classes
 
-Explicit service results distinguish:
+Mutation results distinguish:
 
-- committed success, containing transaction state and committed stream
-  version;
-- domain rejection, containing the business rejection code, unchanged
-  recovered state, and unchanged version;
-- transaction not found;
-- transaction already exists;
-- optimistic stream-version conflict;
-- non-conflict persistence rejection;
-- journal-load or replay recovery failure.
+- resolved command containing its durable original receipt;
+- command-ID reuse;
+- stable command persistence failure;
+- receipt/journal/replay recovery failure.
 
-A domain rejection means the command was understood and business rules refused
-it; no domain event is appended. Corrupt data, invalid replay history, and
-concurrent writes are not presented as business rejections.
+Mutation results never contain provisional transaction state or a duplicate
+flag. A deterministic domain rejection is represented by its durable receipt
+and writes no transaction event.
 
-When append reports `stream-version-conflict`, the service exposes the expected
-and actual versions without the provisional accepted transaction. It does not
-silently reload or rerun the command. The caller must explicitly recover and
-decide what to do next. This rule prevents future commands involving external
-effects or user-visible choices from being repeated automatically.
+Transaction queries retain their separate result classes for recovered state,
+not-found, and recovery failure. Querying transaction state does not read
+command receipts, preserving the journal as transaction truth.
 
 Journal decoding/corruption failures identify the load stage and retain stable
 journal diagnostics. A syntactically valid journal whose events violate the
@@ -264,11 +329,12 @@ operational exceptions continue to propagate as infrastructure failures.
 
 ### Catalog Boundary and Restart Recovery
 
-The service does not hard-code a catalog. A scan receives a current catalog
-lookup function explicitly. The lookup is used once by the live domain
-decision; an accepted `sale-item-added` event persists the sale-time barcode,
-description, and exact unit price snapshot. Historical load and replay have no
-catalog dependency.
+The service does not hard-code a catalog. Composition injects the current
+catalog lookup when constructing the service. A fresh, version-matched scan
+uses it through the live domain decision; an accepted `sale-item-added` event
+persists the sale-time barcode, description, and exact unit price snapshot.
+Known retries, command-ID reuse, missing transactions, stale commands, and
+historical replay do not consult the catalog.
 
 Process restart recovery opens the same SQLite database using a new connection,
 loads and decodes the stream, and replays it from the first event. No mutable
@@ -276,21 +342,34 @@ in-memory transaction snapshot is required. File-backed tests cover creation
 and scan on one connection, tender after a first restart, completion after a
 second restart, and final recovery after a third restart.
 
+File-backed tests also simulate a caller-observed exception immediately after
+the real command unit of work has committed. After closing that connection, a
+new service resolves the same command ID from its durable receipt and does not
+append the fact or consult the catalog again. Conversely, a simulated failure
+before the unit of work leaves no event or receipt, so retrying that same ID can
+execute normally. This is a retry-based recovery protocol for uncertain caller
+observation; it is not a claim of arbitrary distributed exactly-once execution.
+
 ## Deliberately Deferred
 
-The persistent service is not yet exposed through HTTP or Flutter. This
-checkpoint also does not add:
+The persistent service is exposed through the narrow command/query routes in
+[Transaction HTTP API v1](transaction-http-api-v1.md), but not yet through a
+Flutter transaction workflow. The journal milestone also does not add:
 
 - authoritative snapshots or projections;
-- timestamps, event UUIDs, or command IDs;
+- timestamps or event UUIDs;
 - hash chaining or integrity signatures;
-- command idempotency;
 - outbox or cloud synchronization tables;
-- receipt, tender, inventory, or card-payment tables;
+- sale-receipt, tender, inventory, or card-payment tables;
 - partial/split tender or other new transaction behavior;
-- HTTP or Flutter integration.
+- Flutter transaction integration.
 
-Connection paths and ownership remain composition concerns. Persistence code
-does not hard-code `SQLITE_DB_PATH` and does not hide a global mutable database
-connection. Automated tests use isolated temporary databases rather than the
-developer's normal local database.
+Persistence code does not hard-code `SQLITE_DB_PATH` and does not hide a global
+mutable database connection. The runtime resolves the configured path once,
+migrates with a dedicated startup connection, and gives request threads actual
+connections through a bounded pool and virtual connection. See
+[Racket POS Core Runtime Composition](racket-runtime.md). Automated tests use
+isolated temporary databases rather than the developer's normal local
+database. Automatic SQLite busy retry/backoff remains deferred; a lock failure
+is currently an infrastructure failure, and tests establish that it cannot
+produce a false durable success or partial command write.
