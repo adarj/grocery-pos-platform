@@ -5,9 +5,11 @@
 Transaction Command Schema v1 defines the stable JSON representation of the
 four mutating commands supported by the current cash-sale transaction slice.
 
-It defines transport-independent command values and their logical identity. It
-does not define HTTP routes. The persistent transaction application service
-accepts these typed values through one idempotent mutation boundary. The
+It defines transport-independent command values and their logical identity. The
+persistent transaction application service accepts these typed values through
+one idempotent mutation boundary, and
+[Transaction HTTP API v1](transaction-http-api-v1.md) reuses this codec as its
+request-body contract rather than defining another command representation. The
 separate [Transaction Command Receipts](transaction-command-receipts.md)
 contract uses this schema as its durable command representation. The governing
 identity and retry decision is recorded in
@@ -54,8 +56,9 @@ Every Schema v1 command is a JSON object containing exactly these fields:
 - `payload` has the exact command-specific object shape defined below.
 
 The codec does not trim, case-fold, generate, or otherwise reinterpret command
-IDs, transaction IDs, or barcodes. String-size and request-body limits belong
-to the future HTTP boundary.
+IDs, transaction IDs, or barcodes. The current HTTP adapter does not claim a
+network-level streaming/body-size limit; such transport hardening remains
+separate from command value semantics.
 
 ## Command types
 
@@ -192,8 +195,11 @@ receipts.
 
 ## Deliberately deferred
 
-Schema v1 does not implement or define:
+Schema v1 itself does not implement or define:
 
-- HTTP request or response mappings;
 - server-side command-ID generation;
 - cryptographic request hashes or canonical JSON.
+
+The separate [Transaction HTTP API v1](transaction-http-api-v1.md) defines the
+implemented route and response mapping while continuing to use this codec
+unchanged.

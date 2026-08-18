@@ -352,8 +352,9 @@ observation; it is not a claim of arbitrary distributed exactly-once execution.
 
 ## Deliberately Deferred
 
-The persistent service is not yet exposed through HTTP or Flutter. This
-checkpoint also does not add:
+The persistent service is exposed through the narrow command/query routes in
+[Transaction HTTP API v1](transaction-http-api-v1.md), but not yet through a
+Flutter transaction workflow. The journal milestone also does not add:
 
 - authoritative snapshots or projections;
 - timestamps or event UUIDs;
@@ -361,7 +362,7 @@ checkpoint also does not add:
 - outbox or cloud synchronization tables;
 - sale-receipt, tender, inventory, or card-payment tables;
 - partial/split tender or other new transaction behavior;
-- HTTP or Flutter integration.
+- Flutter transaction integration.
 
 Persistence code does not hard-code `SQLITE_DB_PATH` and does not hide a global
 mutable database connection. The runtime resolves the configured path once,

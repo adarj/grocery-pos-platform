@@ -6,7 +6,9 @@
 
 This document defines the initial communication boundary between local Flutter applications and the Racket POS Core.
 
-Only the health endpoint is implemented at the time of writing. Transaction APIs will be added incrementally alongside the tested transaction domain model.
+The health endpoint and Transaction HTTP API v1 are implemented. The detailed
+transaction command/query contract is documented in
+[Transaction HTTP API v1](transaction-http-api-v1.md).
 
 ## Purpose
 
@@ -90,9 +92,9 @@ The service held by the application uses that virtual connection; unrelated
 request threads therefore do not share one physical transaction context.
 
 The server application is created through `make-app` with the transaction
-service as an explicit dependency. Transaction routes are still deliberately
-absent, so the dependency is currently only a composition seam. The detailed
-ownership and shutdown contract is documented in
+service as an explicit dependency. Transaction routes delegate through that
+same service rather than reimplementing its idempotency or transaction
+semantics. The detailed ownership and shutdown contract is documented in
 [Racket POS Core Runtime Composition](racket-runtime.md).
 
 ## Health Endpoint
@@ -132,12 +134,12 @@ Clients must tolerate JSON object field ordering differences.
 
 State-changing POS operations are modeled internally as strict typed commands
 rather than allowing callers to mutate domain state directly. The durable
-application-service boundary now requires the Transaction Command Schema v1
-identity and version fields, although HTTP transaction routes are not yet
-implemented. Future HTTP handlers must preserve the established application
-semantics rather than implementing a separate idempotency policy.
+application-service boundary requires the Transaction Command Schema v1
+identity and version fields. `POST /transaction-commands` exposes that boundary
+by strictly decoding Schema v1 and delegating to the service without
+implementing a separate idempotency policy.
 
-A future HTTP request will need to preserve a command envelope resembling:
+The implemented HTTP request preserves a command envelope resembling:
 
 ```json
 {
@@ -191,16 +193,17 @@ This requirement becomes especially important for:
 
 ### Mutation outcomes and current state
 
-A future mutation response must represent the command's original durable
+A mutation response represents the command's original durable
 outcome kind, stable machine-readable code, and outcome stream version. It must
 not substitute current transaction state for a delayed command retry or expose
 provisional state before persistence succeeds.
 
-Current authoritative transaction state and version are obtained through a
-separate transaction read. HTTP handlers should strictly decode the command,
+Current authoritative transaction state and version are obtained through
+`GET /transactions/{transaction_id}`. HTTP handlers strictly decode commands,
 delegate to `transaction-service-execute-command`, and map its stable result;
-they must not reimplement duplicate lookup, expected-version checks, domain
-decision, or receipt/event persistence.
+they do not reimplement duplicate lookup, expected-version checks, domain
+decision, or receipt/event persistence. Exact payloads and status mappings are
+specified in [Transaction HTTP API v1](transaction-http-api-v1.md).
 
 ## Transaction State
 
@@ -246,7 +249,8 @@ Payment APIs will receive a dedicated contract before production payment integra
 
 API errors should be machine-readable and stable enough for Flutter to map them to appropriate user-facing behavior.
 
-A future error response should follow a structure similar to:
+Implemented API errors use the common structure below. Individual routes may
+add documented stable fields such as `reason` or `retry_same_command_id`:
 
 ```json
 {
@@ -348,11 +352,12 @@ Currently implemented:
 
 ```text
 GET /health
+POST /transaction-commands
+GET /transactions/{transaction_id}
 ```
 
-The in-memory transaction domain and durable idempotent typed-command
-application service are implemented, but they are deliberately not exposed as
-HTTP routes yet. A transaction API contract will be introduced as a separately
-scoped, tested checkpoint rather than as a large speculative REST surface.
+The two transaction routes expose only the implemented durable typed-command
+mutation and authoritative journal-replay query. Command-specific mutation
+routes and speculative transaction operations are deliberately absent.
 
 The domain model should drive the interface, not the reverse.

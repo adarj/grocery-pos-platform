@@ -48,8 +48,9 @@
     (define response
       (app (make-request #"GET" "/transactions")))
     (check-equal? (response-code response) 404)
-    (check-equal? (hash-ref (response-jsexpr response) 'error)
-                  "not_found"))
+    (check-equal?
+     (hash-ref (hash-ref (response-jsexpr response) 'error) 'code)
+     "not_found"))
 
   (test-case "app factory rejects an invalid transaction service"
     (check-exn exn:fail:contract?

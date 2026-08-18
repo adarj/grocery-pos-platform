@@ -137,6 +137,8 @@ Verified capabilities currently include:
   two-connection concurrency and file-backed restart/retry coverage;
 * Racket runtime composition with startup migration, a bounded SQLite pool,
   thread-mapped virtual request connections, and explicit shutdown ownership;
+* Transaction HTTP API v1 with one strict idempotent command route and one
+  authoritative transaction-state query route;
 * Flutter Linux ARM64 POS terminal;
 * Flutter widget tests;
 * Flutter-to-Racket local health connection;
@@ -364,9 +366,9 @@ the original deterministic outcome across retries, while accepted events remain
 the authoritative transaction facts. Concurrent and lost-response tests prove
 that retrying the same command cannot duplicate the current cash-sale facts.
 
-This transaction workflow is not yet exposed through HTTP routes or a full
-Flutter checkout interface. Those integrations require separately scoped and
-tested milestones; the existing API surface remains `GET /health`.
+This transaction workflow is now exposed through the narrow Transaction HTTP
+API v1 command and query routes. A full Flutter checkout interface remains a
+separately scoped and tested future milestone.
 
 ## Status
 

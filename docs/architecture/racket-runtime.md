@@ -109,21 +109,24 @@ work. Historical replay still uses sale-time event snapshots and never queries
 that catalog.
 
 `make-app` requires the constructed transaction service and returns the servlet
-handler. The service is captured explicitly rather than stored in a global,
-but no transaction route consumes it yet.
+handler. The service is captured explicitly rather than stored in a global.
+Transaction routes delegate to that service through the transport-only adapter
+documented in [Transaction HTTP API v1](transaction-http-api-v1.md).
 
 ## Current HTTP surface
 
-The only implemented route remains:
+The implemented routes are:
 
 ```text
 GET /health
+POST /transaction-commands
+GET /transactions/{transaction_id}
 ```
 
-It remains a liveness endpoint and does not perform a database or peripheral
-readiness probe. Startup proves that the configured database could be opened
-and migrated before the listener began; it does not imply that every future
-checkout dependency is ready.
+`GET /health` remains a liveness endpoint and does not perform a database or
+peripheral readiness probe. Startup proves that the configured database could
+be opened and migrated before the listener began; it does not imply that every
+future checkout dependency is ready.
 
 ## Tested lifecycle
 
@@ -143,9 +146,8 @@ Focused file-backed tests establish:
 
 ## Deliberately deferred
 
-This runtime composition does not add:
+This runtime composition and HTTP adapter do not add:
 
-- transaction HTTP routes or request/response codecs;
 - a readiness endpoint;
 - authentication or authorization;
 - a persistent catalog;
@@ -154,6 +156,6 @@ This runtime composition does not add:
 - payment, device, drawer, or receipt integration;
 - exactly-once external-effect guarantees.
 
-Transaction route design is the next separate checkpoint. Future external
-effects still require persisted intent and explicit unknown-outcome recovery;
-they must not be placed inside a long-lived SQLite writer transaction.
+Future external effects still require persisted intent and explicit
+unknown-outcome recovery; they must not be placed inside a long-lived SQLite
+writer transaction.

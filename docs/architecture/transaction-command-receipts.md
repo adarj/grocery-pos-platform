@@ -296,7 +296,6 @@ infrastructure exceptions, consistent with the transaction event store.
 
 This persistence contract does not yet implement:
 
-- HTTP command routes or responses;
 - automatic SQLite busy retry or backoff;
 - exactly-once external payment or device effects and `PaymentUnknown`
   recovery;
@@ -305,4 +304,6 @@ This persistence contract does not yet implement:
 The process-level SQLite ownership model is now implemented separately through
 the bounded pool and thread-mapped virtual connection described in
 [Racket POS Core Runtime Composition](racket-runtime.md). Transaction routes
-still do not exist.
+use the receipt outcome through the transport mapping documented in
+[Transaction HTTP API v1](transaction-http-api-v1.md); HTTP does not change the
+receipt's persistence meaning.
