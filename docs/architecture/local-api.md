@@ -159,6 +159,12 @@ The exact transport-independent schema is documented in
 idempotency decision is recorded in
 [ADR-0011](../adr/0011-use-durable-command-receipts-and-expected-stream-versions.md).
 
+The Flutter terminal now consumes this boundary through a typed `PosCoreClient`
+and strict HTTP adapter. Its command, durable-result, authoritative-snapshot,
+and failure models are documented in
+[Flutter POS Core Client Foundation](flutter-pos-client.md). Cashier workflow
+orchestration and widgets are not implemented yet.
+
 ### Command IDs and expected versions
 
 Every mutating transaction command has a `command_id` that is globally unique

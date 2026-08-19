@@ -140,6 +140,8 @@ Verified capabilities currently include:
 * Transaction HTTP API v1 with one strict idempotent command route and one
   authoritative transaction-state query route;
 * Flutter Linux ARM64 POS terminal;
+* typed Flutter POS Core client models for transaction commands, durable command
+  outcomes, authoritative transaction snapshots, and safe failures;
 * Flutter widget tests;
 * Flutter-to-Racket local health connection;
 * nixGL-based Flutter GUI launch in the current VM environment;

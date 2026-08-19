@@ -1,5 +1,11 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:pos_terminal/main.dart';
+import 'package:pos_terminal/app/pos_terminal_app.dart';
+import 'package:pos_terminal/core/pos_core/models/command_result.dart';
+import 'package:pos_terminal/core/pos_core/models/pos_core_failure.dart';
+import 'package:pos_terminal/core/pos_core/models/pos_core_health.dart';
+import 'package:pos_terminal/core/pos_core/models/transaction_command.dart';
+import 'package:pos_terminal/core/pos_core/models/transaction_snapshot.dart';
+import 'package:pos_terminal/core/pos_core/pos_core_client.dart';
 
 class FakeConnectedPosCoreClient implements PosCoreClient {
   @override
@@ -11,12 +17,32 @@ class FakeConnectedPosCoreClient implements PosCoreClient {
       environment: 'dev',
     );
   }
+
+  @override
+  Future<PosCommandResult> executeCommand(TransactionCommand command) {
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<TransactionSnapshot> fetchTransaction(String transactionId) {
+    throw UnimplementedError();
+  }
 }
 
 class FakeUnavailablePosCoreClient implements PosCoreClient {
   @override
   Future<PosCoreHealth> fetchHealth() async {
-    throw const PosCoreUnavailableException('Connection refused.');
+    throw const PosCoreTransportFailure('Connection refused.');
+  }
+
+  @override
+  Future<PosCommandResult> executeCommand(TransactionCommand command) {
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<TransactionSnapshot> fetchTransaction(String transactionId) {
+    throw UnimplementedError();
   }
 }
 
@@ -33,8 +59,9 @@ void main() {
     expect(find.text('grocery-pos-core 0.0.0-dev (dev)'), findsOneWidget);
   });
 
-  testWidgets('shows unavailable state when POS Core cannot be reached',
-      (tester) async {
+  testWidgets('shows unavailable state when POS Core cannot be reached', (
+    tester,
+  ) async {
     await tester.pumpWidget(
       PosTerminalApp(client: FakeUnavailablePosCoreClient()),
     );
