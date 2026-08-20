@@ -3,8 +3,8 @@
 ## Status
 
 The Flutter `pos_terminal` implements a typed client for the three current
-local POS Core routes. The cashier controller and transaction workflow widgets
-are deliberately deferred to a later checkpoint.
+local POS Core routes and a cashier-session application controller over that
+client. Transaction workflow widgets remain deliberately deferred.
 
 The backend wire contract remains authoritative and is documented in
 [Transaction HTTP API v1](transaction-http-api-v1.md). Command retry semantics
@@ -32,6 +32,7 @@ lib/
   app/pos_terminal_app.dart         Material application
   core/pos_core/                    typed client boundary and HTTP adapter
     models/                         wire-facing immutable values
+  features/cashier/                 session state, IDs, and orchestration
   features/status/                  current health/status presentation
 ```
 
@@ -52,6 +53,65 @@ POST automatically.
 Command identity belongs to the caller's logical intent. Higher-level cashier
 orchestration must retain the exact command value whenever an uncertain result
 requires a same-ID retry.
+
+## Cashier session orchestration
+
+`CashierSessionController` is a plain `ChangeNotifier` with one immutable
+`CashierSessionState`. It owns application/session concerns only:
+
+- creating a new transaction and command ID for a new start intent;
+- creating one new command ID for every other new logical mutation;
+- deriving a new command's `expectedVersion` only from the current
+  authoritative `TransactionSnapshot`;
+- allowing only one command or refresh operation in flight;
+- retaining the exact command after an uncertain outcome;
+- explicitly resubmitting that same object when retry is requested;
+- refreshing authoritative transaction state after a known durable result.
+
+The production `CashierIdGenerator` uses secure random opaque identifiers.
+Their `cmd_` and `txn_` prefixes aid local diagnosis but have no business
+meaning and are never parsed. ID generation is injected so orchestration tests
+can be deterministic.
+
+A new intent and a retry are different operations:
+
+```text
+new intent
+  -> new command ID
+  -> expected version from authoritative GET snapshot
+
+uncertain retry
+  -> exact retained TransactionCommand
+  -> same command ID, transaction ID, expected version, and payload
+```
+
+The controller never automatically retries a mutation or changes its identity.
+An uncertain start retains both the generated command ID and generated
+transaction ID.
+
+## Snapshot trust and refresh
+
+A non-null snapshot in `CashierSessionState` means that it is currently trusted
+as the concurrency basis for a new command. The controller invalidates that
+snapshot before submitting a mutation or starting a refresh. It remains
+unavailable after an uncertain mutation, a non-retryable mutation failure, or a
+failed post-command read.
+
+A `PosCommandResult` is stored for presentation but never used to update
+version, line items, totals, tender, change, or transaction status. Accepted,
+domain-rejected, and version-conflicted non-start commands are followed by
+`fetchTransaction`; only that returned snapshot restores mutation capability.
+A durable `not_found` clears the active session without fabricating state.
+
+An accepted start refreshes the generated transaction ID. A start result of
+`already_exists` is surfaced but does not attach the cashier to the collided
+transaction. An explicit query error with code `transaction_not_found` also
+clears the active session; other read failures retain the active ID so the user
+can request another GET without resending the resolved command.
+
+While an uncertain command is pending, new mutations and ordinary refresh are
+blocked because GET alone cannot prove the original command's durable outcome.
+Only `retryPendingCommand` resolves it through the backend command receipt.
 
 ## Command results and transaction reads
 
@@ -88,6 +148,11 @@ responses.
 
 ## Deliberately deferred
 
-This foundation does not implement cashier workflow state, command-ID
-generation, automatic retry, pending-command persistence, barcode input,
-tender/completion widgets, local Flutter storage, or payment behavior.
+Pending commands currently exist only in Flutter process memory. A Flutter
+process crash after an uncertain POST can therefore lose the retained command;
+durable client-side pending-intent recovery remains future work and must not be
+approximated by generating a replacement ID.
+
+This foundation does not implement cashier widgets, barcode input, tender or
+completion controls, visual error mapping, automatic retry, retry timers,
+pending-command persistence, local Flutter storage, or payment behavior.
