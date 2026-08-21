@@ -103,3 +103,6 @@ jobs:
 
       - name: Run Flutter tests
         run: nix develop --command just test-flutter
+
+      - name: Run POS integration tests
+        run: nix develop --command just test-pos-integration

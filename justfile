@@ -13,6 +13,7 @@ test:
 check:
     just analyze-flutter
     just test
+    just test-pos-integration
 
 run-racket:
     cd pos-backend-racket && racket main.rkt
@@ -28,6 +29,9 @@ run-pos-plain:
 
 test-flutter:
     cd flutter/apps/pos_terminal && flutter test
+
+test-pos-integration:
+    cd flutter/apps/pos_terminal && flutter test --concurrency=1 integration/real_pos_core_test.dart
 
 analyze-flutter:
     cd flutter/apps/pos_terminal && flutter analyze

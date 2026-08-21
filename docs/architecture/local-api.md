@@ -159,6 +159,13 @@ The exact transport-independent schema is documented in
 idempotency decision is recorded in
 [ADR-0011](../adr/0011-use-durable-command-receipts-and-expected-stream-versions.md).
 
+The Flutter terminal now consumes this boundary through a typed `PosCoreClient`
+and strict HTTP adapter. Its command, durable-result, authoritative-snapshot,
+and failure models are documented in
+[Flutter POS Core Client Foundation](flutter-pos-client.md). The implemented
+cashier controller and widgets use that boundary for the current start, scan,
+cash-tender, completion, recovery, and next-sale workflow.
+
 ### Command IDs and expected versions
 
 Every mutating transaction command has a `command_id` that is globally unique
@@ -344,7 +351,10 @@ Flutter tests should verify:
 * structured errors map to appropriate UI states;
 * clients do not calculate authoritative business results independently.
 
-Later integration tests should exercise the complete Flutter → Racket boundary.
+The explicit real-process integration suite exercises the complete typed
+Flutter client/controller → HTTP → Racket runtime → file-backed SQLite
+boundary, including restart and same-command recovery. See
+[POS integration testing](../development/integration-testing.md).
 
 ## Current Implemented Surface
 

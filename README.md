@@ -140,7 +140,14 @@ Verified capabilities currently include:
 * Transaction HTTP API v1 with one strict idempotent command route and one
   authoritative transaction-state query route;
 * Flutter Linux ARM64 POS terminal;
+* typed Flutter POS Core client models for transaction commands, durable command
+  outcomes, authoritative transaction snapshots, and safe failures;
+* Flutter cashier session orchestration and a start/scan/cash-tender/complete
+  interface driven by authoritative transaction reads;
 * Flutter widget tests;
+* isolated Flutter-to-Racket real-process integration tests covering complete
+  cash sales, restart recovery, uncertain transport, and durable same-command
+  receipt resolution;
 * Flutter-to-Racket local health connection;
 * nixGL-based Flutter GUI launch in the current VM environment;
 * GitHub Actions workflow definitions for scaffold/Nix validation, Racket
@@ -271,6 +278,13 @@ Run Flutter tests:
 just test-flutter
 ```
 
+Run the isolated real POS Core integration suite (it starts and owns the Racket
+process automatically):
+
+```bash
+just test-pos-integration
+```
+
 Run Flutter static analysis:
 
 ```bash
@@ -283,7 +297,8 @@ Run the combined project test suite:
 just test
 ```
 
-Run the complete local quality gate, including Flutter static analysis and both test suites:
+Run the complete local quality gate, including Flutter static analysis, the
+fast Racket/Flutter suites, and the real-process POS integration suite:
 
 ```bash
 just check
@@ -366,9 +381,12 @@ the original deterministic outcome across retries, while accepted events remain
 the authoritative transaction facts. Concurrent and lost-response tests prove
 that retrying the same command cannot duplicate the current cash-sale facts.
 
-This transaction workflow is now exposed through the narrow Transaction HTTP
-API v1 command and query routes. A full Flutter checkout interface remains a
-separately scoped and tested future milestone.
+This transaction workflow is exposed through the narrow Transaction HTTP API
+v1 command and query routes. Flutter now implements the current cash-sale
+cashier slice through authoritative completion, persists exact pending command
+identity before mutation POSTs for process-restart recovery, and starts the next
+sale only through an explicit completed-session action. Broader production
+checkout capabilities remain separately scoped work.
 
 ## Status
 
