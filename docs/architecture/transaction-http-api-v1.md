@@ -239,5 +239,5 @@ boundary. Transaction HTTP API v1 does not add authentication, actor/session
 authorization, or production security claims. It also does not add a request
 streaming/body-size guarantee, readiness endpoint, automatic SQLite busy
 retry, persistent catalog, payment behavior, or external-effect exactly-once
-semantics. Flutter now has a typed client plus the initial start-and-scan
-cashier surface; cash tender and completion presentation remain deferred.
+semantics. Flutter now has a typed client and the current start, scan, cash
+tender, authoritative change, and completion cashier slice.

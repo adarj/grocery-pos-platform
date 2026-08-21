@@ -3,8 +3,11 @@ import 'package:flutter/material.dart';
 import '../../core/pos_core/models/command_result.dart';
 import '../../core/pos_core/models/transaction_snapshot.dart';
 import 'cashier_money_format.dart';
+import 'cashier_money_input.dart';
 import 'cashier_session_controller.dart';
 import 'cashier_session_state.dart';
+
+enum _SubmittedAction { scan, tender, completion }
 
 final class CashierScreen extends StatefulWidget {
   const CashierScreen({required this.controller, super.key});
@@ -18,19 +21,27 @@ final class CashierScreen extends StatefulWidget {
 final class _CashierScreenState extends State<CashierScreen> {
   final TextEditingController _barcodeController = TextEditingController();
   final FocusNode _barcodeFocusNode = FocusNode();
+  final TextEditingController _cashController = TextEditingController();
+  final FocusNode _cashFocusNode = FocusNode();
 
-  String? _submittedBarcode;
-  String? _validationMessage;
+  _SubmittedAction? _submittedAction;
+  String? _barcodeValidationMessage;
+  String? _cashValidationMessage;
 
   @override
   void dispose() {
     _barcodeController.dispose();
     _barcodeFocusNode.dispose();
+    _cashController.dispose();
+    _cashFocusNode.dispose();
     super.dispose();
   }
 
   Future<void> _startSale() async {
-    setState(() => _validationMessage = null);
+    setState(() {
+      _barcodeValidationMessage = null;
+      _cashValidationMessage = null;
+    });
     await widget.controller.startTransaction();
   }
 
@@ -40,21 +51,56 @@ final class _CashierScreenState extends State<CashierScreen> {
       return;
     }
     if (barcode.isEmpty) {
-      setState(() => _validationMessage = 'Enter a barcode.');
+      setState(() => _barcodeValidationMessage = 'Enter a barcode.');
       return;
     }
 
     setState(() {
-      _submittedBarcode = barcode;
-      _validationMessage = null;
+      _submittedAction = _SubmittedAction.scan;
+      _barcodeValidationMessage = null;
     });
     await widget.controller.scanBarcode(barcode);
-    _restoreBarcodeWorkflowAfterResolution();
+    _restoreInputWorkflowAfterResolution();
+  }
+
+  Future<void> _submitTender(String input) async {
+    final state = widget.controller.state;
+    if (!state.canExecuteNewMutation) {
+      return;
+    }
+
+    if (input.trim().isEmpty) {
+      setState(() => _cashValidationMessage = 'Enter cash received.');
+      return;
+    }
+    final amountMinorUnits = parseCashInputMinorUnits(input);
+    if (amountMinorUnits == null) {
+      setState(() => _cashValidationMessage = 'Enter a valid cash amount.');
+      return;
+    }
+
+    setState(() {
+      _submittedAction = _SubmittedAction.tender;
+      _cashValidationMessage = null;
+    });
+    await widget.controller.tenderCash(amountMinorUnits);
+    _restoreInputWorkflowAfterResolution();
+  }
+
+  Future<void> _completeSale() async {
+    final state = widget.controller.state;
+    if (!state.canExecuteNewMutation) {
+      return;
+    }
+
+    setState(() => _submittedAction = _SubmittedAction.completion);
+    await widget.controller.completeTransaction();
+    _restoreInputWorkflowAfterResolution();
   }
 
   Future<void> _retryPendingCommand() async {
     await widget.controller.retryPendingCommand();
-    _restoreBarcodeWorkflowAfterResolution();
+    _restoreInputWorkflowAfterResolution();
   }
 
   Future<void> _refreshTransaction() async {
@@ -63,40 +109,63 @@ final class _CashierScreenState extends State<CashierScreen> {
     if (!mounted || state.snapshot == null) {
       return;
     }
-    if (_submittedBarcode != null &&
-        state.lastCommandResult?.outcomeKind ==
-            PosCommandOutcomeKind.accepted) {
-      _barcodeController.clear();
-      _submittedBarcode = null;
-    }
-    _requestBarcodeFocus();
+    _restoreInputWorkflowAfterResolution();
   }
 
-  void _restoreBarcodeWorkflowAfterResolution() {
+  void _restoreInputWorkflowAfterResolution() {
     if (!mounted) {
       return;
     }
     final state = widget.controller.state;
-    if (state.pendingCommand != null || state.snapshot == null) {
+    final snapshot = state.snapshot;
+    final action = _submittedAction;
+    if (state.pendingCommand != null || snapshot == null || action == null) {
       return;
     }
 
-    if (state.lastCommandResult?.outcomeKind ==
-        PosCommandOutcomeKind.accepted) {
-      _barcodeController.clear();
-      _submittedBarcode = null;
-    } else {
-      _barcodeController.selection = TextSelection(
-        baseOffset: 0,
-        extentOffset: _barcodeController.text.length,
-      );
+    final accepted = state.lastCommandResult?.accepted ?? false;
+    switch (action) {
+      case _SubmittedAction.scan:
+        if (accepted) {
+          _barcodeController.clear();
+        } else if (snapshot.status == TransactionStatus.open) {
+          _selectTextAndFocus(_barcodeController, _barcodeFocusNode);
+        }
+        if (accepted) {
+          _requestBarcodeFocus();
+        }
+      case _SubmittedAction.tender:
+        if (accepted && snapshot.status != TransactionStatus.open) {
+          _cashController.clear();
+        } else if (snapshot.status == TransactionStatus.open) {
+          _selectTextAndFocus(_cashController, _cashFocusNode);
+        }
+      case _SubmittedAction.completion:
+        break;
     }
-    _requestBarcodeFocus();
+    _submittedAction = null;
+  }
+
+  void _selectTextAndFocus(
+    TextEditingController controller,
+    FocusNode focusNode,
+  ) {
+    controller.selection = TextSelection(
+      baseOffset: 0,
+      extentOffset: controller.text.length,
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted &&
+          widget.controller.state.snapshot?.status == TransactionStatus.open) {
+        focusNode.requestFocus();
+      }
+    });
   }
 
   void _requestBarcodeFocus() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && widget.controller.state.snapshot != null) {
+      if (mounted &&
+          widget.controller.state.snapshot?.status == TransactionStatus.open) {
         _barcodeFocusNode.requestFocus();
       }
     });
@@ -136,19 +205,28 @@ final class _CashierScreenState extends State<CashierScreen> {
                 snapshot: snapshot,
                 barcodeController: _barcodeController,
                 barcodeFocusNode: _barcodeFocusNode,
-                validationMessage: _validationMessage,
+                cashController: _cashController,
+                cashFocusNode: _cashFocusNode,
+                barcodeValidationMessage: _barcodeValidationMessage,
+                cashValidationMessage: _cashValidationMessage,
                 feedback: _resultFeedback(state.lastCommandResult),
                 onScan: () => _submitBarcode(_barcodeController.text),
-                onSubmitted: _submitBarcode,
+                onBarcodeSubmitted: _submitBarcode,
+                onTender: () => _submitTender(_cashController.text),
+                onCashSubmitted: _submitTender,
+                onComplete: _completeSale,
               );
             }
 
             if (state.isBusy) {
               final message = switch (state.activity) {
                 CashierSessionActivity.executingCommand =>
-                  _submittedBarcode == null
-                      ? 'Starting sale...'
-                      : 'Processing item...',
+                  switch (_submittedAction) {
+                    null => 'Starting sale...',
+                    _SubmittedAction.scan => 'Processing item...',
+                    _SubmittedAction.tender => 'Taking cash...',
+                    _SubmittedAction.completion => 'Completing sale...',
+                  },
                 CashierSessionActivity.refreshingTransaction =>
                   'Loading latest transaction state...',
                 CashierSessionActivity.idle => 'Working...',
@@ -191,6 +269,10 @@ String? _resultFeedback(PosCommandResult? result) {
 
   return switch (result.outcomeCode) {
     'unknown_barcode' => 'Item not found.',
+    'insufficient_tender' => 'Cash received is less than the amount due.',
+    'empty_transaction' => 'Scan at least one item before taking payment.',
+    'invalid_transaction_state' =>
+      'That action is no longer valid. Latest state loaded.',
     'stale_expected_version' ||
     'stream_version_conflict' => 'Transaction changed. Latest state loaded.',
     'transaction_already_exists' => 'Could not start sale. Please try again.',
@@ -350,20 +432,32 @@ final class _ActiveTransactionView extends StatelessWidget {
     required this.snapshot,
     required this.barcodeController,
     required this.barcodeFocusNode,
-    required this.validationMessage,
+    required this.cashController,
+    required this.cashFocusNode,
+    required this.barcodeValidationMessage,
+    required this.cashValidationMessage,
     required this.feedback,
     required this.onScan,
-    required this.onSubmitted,
+    required this.onBarcodeSubmitted,
+    required this.onTender,
+    required this.onCashSubmitted,
+    required this.onComplete,
   });
 
   final CashierSessionState state;
   final TransactionSnapshot snapshot;
   final TextEditingController barcodeController;
   final FocusNode barcodeFocusNode;
-  final String? validationMessage;
+  final TextEditingController cashController;
+  final FocusNode cashFocusNode;
+  final String? barcodeValidationMessage;
+  final String? cashValidationMessage;
   final String? feedback;
   final VoidCallback onScan;
-  final ValueChanged<String> onSubmitted;
+  final ValueChanged<String> onBarcodeSubmitted;
+  final VoidCallback onTender;
+  final ValueChanged<String> onCashSubmitted;
+  final VoidCallback onComplete;
 
   @override
   Widget build(BuildContext context) {
@@ -371,15 +465,31 @@ final class _ActiveTransactionView extends StatelessWidget {
       builder: (context, constraints) {
         final wide = constraints.maxWidth >= 760;
         final basket = _BasketPanel(snapshot: snapshot, compact: !wide);
-        final controls = _ScanControls(
-          state: state,
-          barcodeController: barcodeController,
-          barcodeFocusNode: barcodeFocusNode,
-          validationMessage: validationMessage,
-          feedback: feedback,
-          onScan: onScan,
-          onSubmitted: onSubmitted,
-        );
+        final controls = switch (snapshot.status) {
+          TransactionStatus.open => _OpenTransactionControls(
+            state: state,
+            barcodeController: barcodeController,
+            barcodeFocusNode: barcodeFocusNode,
+            cashController: cashController,
+            cashFocusNode: cashFocusNode,
+            barcodeValidationMessage: barcodeValidationMessage,
+            cashValidationMessage: cashValidationMessage,
+            feedback: feedback,
+            onScan: onScan,
+            onBarcodeSubmitted: onBarcodeSubmitted,
+            onTender: onTender,
+            onCashSubmitted: onCashSubmitted,
+          ),
+          TransactionStatus.paid => _PaymentControls(
+            snapshot: snapshot,
+            feedback: feedback,
+            onComplete: state.canExecuteNewMutation ? onComplete : null,
+          ),
+          TransactionStatus.completed => _PaymentControls(
+            snapshot: snapshot,
+            feedback: feedback,
+          ),
+        };
 
         if (wide) {
           return Padding(
@@ -492,38 +602,48 @@ final class _MoneyRow extends StatelessWidget {
         ? Theme.of(context).textTheme.headlineSmall
         : Theme.of(context).textTheme.titleLarge;
     return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        Text(label, style: style),
+        Expanded(child: Text(label, style: style)),
+        const SizedBox(width: 12),
         Text(formatUsdMinorUnits(minorUnits), style: style),
       ],
     );
   }
 }
 
-final class _ScanControls extends StatelessWidget {
-  const _ScanControls({
+final class _OpenTransactionControls extends StatelessWidget {
+  const _OpenTransactionControls({
     required this.state,
     required this.barcodeController,
     required this.barcodeFocusNode,
-    required this.validationMessage,
+    required this.cashController,
+    required this.cashFocusNode,
+    required this.barcodeValidationMessage,
+    required this.cashValidationMessage,
     required this.feedback,
     required this.onScan,
-    required this.onSubmitted,
+    required this.onBarcodeSubmitted,
+    required this.onTender,
+    required this.onCashSubmitted,
   });
 
   final CashierSessionState state;
   final TextEditingController barcodeController;
   final FocusNode barcodeFocusNode;
-  final String? validationMessage;
+  final TextEditingController cashController;
+  final FocusNode cashFocusNode;
+  final String? barcodeValidationMessage;
+  final String? cashValidationMessage;
   final String? feedback;
   final VoidCallback onScan;
-  final ValueChanged<String> onSubmitted;
+  final ValueChanged<String> onBarcodeSubmitted;
+  final VoidCallback onTender;
+  final ValueChanged<String> onCashSubmitted;
 
   @override
   Widget build(BuildContext context) {
     return Card(
-      child: Padding(
+      child: SingleChildScrollView(
         padding: const EdgeInsets.all(24),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -544,10 +664,12 @@ final class _ScanControls extends StatelessWidget {
               decoration: InputDecoration(
                 labelText: 'Barcode',
                 hintText: 'Scan or enter a barcode',
-                errorText: validationMessage,
+                errorText: barcodeValidationMessage,
                 border: const OutlineInputBorder(),
               ),
-              onSubmitted: state.canExecuteNewMutation ? onSubmitted : null,
+              onSubmitted: state.canExecuteNewMutation
+                  ? onBarcodeSubmitted
+                  : null,
             ),
             const SizedBox(height: 16),
             FilledButton.icon(
@@ -555,6 +677,103 @@ final class _ScanControls extends StatelessWidget {
               icon: const Icon(Icons.qr_code_scanner),
               label: const Text('Scan Item'),
             ),
+            const Divider(height: 36),
+            TextField(
+              key: const Key('cashier-cash-field'),
+              controller: cashController,
+              focusNode: cashFocusNode,
+              enabled: state.canExecuteNewMutation,
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
+              textInputAction: TextInputAction.done,
+              decoration: InputDecoration(
+                labelText: 'Cash received',
+                hintText: '0.00',
+                errorText: cashValidationMessage,
+                border: const OutlineInputBorder(),
+              ),
+              onSubmitted: state.canExecuteNewMutation ? onCashSubmitted : null,
+            ),
+            const SizedBox(height: 16),
+            FilledButton.icon(
+              onPressed: state.canExecuteNewMutation ? onTender : null,
+              icon: const Icon(Icons.payments_outlined),
+              label: const Text('Take Cash'),
+            ),
+            if (feedback != null) ...[
+              const SizedBox(height: 20),
+              _FeedbackBanner(message: feedback!),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+final class _PaymentControls extends StatelessWidget {
+  const _PaymentControls({
+    required this.snapshot,
+    required this.feedback,
+    this.onComplete,
+  });
+
+  final TransactionSnapshot snapshot;
+  final String? feedback;
+  final VoidCallback? onComplete;
+
+  @override
+  Widget build(BuildContext context) {
+    final completed = snapshot.status == TransactionStatus.completed;
+    final tenderedCash = snapshot.tenderedCashMinorUnits;
+    final changeDue = snapshot.changeDueMinorUnits;
+    final paymentDetailsAvailable = tenderedCash != null && changeDue != null;
+
+    return Card(
+      key: const Key('cashier-payment-controls'),
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Icon(
+              completed ? Icons.check_circle : Icons.payments_outlined,
+              size: 52,
+            ),
+            const SizedBox(height: 14),
+            Text(
+              completed ? 'Sale Complete' : 'Payment accepted',
+              style: Theme.of(context).textTheme.headlineSmall,
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 24),
+            _MoneyRow(label: 'Total', minorUnits: snapshot.totalMinorUnits),
+            if (paymentDetailsAvailable) ...[
+              const SizedBox(height: 12),
+              _MoneyRow(label: 'Cash received', minorUnits: tenderedCash),
+              const SizedBox(height: 12),
+              _MoneyRow(
+                label: 'Change due',
+                minorUnits: changeDue,
+                prominent: true,
+              ),
+            ] else ...[
+              const SizedBox(height: 20),
+              const Text(
+                'Payment details unavailable',
+                textAlign: TextAlign.center,
+              ),
+            ],
+            if (!completed) ...[
+              const SizedBox(height: 28),
+              FilledButton.icon(
+                onPressed: onComplete,
+                icon: const Icon(Icons.done_all),
+                label: const Text('Complete Sale'),
+              ),
+            ],
             if (feedback != null) ...[
               const SizedBox(height: 20),
               _FeedbackBanner(message: feedback!),

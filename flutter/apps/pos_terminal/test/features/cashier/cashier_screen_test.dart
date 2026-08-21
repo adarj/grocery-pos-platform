@@ -108,6 +108,8 @@ TransactionSnapshot snapshot({
   List<TransactionLineItem> lineItems = const [],
   int subtotal = 0,
   int total = 0,
+  int? tenderedCash,
+  int? changeDue,
 }) {
   return TransactionSnapshot(
     transactionId: 'txn-1',
@@ -116,8 +118,8 @@ TransactionSnapshot snapshot({
     lineItems: lineItems,
     subtotalMinorUnits: subtotal,
     totalMinorUnits: total,
-    tenderedCashMinorUnits: null,
-    changeDueMinorUnits: null,
+    tenderedCashMinorUnits: tenderedCash,
+    changeDueMinorUnits: changeDue,
   );
 }
 
@@ -156,6 +158,7 @@ Future<void> pumpCashier(
 }
 
 Finder get barcodeField => find.byKey(const Key('cashier-barcode-field'));
+Finder get cashField => find.byKey(const Key('cashier-cash-field'));
 
 void main() {
   testWidgets('initial cashier offers Start Sale and no fabricated basket', (
@@ -166,6 +169,7 @@ void main() {
 
     expect(find.text('Start Sale'), findsOneWidget);
     expect(barcodeField, findsNothing);
+    expect(cashField, findsNothing);
     expect(find.text('Basket'), findsNothing);
     expect(find.text('No items scanned yet.'), findsNothing);
     expect(testFixture.client.commands, isEmpty);
@@ -614,5 +618,511 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
     expect(find.text('Responsive item'), findsOneWidget);
+  });
+
+  testWidgets('open transaction presents scan and cash tender controls', (
+    tester,
+  ) async {
+    final testFixture = fixture();
+    await establishTransaction(testFixture, snapshot(version: 4, total: 500));
+    await pumpCashier(tester, testFixture.controller);
+
+    expect(barcodeField, findsOneWidget);
+    expect(find.text('Scan Item'), findsOneWidget);
+    expect(cashField, findsOneWidget);
+    expect(find.text('Take Cash'), findsOneWidget);
+    expect(find.text('Complete Sale'), findsNothing);
+  });
+
+  testWidgets(
+    'valid cash input submits exact minor units and current version',
+    (tester) async {
+      final testFixture = fixture();
+      final authoritative = snapshot(version: 8, total: 199);
+      await establishTransaction(testFixture, authoritative);
+      testFixture.client.enqueueResult(
+        PosCommandOutcomeKind.domainRejected,
+        code: 'insufficient_tender',
+        version: 8,
+      );
+      testFixture.client.enqueueSnapshot(authoritative);
+      await pumpCashier(tester, testFixture.controller);
+
+      await tester.enterText(cashField, '5.00');
+      await tester.tap(find.text('Take Cash'));
+      await tester.pumpAndSettle();
+
+      final tender = testFixture.client.commands.last as TenderCashCommand;
+      expect(tender.amountMinorUnits, 500);
+      expect(tender.expectedVersion, 8);
+      expect(testFixture.client.commands, hasLength(2));
+    },
+  );
+
+  testWidgets(
+    'cash Enter submits tender and presentation-invalid text does not',
+    (tester) async {
+      final testFixture = fixture();
+      final authoritative = snapshot(version: 3, total: 500);
+      await establishTransaction(testFixture, authoritative);
+      await pumpCashier(tester, testFixture.controller);
+
+      await tester.tap(find.text('Take Cash'));
+      await tester.pump();
+      expect(find.text('Enter cash received.'), findsOneWidget);
+      expect(testFixture.client.commands, hasLength(1));
+
+      await tester.enterText(cashField, r'$5.00');
+      await tester.tap(find.text('Take Cash'));
+      await tester.pump();
+      expect(find.text('Enter a valid cash amount.'), findsOneWidget);
+      expect(testFixture.client.commands, hasLength(1));
+
+      testFixture.client.enqueueResult(
+        PosCommandOutcomeKind.domainRejected,
+        code: 'insufficient_tender',
+        version: 3,
+      );
+      testFixture.client.enqueueSnapshot(authoritative);
+      await tester.enterText(cashField, '4.00');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+
+      expect(testFixture.client.commands.last, isA<TenderCashCommand>());
+      expect(
+        (testFixture.client.commands.last as TenderCashCommand)
+            .amountMinorUnits,
+        400,
+      );
+    },
+  );
+
+  testWidgets(
+    'below-total tender is sent to Racket rather than blocked locally',
+    (tester) async {
+      final testFixture = fixture();
+      final authoritative = snapshot(version: 6, total: 500);
+      await establishTransaction(testFixture, authoritative);
+      testFixture.client.enqueueResult(
+        PosCommandOutcomeKind.domainRejected,
+        code: 'insufficient_tender',
+        version: 6,
+      );
+      testFixture.client.enqueueSnapshot(authoritative);
+      await pumpCashier(tester, testFixture.controller);
+
+      await tester.enterText(cashField, '4.00');
+      await tester.tap(find.text('Take Cash'));
+      await tester.pumpAndSettle();
+
+      final tender = testFixture.client.commands.last as TenderCashCommand;
+      expect(tender.amountMinorUnits, 400);
+      expect(
+        find.text('Cash received is less than the amount due.'),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets('accepted tender does not show paid or change before GET', (
+    tester,
+  ) async {
+    final testFixture = fixture();
+    await establishTransaction(testFixture, snapshot(version: 2, total: 199));
+    testFixture.client.enqueueResult(
+      PosCommandOutcomeKind.accepted,
+      version: 3,
+    );
+    final readCompleter = Completer<TransactionSnapshot>();
+    testFixture.client.transactionHandlers.add((_) => readCompleter.future);
+    await pumpCashier(tester, testFixture.controller);
+
+    await tester.enterText(cashField, '5.00');
+    await tester.tap(find.text('Take Cash'));
+    await tester.pump();
+
+    expect(find.text('Status: Paid'), findsNothing);
+    expect(find.text('Payment accepted'), findsNothing);
+    expect(find.text('Change due'), findsNothing);
+    expect(find.text('Loading latest transaction state...'), findsOneWidget);
+    expect(find.text('Basket'), findsNothing);
+
+    readCompleter.complete(
+      snapshot(
+        version: 3,
+        status: TransactionStatus.paid,
+        total: 199,
+        tenderedCash: 500,
+        changeDue: 777,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Status: Paid'), findsOneWidget);
+    expect(find.text('Payment accepted'), findsOneWidget);
+    expect(find.text(r'$1.99'), findsWidgets);
+    expect(find.text(r'$5.00'), findsOneWidget);
+    expect(find.text(r'$7.77'), findsOneWidget);
+    expect(find.text(r'$3.01'), findsNothing);
+    expect(find.text('Complete Sale'), findsOneWidget);
+    expect(barcodeField, findsNothing);
+    expect(cashField, findsNothing);
+  });
+
+  testWidgets(
+    'paid snapshot with null payment details fails presentation safely',
+    (tester) async {
+      final testFixture = fixture();
+      await establishTransaction(
+        testFixture,
+        snapshot(status: TransactionStatus.paid, total: 199),
+      );
+      await pumpCashier(tester, testFixture.controller);
+
+      expect(find.text('Payment details unavailable'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('cashier-payment-controls')),
+          matching: find.text(r'$0.00'),
+        ),
+        findsNothing,
+      );
+      expect(find.text('Complete Sale'), findsOneWidget);
+    },
+  );
+
+  for (final testCase in [
+    ('insufficient_tender', 'Cash received is less than the amount due.'),
+    ('empty_transaction', 'Scan at least one item before taking payment.'),
+    (
+      'invalid_transaction_state',
+      'That action is no longer valid. Latest state loaded.',
+    ),
+  ]) {
+    testWidgets(
+      '${testCase.$1} retains tender and never automatically retries',
+      (tester) async {
+        final testFixture = fixture();
+        final authoritative = snapshot(version: 5, total: 900);
+        await establishTransaction(testFixture, authoritative);
+        testFixture.client.enqueueResult(
+          PosCommandOutcomeKind.domainRejected,
+          code: testCase.$1,
+          version: 5,
+        );
+        testFixture.client.enqueueSnapshot(authoritative);
+        await pumpCashier(tester, testFixture.controller);
+
+        await tester.enterText(cashField, '4.00');
+        await tester.tap(find.text('Take Cash'));
+        await tester.pumpAndSettle();
+
+        expect(find.text(testCase.$2), findsOneWidget);
+        expect(tester.widget<TextField>(cashField).controller!.text, '4.00');
+        expect(tester.widget<TextField>(cashField).focusNode!.hasFocus, isTrue);
+        expect(testFixture.client.commands, hasLength(2));
+      },
+    );
+  }
+
+  testWidgets(
+    'uncertain tender retries the exact pending command then renders paid',
+    (tester) async {
+      final testFixture = fixture();
+      await establishTransaction(testFixture, snapshot(version: 2, total: 199));
+      testFixture.client.enqueueCommandFailure(
+        const PosCoreTransportFailure('unknown', retrySameCommandId: true),
+      );
+      await pumpCashier(tester, testFixture.controller);
+
+      await tester.enterText(cashField, '5.00');
+      await tester.tap(find.text('Take Cash'));
+      await tester.pumpAndSettle();
+
+      final pending = testFixture.controller.state.pendingCommand!;
+      expect(pending, isA<TenderCashCommand>());
+      expect(find.text('Command result unknown'), findsOneWidget);
+      expect(find.text('Retry Command'), findsOneWidget);
+      expect(find.text('Scan Item'), findsNothing);
+      expect(find.text('Take Cash'), findsNothing);
+
+      testFixture.client.enqueueCommandFailure(
+        const PosCoreTransportFailure(
+          'still unknown',
+          retrySameCommandId: true,
+        ),
+      );
+      await tester.tap(find.text('Retry Command'));
+      await tester.pumpAndSettle();
+      expect(identical(testFixture.client.commands.last, pending), isTrue);
+      expect(find.text('Command result unknown'), findsOneWidget);
+
+      testFixture.client.enqueueResult(
+        PosCommandOutcomeKind.accepted,
+        version: 3,
+      );
+      testFixture.client.enqueueSnapshot(
+        snapshot(
+          version: 3,
+          status: TransactionStatus.paid,
+          total: 199,
+          tenderedCash: 500,
+          changeDue: 301,
+        ),
+      );
+      await tester.tap(find.text('Retry Command'));
+      await tester.pumpAndSettle();
+
+      expect(identical(testFixture.client.commands.last, pending), isTrue);
+      expect(find.text('Payment accepted'), findsOneWidget);
+      expect(find.text(r'$3.01'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'tender accepted with failed GET uses refresh without second POST',
+    (tester) async {
+      final testFixture = fixture();
+      await establishTransaction(testFixture, snapshot(version: 2, total: 199));
+      testFixture.client.enqueueResult(
+        PosCommandOutcomeKind.accepted,
+        version: 3,
+      );
+      testFixture.client.enqueueReadFailure(
+        const PosCoreTransportFailure('read unavailable'),
+      );
+      await pumpCashier(tester, testFixture.controller);
+
+      await tester.enterText(cashField, '5.00');
+      await tester.tap(find.text('Take Cash'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Transaction state unavailable'), findsOneWidget);
+      expect(find.text('Refresh Transaction'), findsOneWidget);
+      expect(find.text('Retry Command'), findsNothing);
+      final posts = testFixture.client.commands.length;
+
+      testFixture.client.enqueueSnapshot(
+        snapshot(
+          version: 3,
+          status: TransactionStatus.paid,
+          total: 199,
+          tenderedCash: 500,
+          changeDue: 301,
+        ),
+      );
+      await tester.tap(find.text('Refresh Transaction'));
+      await tester.pumpAndSettle();
+
+      expect(testFixture.client.commands, hasLength(posts));
+      expect(find.text('Payment accepted'), findsOneWidget);
+    },
+  );
+
+  testWidgets('completion waits for authoritative completed snapshot', (
+    tester,
+  ) async {
+    final testFixture = fixture();
+    final paid = snapshot(
+      version: 3,
+      status: TransactionStatus.paid,
+      total: 199,
+      tenderedCash: 500,
+      changeDue: 301,
+    );
+    await establishTransaction(testFixture, paid);
+    final commandCompleter = Completer<PosCommandResult>();
+    final readCompleter = Completer<TransactionSnapshot>();
+    testFixture.client.commandHandlers.add((_) => commandCompleter.future);
+    testFixture.client.transactionHandlers.add((_) => readCompleter.future);
+    await pumpCashier(tester, testFixture.controller);
+
+    await tester.tap(find.text('Complete Sale'));
+    await tester.pump();
+    expect(find.text('Completing sale...'), findsOneWidget);
+    expect(find.text('Sale Complete'), findsNothing);
+
+    final command = testFixture.client.commands.last;
+    expect(command, isA<CompleteTransactionCommand>());
+    expect(command.expectedVersion, 3);
+    commandCompleter.complete(resultFor(command, version: 4));
+    await tester.pump();
+    expect(find.text('Loading latest transaction state...'), findsOneWidget);
+    expect(find.text('Sale Complete'), findsNothing);
+
+    readCompleter.complete(
+      snapshot(
+        version: 4,
+        status: TransactionStatus.completed,
+        total: 199,
+        tenderedCash: 500,
+        changeDue: 301,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Status: Completed'), findsOneWidget);
+    expect(find.text('Sale Complete'), findsOneWidget);
+    expect(find.text(r'$1.99'), findsWidgets);
+    expect(find.text(r'$5.00'), findsOneWidget);
+    expect(find.text(r'$3.01'), findsOneWidget);
+    expect(find.text('Scan Item'), findsNothing);
+    expect(find.text('Take Cash'), findsNothing);
+    expect(find.text('Complete Sale'), findsNothing);
+  });
+
+  testWidgets('completion rejection refreshes without automatic completion', (
+    tester,
+  ) async {
+    final testFixture = fixture();
+    final paid = snapshot(
+      version: 3,
+      status: TransactionStatus.paid,
+      total: 199,
+      tenderedCash: 500,
+      changeDue: 301,
+    );
+    await establishTransaction(testFixture, paid);
+    testFixture.client.enqueueResult(
+      PosCommandOutcomeKind.domainRejected,
+      code: 'invalid_transaction_state',
+      version: 3,
+    );
+    testFixture.client.enqueueSnapshot(paid);
+    await pumpCashier(tester, testFixture.controller);
+
+    await tester.tap(find.text('Complete Sale'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('That action is no longer valid. Latest state loaded.'),
+      findsOneWidget,
+    );
+    expect(find.text('Complete Sale'), findsOneWidget);
+    expect(testFixture.client.commands, hasLength(2));
+  });
+
+  testWidgets('uncertain completion uses generic exact-command recovery', (
+    tester,
+  ) async {
+    final testFixture = fixture();
+    await establishTransaction(
+      testFixture,
+      snapshot(
+        version: 3,
+        status: TransactionStatus.paid,
+        total: 199,
+        tenderedCash: 500,
+        changeDue: 301,
+      ),
+    );
+    testFixture.client.enqueueCommandFailure(
+      const PosCoreTransportFailure('unknown', retrySameCommandId: true),
+    );
+    await pumpCashier(tester, testFixture.controller);
+
+    await tester.tap(find.text('Complete Sale'));
+    await tester.pumpAndSettle();
+    final pending = testFixture.controller.state.pendingCommand!;
+
+    expect(pending, isA<CompleteTransactionCommand>());
+    expect(find.text('Command result unknown'), findsOneWidget);
+    expect(find.text('Retry Command'), findsOneWidget);
+
+    testFixture.client.enqueueResult(
+      PosCommandOutcomeKind.accepted,
+      version: 4,
+    );
+    testFixture.client.enqueueSnapshot(
+      snapshot(
+        version: 4,
+        status: TransactionStatus.completed,
+        total: 199,
+        tenderedCash: 500,
+        changeDue: 301,
+      ),
+    );
+    await tester.tap(find.text('Retry Command'));
+    await tester.pumpAndSettle();
+
+    expect(identical(testFixture.client.commands.last, pending), isTrue);
+    expect(find.text('Sale Complete'), findsOneWidget);
+  });
+
+  testWidgets(
+    'completion accepted with failed GET refreshes without new command',
+    (tester) async {
+      final testFixture = fixture();
+      await establishTransaction(
+        testFixture,
+        snapshot(
+          version: 3,
+          status: TransactionStatus.paid,
+          total: 199,
+          tenderedCash: 500,
+          changeDue: 301,
+        ),
+      );
+      testFixture.client.enqueueResult(
+        PosCommandOutcomeKind.accepted,
+        version: 4,
+      );
+      testFixture.client.enqueueReadFailure(
+        const PosCoreTransportFailure('read unavailable'),
+      );
+      await pumpCashier(tester, testFixture.controller);
+
+      await tester.tap(find.text('Complete Sale'));
+      await tester.pumpAndSettle();
+      expect(find.text('Refresh Transaction'), findsOneWidget);
+      expect(find.text('Retry Command'), findsNothing);
+      final posts = testFixture.client.commands.length;
+
+      testFixture.client.enqueueSnapshot(
+        snapshot(
+          version: 4,
+          status: TransactionStatus.completed,
+          total: 199,
+          tenderedCash: 500,
+          changeDue: 301,
+        ),
+      );
+      await tester.tap(find.text('Refresh Transaction'));
+      await tester.pumpAndSettle();
+
+      expect(testFixture.client.commands, hasLength(posts));
+      expect(find.text('Sale Complete'), findsOneWidget);
+    },
+  );
+
+  testWidgets('tender and completed controls remain overflow-safe', (
+    tester,
+  ) async {
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final openFixture = fixture();
+    await establishTransaction(openFixture, snapshot(version: 2, total: 199));
+
+    await tester.binding.setSurfaceSize(const Size(1200, 700));
+    await pumpCashier(tester, openFixture.controller);
+    expect(tester.takeException(), isNull);
+    expect(find.text('Take Cash'), findsOneWidget);
+
+    await tester.binding.setSurfaceSize(const Size(420, 700));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+
+    final completedFixture = fixture();
+    await establishTransaction(
+      completedFixture,
+      snapshot(
+        status: TransactionStatus.completed,
+        total: 199,
+        tenderedCash: 500,
+        changeDue: 301,
+      ),
+    );
+    await pumpCashier(tester, completedFixture.controller);
+    expect(tester.takeException(), isNull);
+    expect(find.text('Sale Complete'), findsOneWidget);
   });
 }

@@ -142,6 +142,8 @@ Verified capabilities currently include:
 * Flutter Linux ARM64 POS terminal;
 * typed Flutter POS Core client models for transaction commands, durable command
   outcomes, authoritative transaction snapshots, and safe failures;
+* Flutter cashier session orchestration and a start/scan/cash-tender/complete
+  interface driven by authoritative transaction reads;
 * Flutter widget tests;
 * Flutter-to-Racket local health connection;
 * nixGL-based Flutter GUI launch in the current VM environment;
@@ -368,9 +370,10 @@ the original deterministic outcome across retries, while accepted events remain
 the authoritative transaction facts. Concurrent and lost-response tests prove
 that retrying the same command cannot duplicate the current cash-sale facts.
 
-This transaction workflow is now exposed through the narrow Transaction HTTP
-API v1 command and query routes. A full Flutter checkout interface remains a
-separately scoped and tested future milestone.
+This transaction workflow is exposed through the narrow Transaction HTTP API
+v1 command and query routes. Flutter now implements the current cash-sale
+cashier slice through authoritative completion; next-sale reset and broader
+production checkout capabilities remain separately scoped work.
 
 ## Status
 

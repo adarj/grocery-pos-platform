@@ -3,9 +3,9 @@
 ## Status
 
 The Flutter `pos_terminal` implements a typed client for the three current
-local POS Core routes, a cashier-session application controller, and the first
-cashier presentation slice: starting a sale, submitting barcode scans, and
-rendering the authoritative basket returned by POS Core.
+local POS Core routes, a cashier-session application controller, and the
+current cash-sale cashier slice: start, scan, cash tender, authoritative paid
+state/change, and completion.
 
 The backend wire contract remains authoritative and is documented in
 [Transaction HTTP API v1](transaction-http-api-v1.md). Command retry semantics
@@ -21,7 +21,7 @@ are governed by
 - reading current authoritative transaction state.
 
 Widgets do not receive raw `http.Response` values or package HTTP exceptions.
-Flutter owns presentation and future cashier intent orchestration; it does not
+Flutter owns presentation and cashier intent orchestration; it does not
 calculate authoritative totals, advance transaction lifecycle, or infer stream
 versions.
 
@@ -130,6 +130,11 @@ The current presentation supports:
   scanner Enter submission;
 - backend-order line-item rendering and integer-only USD minor-unit formatting;
 - backend-provided subtotal and total rendering without local calculation;
+- exact human cash-entry parsing into integer minor units without floating
+  point;
+- cash-tender submission without locally deciding sufficiency;
+- authoritative paid-state, tendered-cash, and change presentation;
+- sale completion followed by an authoritative completed-state read;
 - concise feedback for unknown barcodes and version conflicts;
 - an explicit `Retry Command` recovery panel for an uncertain mutation;
 - a distinct `Refresh Transaction` panel when a command is known but the
@@ -141,10 +146,25 @@ old snapshot is withheld and the UI shows a loading state. After an accepted
 scan and successful refresh, the field is cleared and focused for the next
 keyboard/scanner entry. A rejected barcode remains available for correction.
 
+Cash input accepts whole dollars or one/two decimal places after ignoring
+surrounding whitespace. It rejects signs, currency symbols, commas, exponent
+notation, trailing decimal points, and more than two decimal places. Parsing
+uses string and integer operations only. Syntactically valid amounts—including
+cash below the displayed total—are sent to POS Core; Racket alone decides
+whether the transaction is non-empty, open, and sufficiently tendered.
+
+The UI does not infer `paid`, calculate change, or infer `completed` from a
+successful command result. Those presentations appear only after
+`fetchTransaction` returns the corresponding authoritative snapshot. Tendered
+cash and change are rendered directly, even if they do not match a client-side
+arithmetic assumption. A paid/completed snapshot with missing payment details
+shows a safe unavailable state rather than inventing zero values.
+
 `Retry Command` calls only `CashierSessionController.retryPendingCommand`, so
 the retained command identity is preserved. `Refresh Transaction` calls only
 `CashierSessionController.refreshTransaction`, so it cannot accidentally
-resend a command whose durable result is already known.
+resend a command whose durable result is already known. These same recovery
+paths apply to scan, tender, and completion commands.
 
 ## Command results and transaction reads
 
@@ -186,7 +206,6 @@ process crash after an uncertain POST can therefore lose the retained command;
 durable client-side pending-intent recovery remains future work and must not be
 approximated by generating a replacement ID.
 
-This slice does not implement tender or completion controls, automatic retry,
-retry timers, pending-command persistence, local Flutter storage, or payment
-behavior. Tender and completion presentation are deferred to the next cashier
-checkpoint.
+This slice does not implement automatic next-sale/session reset, automatic
+retry, retry timers, pending-command persistence, local Flutter storage, split
+tender, card/external payment behavior, receipt printing, or drawer behavior.
