@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:collection';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pos_terminal/core/pos_core/models/command_result.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_failure.dart';
@@ -80,12 +81,20 @@ final class DeterministicCashierIds implements CashierIdGenerator {
 
   final Queue<String> _commandIds;
   final Queue<String> _transactionIds;
+  int commandIdCalls = 0;
+  int transactionIdCalls = 0;
 
   @override
-  String nextCommandId() => _commandIds.removeFirst();
+  String nextCommandId() {
+    commandIdCalls += 1;
+    return _commandIds.removeFirst();
+  }
 
   @override
-  String nextTransactionId() => _transactionIds.removeFirst();
+  String nextTransactionId() {
+    transactionIdCalls += 1;
+    return _transactionIds.removeFirst();
+  }
 }
 
 final class MemoryCashierSessionStore implements CashierSessionStore {
@@ -162,25 +171,36 @@ TransactionSnapshot snapshot({
   );
 }
 
-({FakeCashierClient client, CashierSessionController controller}) fixture({
+({
+  FakeCashierClient client,
+  CashierSessionController controller,
+  DeterministicCashierIds ids,
+})
+fixture({
   Iterable<String> commandIds = const ['cmd-start', 'cmd-scan'],
   Iterable<String> transactionIds = const ['txn-1'],
   MemoryCashierSessionStore? sessionStore,
 }) {
   final client = FakeCashierClient();
+  final ids = DeterministicCashierIds(
+    commandIds: commandIds,
+    transactionIds: transactionIds,
+  );
   final controller = CashierSessionController(
     client: client,
-    idGenerator: DeterministicCashierIds(
-      commandIds: commandIds,
-      transactionIds: transactionIds,
-    ),
+    idGenerator: ids,
     sessionStore: sessionStore ?? MemoryCashierSessionStore(),
   );
-  return (client: client, controller: controller);
+  return (client: client, controller: controller, ids: ids);
 }
 
 Future<void> establishTransaction(
-  ({FakeCashierClient client, CashierSessionController controller}) testFixture,
+  ({
+    FakeCashierClient client,
+    CashierSessionController controller,
+    DeterministicCashierIds ids,
+  })
+  testFixture,
   TransactionSnapshot authoritative,
 ) async {
   testFixture.client.enqueueResult(PosCommandOutcomeKind.accepted);
@@ -190,11 +210,17 @@ Future<void> establishTransaction(
 
 Future<void> pumpCashier(
   WidgetTester tester,
-  CashierSessionController controller,
-) async {
-  await tester.pumpWidget(
-    MaterialApp(home: CashierScreen(controller: controller)),
-  );
+  CashierSessionController controller, {
+  TextScaler? textScaler,
+}) async {
+  Widget screen = CashierScreen(controller: controller);
+  if (textScaler != null) {
+    screen = MediaQuery(
+      data: MediaQueryData(textScaler: textScaler),
+      child: screen,
+    );
+  }
+  await tester.pumpWidget(MaterialApp(home: screen));
   await tester.pump();
 }
 
@@ -245,6 +271,7 @@ void main() {
     expect(find.text('Status: Open'), findsOneWidget);
     expect(find.text('Transaction version 7'), findsOneWidget);
     expect(find.text('No items scanned yet.'), findsOneWidget);
+    expect(tester.widget<TextField>(barcodeField).focusNode!.hasFocus, isTrue);
   });
 
   testWidgets(
@@ -463,6 +490,11 @@ void main() {
       tester.widget<TextField>(barcodeField).controller!.text,
       'unknown-code',
     );
+    expect(tester.widget<TextField>(barcodeField).focusNode!.hasFocus, isTrue);
+    expect(
+      tester.widget<TextField>(barcodeField).controller!.selection,
+      const TextSelection(baseOffset: 0, extentOffset: 12),
+    );
     expect(testFixture.client.commands, hasLength(2));
   });
 
@@ -650,12 +682,16 @@ void main() {
       ),
     );
 
-    await tester.binding.setSurfaceSize(const Size(1200, 700));
+    await tester.binding.setSurfaceSize(const Size(1280, 800));
     await pumpCashier(tester, testFixture.controller);
     expect(tester.takeException(), isNull);
     expect(find.text('Responsive item'), findsOneWidget);
 
-    await tester.binding.setSurfaceSize(const Size(420, 700));
+    await tester.binding.setSurfaceSize(const Size(1024, 768));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+
+    await tester.binding.setSurfaceSize(const Size(600, 800));
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
     expect(find.text('Responsive item'), findsOneWidget);
@@ -779,6 +815,8 @@ void main() {
     await pumpCashier(tester, testFixture.controller);
 
     await tester.enterText(cashField, '5.00');
+    final barcodeFocusNode = tester.widget<TextField>(barcodeField).focusNode!;
+    final cashFocusNode = tester.widget<TextField>(cashField).focusNode!;
     await tester.tap(find.text('Take Cash'));
     await tester.pump();
 
@@ -808,6 +846,8 @@ void main() {
     expect(find.text('Complete Sale'), findsOneWidget);
     expect(barcodeField, findsNothing);
     expect(cashField, findsNothing);
+    expect(barcodeFocusNode.hasFocus, isFalse);
+    expect(cashFocusNode.hasFocus, isFalse);
   });
 
   testWidgets(
@@ -861,6 +901,10 @@ void main() {
         expect(find.text(testCase.$2), findsOneWidget);
         expect(tester.widget<TextField>(cashField).controller!.text, '4.00');
         expect(tester.widget<TextField>(cashField).focusNode!.hasFocus, isTrue);
+        expect(
+          tester.widget<TextField>(cashField).controller!.selection,
+          const TextSelection(baseOffset: 0, extentOffset: 4),
+        );
         expect(testFixture.client.commands, hasLength(2));
       },
     );
@@ -1217,6 +1261,12 @@ void main() {
     expect(find.text('Refresh Transaction'), findsOneWidget);
     expect(find.text('Retry Command'), findsNothing);
     expect(find.text('Start Sale'), findsNothing);
+
+    testFixture.client.enqueueSnapshot(snapshot(version: 8));
+    await tester.tap(find.text('Refresh Transaction'));
+    await tester.pumpAndSettle();
+
+    expect(tester.widget<TextField>(barcodeField).focusNode!.hasFocus, isTrue);
   });
 
   testWidgets('corrupt recovery state blocks register with safe guidance', (
@@ -1259,6 +1309,37 @@ void main() {
     expect(testFixture.client.commands, isEmpty);
   });
 
+  testWidgets('pre-send scan storage failure retains the unsent barcode', (
+    tester,
+  ) async {
+    final store = MemoryCashierSessionStore();
+    final testFixture = fixture(
+      commandIds: const ['cmd-start', 'cmd-unsent-scan'],
+      sessionStore: store,
+    );
+    await establishTransaction(testFixture, snapshot(version: 3));
+    store.nextSaveFailure =
+        const CashierSessionStoreFailure.storageUnavailable();
+    await pumpCashier(tester, testFixture.controller);
+
+    await tester.enterText(barcodeField, 'unsent-code');
+    await tester.tap(find.text('Scan Item'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text(
+        'Local recovery storage unavailable. The command was not sent.',
+      ),
+      findsOneWidget,
+    );
+    expect(testFixture.client.commands, hasLength(1));
+    expect(
+      tester.widget<TextField>(barcodeField).controller!.text,
+      'unsent-code',
+    );
+    expect(tester.widget<TextField>(barcodeField).focusNode!.hasFocus, isTrue);
+  });
+
   testWidgets('completed sale exposes explicit Next Sale controller path', (
     tester,
   ) async {
@@ -1299,6 +1380,7 @@ void main() {
     expect(next.transactionId, 'txn-next');
     expect(next.expectedVersion, 0);
     expect(find.text('Status: Open'), findsOneWidget);
+    expect(tester.widget<TextField>(barcodeField).focusNode!.hasFocus, isTrue);
   });
 
   testWidgets('Next Sale storage failure preserves completed presentation', (
@@ -1327,4 +1409,559 @@ void main() {
     expect(find.text('Local recovery storage unavailable.'), findsOneWidget);
     expect(testFixture.client.commands, hasLength(1));
   });
+
+  testWidgets(
+    'open sale uses scanner-safe text behavior and focus-only shortcuts',
+    (tester) async {
+      final testFixture = fixture(commandIds: const ['cmd-start']);
+      await establishTransaction(testFixture, snapshot(version: 4));
+      await pumpCashier(tester, testFixture.controller);
+
+      final barcode = tester.widget<TextField>(barcodeField);
+      expect(barcode.autocorrect, isFalse);
+      expect(barcode.enableSuggestions, isFalse);
+      expect(barcode.smartDashesType, SmartDashesType.disabled);
+      expect(barcode.smartQuotesType, SmartQuotesType.disabled);
+      expect(barcode.focusNode!.hasFocus, isTrue);
+
+      await tester.tap(cashField);
+      await tester.pump();
+      expect(tester.widget<TextField>(cashField).focusNode!.hasFocus, isTrue);
+      expect(
+        tester.widget<TextField>(barcodeField).focusNode!.hasFocus,
+        isFalse,
+      );
+
+      final commandsBeforeShortcuts = testFixture.client.commands.length;
+      final commandIdsBeforeShortcuts = testFixture.ids.commandIdCalls;
+      await tester.sendKeyEvent(LogicalKeyboardKey.f2);
+      await tester.pump();
+      expect(
+        tester.widget<TextField>(barcodeField).focusNode!.hasFocus,
+        isTrue,
+      );
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.f4);
+      await tester.pump();
+      expect(tester.widget<TextField>(cashField).focusNode!.hasFocus, isTrue);
+      expect(testFixture.client.commands, hasLength(commandsBeforeShortcuts));
+      expect(testFixture.ids.commandIdCalls, commandIdsBeforeShortcuts);
+    },
+  );
+
+  testWidgets('busy input and focus shortcuts cannot enqueue another scan', (
+    tester,
+  ) async {
+    final testFixture = fixture(commandIds: const ['cmd-start', 'cmd-scan']);
+    await establishTransaction(testFixture, snapshot(version: 1));
+    final commandCompleter = Completer<PosCommandResult>();
+    testFixture.client.commandHandlers.add((_) => commandCompleter.future);
+    await pumpCashier(tester, testFixture.controller);
+
+    await tester.enterText(barcodeField, 'only-scan');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump();
+    expect(find.text('Processing item...'), findsOneWidget);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.sendKeyEvent(LogicalKeyboardKey.f2);
+    await tester.sendKeyEvent(LogicalKeyboardKey.f4);
+    await tester.pump();
+    expect(testFixture.client.commands, hasLength(2));
+    expect(testFixture.ids.commandIdCalls, 2);
+
+    final command = testFixture.client.commands.last;
+    testFixture.client.enqueueSnapshot(snapshot(version: 2));
+    commandCompleter.complete(resultFor(command, version: 2));
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('three scans remain sequential and follow authoritative order', (
+    tester,
+  ) async {
+    final testFixture = fixture(
+      commandIds: const ['cmd-start', 'cmd-a', 'cmd-b', 'cmd-c'],
+    );
+    await establishTransaction(testFixture, snapshot(version: 1));
+    await pumpCashier(tester, testFixture.controller);
+
+    for (var index = 0; index < 3; index += 1) {
+      final lines = List<TransactionLineItem>.generate(
+        index + 1,
+        (lineIndex) => TransactionLineItem(
+          barcode: 'code-$lineIndex',
+          description: 'Item $lineIndex',
+          unitPriceMinorUnits: 100 + lineIndex,
+        ),
+      );
+      testFixture.client.enqueueResult(
+        PosCommandOutcomeKind.accepted,
+        version: index + 2,
+      );
+      testFixture.client.enqueueSnapshot(
+        snapshot(
+          version: index + 2,
+          lineItems: lines,
+          subtotal: 900 + index,
+          total: 1000 + index,
+        ),
+      );
+
+      await tester.enterText(barcodeField, 'code-$index');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+
+      expect(tester.widget<TextField>(barcodeField).controller!.text, isEmpty);
+      expect(
+        tester.widget<TextField>(barcodeField).focusNode!.hasFocus,
+        isTrue,
+      );
+      expect(find.text('Item $index'), findsOneWidget);
+    }
+
+    final scans = testFixture.client.commands.whereType<ScanBarcodeCommand>();
+    expect(scans.map((command) => command.commandId), [
+      'cmd-a',
+      'cmd-b',
+      'cmd-c',
+    ]);
+    expect(scans.map((command) => command.barcode), [
+      'code-0',
+      'code-1',
+      'code-2',
+    ]);
+    expect(
+      tester.getTopLeft(find.text('Item 0')).dy,
+      lessThan(tester.getTopLeft(find.text('Item 1')).dy),
+    );
+    expect(
+      tester.getTopLeft(find.text('Item 1')).dy,
+      lessThan(tester.getTopLeft(find.text('Item 2')).dy),
+    );
+  });
+
+  testWidgets(
+    'restored pending scan retry restores correction text and barcode focus',
+    (tester) async {
+      final restored = ScanBarcodeCommand(
+        commandId: 'cmd-restored',
+        transactionId: 'txn-1',
+        expectedVersion: 4,
+        barcode: 'restored-code',
+      );
+      final store = MemoryCashierSessionStore(
+        persisted: PersistedCashierSession(
+          activeTransactionId: 'txn-1',
+          pendingCommand: restored,
+        ),
+      );
+      final testFixture = fixture(
+        commandIds: const [],
+        transactionIds: const [],
+        sessionStore: store,
+      );
+      await testFixture.controller.restoreLocalSession();
+      testFixture.client.enqueueResult(
+        PosCommandOutcomeKind.domainRejected,
+        code: 'unknown_barcode',
+        version: 4,
+      );
+      testFixture.client.enqueueSnapshot(snapshot(version: 4));
+      await pumpCashier(tester, testFixture.controller);
+
+      await tester.tap(find.text('Retry Command'));
+      await tester.pumpAndSettle();
+
+      expect(testFixture.client.commands.single, same(restored));
+      expect(
+        tester.widget<TextField>(barcodeField).controller!.text,
+        'restored-code',
+      );
+      expect(
+        tester.widget<TextField>(barcodeField).focusNode!.hasFocus,
+        isTrue,
+      );
+      expect(
+        tester.widget<TextField>(barcodeField).controller!.selection,
+        const TextSelection(baseOffset: 0, extentOffset: 13),
+      );
+    },
+  );
+
+  testWidgets('restored pending tender retry restores cash correction focus', (
+    tester,
+  ) async {
+    final restored = TenderCashCommand(
+      commandId: 'cmd-restored-tender',
+      transactionId: 'txn-1',
+      expectedVersion: 4,
+      amountMinorUnits: 500,
+    );
+    final store = MemoryCashierSessionStore(
+      persisted: PersistedCashierSession(
+        activeTransactionId: 'txn-1',
+        pendingCommand: restored,
+      ),
+    );
+    final testFixture = fixture(
+      commandIds: const [],
+      transactionIds: const [],
+      sessionStore: store,
+    );
+    await testFixture.controller.restoreLocalSession();
+    testFixture.client.enqueueResult(
+      PosCommandOutcomeKind.domainRejected,
+      code: 'insufficient_tender',
+      version: 4,
+    );
+    testFixture.client.enqueueSnapshot(snapshot(version: 4, total: 900));
+    await pumpCashier(tester, testFixture.controller);
+
+    await tester.tap(find.text('Retry Command'));
+    await tester.pumpAndSettle();
+
+    expect(testFixture.client.commands.single, same(restored));
+    expect(tester.widget<TextField>(cashField).controller!.text, '5.00');
+    expect(tester.widget<TextField>(cashField).focusNode!.hasFocus, isTrue);
+    expect(tester.widget<TextField>(barcodeField).focusNode!.hasFocus, isFalse);
+  });
+
+  testWidgets('restored accepted tender never refocuses open-sale inputs', (
+    tester,
+  ) async {
+    final restored = TenderCashCommand(
+      commandId: 'cmd-restored-tender',
+      transactionId: 'txn-1',
+      expectedVersion: 4,
+      amountMinorUnits: 500,
+    );
+    final store = MemoryCashierSessionStore(
+      persisted: PersistedCashierSession(
+        activeTransactionId: 'txn-1',
+        pendingCommand: restored,
+      ),
+    );
+    final testFixture = fixture(
+      commandIds: const [],
+      transactionIds: const [],
+      sessionStore: store,
+    );
+    await testFixture.controller.restoreLocalSession();
+    testFixture.client.enqueueResult(
+      PosCommandOutcomeKind.accepted,
+      version: 5,
+    );
+    testFixture.client.enqueueSnapshot(
+      snapshot(
+        version: 5,
+        status: TransactionStatus.paid,
+        total: 199,
+        tenderedCash: 500,
+        changeDue: 301,
+      ),
+    );
+    await pumpCashier(tester, testFixture.controller);
+
+    await tester.tap(find.text('Retry Command'));
+    await tester.pumpAndSettle();
+
+    expect(testFixture.client.commands.single, same(restored));
+    expect(find.text('Payment accepted'), findsOneWidget);
+    expect(barcodeField, findsNothing);
+    expect(cashField, findsNothing);
+  });
+
+  testWidgets('primary cashier actions have POS-sized touch targets', (
+    tester,
+  ) async {
+    void expectPrimaryAction(String label) {
+      final button = find.widgetWithText(FilledButton, label);
+      expect(button, findsOneWidget);
+      expect(tester.getSize(button).height, greaterThanOrEqualTo(52));
+    }
+
+    final initialFixture = fixture();
+    await pumpCashier(tester, initialFixture.controller);
+    expectPrimaryAction('Start Sale');
+
+    final openFixture = fixture();
+    await establishTransaction(openFixture, snapshot());
+    await pumpCashier(tester, openFixture.controller);
+    expectPrimaryAction('Scan Item');
+    expectPrimaryAction('Take Cash');
+
+    final paidFixture = fixture();
+    await establishTransaction(
+      paidFixture,
+      snapshot(
+        status: TransactionStatus.paid,
+        tenderedCash: 500,
+        changeDue: 301,
+      ),
+    );
+    await pumpCashier(tester, paidFixture.controller);
+    expectPrimaryAction('Complete Sale');
+
+    final completedFixture = fixture();
+    await establishTransaction(
+      completedFixture,
+      snapshot(
+        status: TransactionStatus.completed,
+        tenderedCash: 500,
+        changeDue: 301,
+      ),
+    );
+    await pumpCashier(tester, completedFixture.controller);
+    expectPrimaryAction('Next Sale');
+
+    final pendingStore = MemoryCashierSessionStore(
+      persisted: PersistedCashierSession(
+        activeTransactionId: 'txn-1',
+        pendingCommand: CompleteTransactionCommand(
+          commandId: 'cmd-pending',
+          transactionId: 'txn-1',
+          expectedVersion: 3,
+        ),
+      ),
+    );
+    final pendingFixture = fixture(
+      commandIds: const [],
+      transactionIds: const [],
+      sessionStore: pendingStore,
+    );
+    await pendingFixture.controller.restoreLocalSession();
+    await pumpCashier(tester, pendingFixture.controller);
+    expectPrimaryAction('Retry Command');
+
+    final refreshStore = MemoryCashierSessionStore(
+      persisted: PersistedCashierSession(activeTransactionId: 'txn-1'),
+    );
+    final refreshFixture = fixture(
+      commandIds: const [],
+      transactionIds: const [],
+      sessionStore: refreshStore,
+    );
+    await refreshFixture.controller.restoreLocalSession();
+    await pumpCashier(tester, refreshFixture.controller);
+    expectPrimaryAction('Refresh Transaction');
+  });
+
+  testWidgets('status, money, recovery, and feedback expose useful semantics', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    final paidFixture = fixture();
+    await establishTransaction(
+      paidFixture,
+      snapshot(
+        status: TransactionStatus.paid,
+        total: 199,
+        tenderedCash: 500,
+        changeDue: 777,
+      ),
+    );
+    await pumpCashier(tester, paidFixture.controller);
+
+    expect(find.bySemanticsLabel('Transaction status: Paid'), findsOneWidget);
+    expect(find.bySemanticsLabel(r'Total: $1.99'), findsWidgets);
+    expect(find.bySemanticsLabel(r'Cash received: $5.00'), findsOneWidget);
+    expect(find.bySemanticsLabel(r'Change due: $7.77'), findsOneWidget);
+    expect(find.bySemanticsLabel(RegExp('Transaction version')), findsNothing);
+
+    final recoveryStore = MemoryCashierSessionStore(
+      persisted: PersistedCashierSession(
+        activeTransactionId: 'txn-1',
+        pendingCommand: CompleteTransactionCommand(
+          commandId: 'cmd-pending',
+          transactionId: 'txn-1',
+          expectedVersion: 3,
+        ),
+      ),
+    );
+    final recoveryFixture = fixture(
+      commandIds: const [],
+      transactionIds: const [],
+      sessionStore: recoveryStore,
+    );
+    await recoveryFixture.controller.restoreLocalSession();
+    await pumpCashier(tester, recoveryFixture.controller);
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('Command result unknown')),
+      matchesSemantics(label: 'Command result unknown', isHeader: true),
+    );
+
+    final rejectedFixture = fixture();
+    final authoritative = snapshot(version: 3);
+    await establishTransaction(rejectedFixture, authoritative);
+    rejectedFixture.client.enqueueResult(
+      PosCommandOutcomeKind.domainRejected,
+      code: 'unknown_barcode',
+      version: 3,
+    );
+    rejectedFixture.client.enqueueSnapshot(authoritative);
+    await pumpCashier(tester, rejectedFixture.controller);
+    await tester.enterText(barcodeField, 'unknown');
+    await tester.tap(find.text('Scan Item'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('Item not found.')),
+      matchesSemantics(label: 'Item not found.', isLiveRegion: true),
+    );
+    semantics.dispose();
+  });
+
+  testWidgets('authoritative Change due is the strongest payment value', (
+    tester,
+  ) async {
+    final testFixture = fixture();
+    await establishTransaction(
+      testFixture,
+      snapshot(
+        status: TransactionStatus.paid,
+        total: 199,
+        tenderedCash: 500,
+        changeDue: 777,
+      ),
+    );
+    await pumpCashier(tester, testFixture.controller);
+
+    final changeText = tester.widget<Text>(
+      find.descendant(
+        of: find.byKey(const Key('cashier-change-due')),
+        matching: find.text(r'$7.77'),
+      ),
+    );
+    final cashText = tester.widget<Text>(find.text(r'$5.00'));
+    expect(changeText.style!.fontSize, greaterThan(cashText.style!.fontSize!));
+    expect(changeText.style!.fontWeight, FontWeight.bold);
+  });
+
+  for (final testCase in <(TransactionStatus, String)>[
+    (TransactionStatus.open, 'Scan Item'),
+    (TransactionStatus.paid, 'Complete Sale'),
+    (TransactionStatus.completed, 'Next Sale'),
+  ]) {
+    testWidgets('${testCase.$1.name} cashier remains usable at 2x text scale', (
+      tester,
+    ) async {
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(1024, 768));
+      final testFixture = fixture();
+      await establishTransaction(
+        testFixture,
+        snapshot(
+          status: testCase.$1,
+          total: 12345,
+          tenderedCash: testCase.$1 == TransactionStatus.open ? null : 20000,
+          changeDue: testCase.$1 == TransactionStatus.open ? null : 7655,
+        ),
+      );
+
+      await pumpCashier(
+        tester,
+        testFixture.controller,
+        textScaler: const TextScaler.linear(2),
+      );
+
+      expect(tester.takeException(), isNull);
+      expect(find.text(testCase.$2), findsOneWidget);
+    });
+  }
+
+  testWidgets('recovery screen remains usable at 2x text scale', (
+    tester,
+  ) async {
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(600, 800));
+    final store = MemoryCashierSessionStore()
+      ..loadFailure = const CashierSessionStoreFailure.corruptData();
+    final testFixture = fixture(sessionStore: store);
+    await testFixture.controller.restoreLocalSession();
+
+    await pumpCashier(
+      tester,
+      testFixture.controller,
+      textScaler: const TextScaler.linear(2),
+    );
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('Register recovery required'), findsOneWidget);
+    expect(find.text('Start Sale'), findsNothing);
+  });
+
+  testWidgets('focus shortcuts are inert outside an open idle sale', (
+    tester,
+  ) async {
+    final completedFixture = fixture();
+    await establishTransaction(
+      completedFixture,
+      snapshot(
+        status: TransactionStatus.completed,
+        tenderedCash: 500,
+        changeDue: 0,
+      ),
+    );
+    await pumpCashier(tester, completedFixture.controller);
+    final completedCommandCalls = completedFixture.ids.commandIdCalls;
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.f2);
+    await tester.sendKeyEvent(LogicalKeyboardKey.f4);
+    await tester.pump();
+
+    expect(completedFixture.ids.commandIdCalls, completedCommandCalls);
+    expect(completedFixture.client.commands, hasLength(1));
+    expect(barcodeField, findsNothing);
+    expect(cashField, findsNothing);
+
+    final blockedStore = MemoryCashierSessionStore()
+      ..loadFailure = const CashierSessionStoreFailure.corruptData();
+    final blockedFixture = fixture(sessionStore: blockedStore);
+    await blockedFixture.controller.restoreLocalSession();
+    await pumpCashier(tester, blockedFixture.controller);
+    await tester.sendKeyEvent(LogicalKeyboardKey.f2);
+    await tester.sendKeyEvent(LogicalKeyboardKey.f4);
+    await tester.pump();
+    expect(blockedFixture.ids.commandIdCalls, 0);
+    expect(blockedFixture.client.commands, isEmpty);
+  });
+
+  testWidgets(
+    'long authoritative basket scrolls without hiding totals or controls',
+    (tester) async {
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(1024, 768));
+      final testFixture = fixture();
+      await establishTransaction(
+        testFixture,
+        snapshot(
+          lineItems: List<TransactionLineItem>.generate(
+            40,
+            (index) => TransactionLineItem(
+              barcode: 'code-$index',
+              description: 'Long basket item $index',
+              unitPriceMinorUnits: 100 + index,
+            ),
+          ),
+          subtotal: 12345,
+          total: 12345,
+        ),
+      );
+      await pumpCashier(tester, testFixture.controller);
+
+      expect(find.text('Long basket item 0'), findsOneWidget);
+      expect(find.text('Scan Item'), findsOneWidget);
+      expect(find.text(r'$123.45'), findsWidgets);
+      await tester.fling(
+        find.byType(ListView).first,
+        const Offset(0, -2400),
+        3000,
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Long basket item 39'), findsOneWidget);
+      expect(find.text('Scan Item'), findsOneWidget);
+      expect(find.text(r'$123.45'), findsWidgets);
+      expect(tester.takeException(), isNull);
+    },
+  );
 }

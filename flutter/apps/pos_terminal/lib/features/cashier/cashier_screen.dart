@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../core/pos_core/models/command_result.dart';
+import '../../core/pos_core/models/transaction_command.dart';
 import '../../core/pos_core/models/transaction_snapshot.dart';
 import 'cashier_money_format.dart';
 import 'cashier_money_input.dart';
@@ -8,6 +10,18 @@ import 'cashier_session_controller.dart';
 import 'cashier_session_state.dart';
 
 enum _SubmittedAction { scan, tender, completion }
+
+final class _FocusBarcodeIntent extends Intent {
+  const _FocusBarcodeIntent();
+}
+
+final class _FocusCashIntent extends Intent {
+  const _FocusCashIntent();
+}
+
+final ButtonStyle _primaryActionStyle = FilledButton.styleFrom(
+  minimumSize: const Size(0, 56),
+);
 
 final class CashierScreen extends StatefulWidget {
   const CashierScreen({required this.controller, super.key});
@@ -25,8 +39,15 @@ final class _CashierScreenState extends State<CashierScreen> {
   final FocusNode _cashFocusNode = FocusNode();
 
   _SubmittedAction? _submittedAction;
+  PosCommandResult? _lastCommandResultBeforeSubmission;
   String? _barcodeValidationMessage;
   String? _cashValidationMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    _requestBarcodeFocus();
+  }
 
   @override
   void dispose() {
@@ -43,6 +64,7 @@ final class _CashierScreenState extends State<CashierScreen> {
       _cashValidationMessage = null;
     });
     await widget.controller.startTransaction();
+    _requestBarcodeFocus();
   }
 
   Future<void> _submitBarcode(String barcode) async {
@@ -57,6 +79,7 @@ final class _CashierScreenState extends State<CashierScreen> {
 
     setState(() {
       _submittedAction = _SubmittedAction.scan;
+      _lastCommandResultBeforeSubmission = state.lastCommandResult;
       _barcodeValidationMessage = null;
     });
     await widget.controller.scanBarcode(barcode);
@@ -81,6 +104,7 @@ final class _CashierScreenState extends State<CashierScreen> {
 
     setState(() {
       _submittedAction = _SubmittedAction.tender;
+      _lastCommandResultBeforeSubmission = state.lastCommandResult;
       _cashValidationMessage = null;
     });
     await widget.controller.tenderCash(amountMinorUnits);
@@ -93,14 +117,27 @@ final class _CashierScreenState extends State<CashierScreen> {
       return;
     }
 
-    setState(() => _submittedAction = _SubmittedAction.completion);
+    setState(() {
+      _submittedAction = _SubmittedAction.completion;
+      _lastCommandResultBeforeSubmission = state.lastCommandResult;
+    });
     await widget.controller.completeTransaction();
     _restoreInputWorkflowAfterResolution();
   }
 
   Future<void> _retryPendingCommand() async {
+    final pendingCommand = widget.controller.state.pendingCommand;
+    if (pendingCommand != null && _submittedAction == null) {
+      _lastCommandResultBeforeSubmission =
+          widget.controller.state.lastCommandResult;
+      _restorePendingInputContext(pendingCommand);
+    }
+    final action = _submittedAction;
     await widget.controller.retryPendingCommand();
     _restoreInputWorkflowAfterResolution();
+    if (action == null) {
+      _requestBarcodeFocus();
+    }
   }
 
   Future<void> _refreshTransaction() async {
@@ -109,11 +146,40 @@ final class _CashierScreenState extends State<CashierScreen> {
     if (!mounted || state.snapshot == null) {
       return;
     }
+    final action = _submittedAction;
     _restoreInputWorkflowAfterResolution();
+    if (action == null) {
+      _requestBarcodeFocus();
+    }
   }
 
   Future<void> _beginNextSale() async {
     await widget.controller.beginNextSale();
+    _requestBarcodeFocus();
+  }
+
+  void _restorePendingInputContext(TransactionCommand command) {
+    switch (command) {
+      case ScanBarcodeCommand():
+        _submittedAction = _SubmittedAction.scan;
+        if (_barcodeController.text.isEmpty) {
+          _barcodeController.text = command.barcode;
+        }
+      case TenderCashCommand():
+        _submittedAction = _SubmittedAction.tender;
+        if (_cashController.text.isEmpty) {
+          final dollars = command.amountMinorUnits ~/ 100;
+          final cents = (command.amountMinorUnits % 100).toString().padLeft(
+            2,
+            '0',
+          );
+          _cashController.text = '$dollars.$cents';
+        }
+      case CompleteTransactionCommand():
+        _submittedAction = _SubmittedAction.completion;
+      case StartTransactionCommand():
+        break;
+    }
   }
 
   void _restoreInputWorkflowAfterResolution() {
@@ -127,7 +193,11 @@ final class _CashierScreenState extends State<CashierScreen> {
       return;
     }
 
-    final accepted = state.lastCommandResult?.accepted ?? false;
+    final result = state.lastCommandResult;
+    final hasNewCommandResult =
+        result != null &&
+        !identical(result, _lastCommandResultBeforeSubmission);
+    final accepted = hasNewCommandResult && result.accepted;
     switch (action) {
       case _SubmittedAction.scan:
         if (accepted) {
@@ -148,6 +218,7 @@ final class _CashierScreenState extends State<CashierScreen> {
         break;
     }
     _submittedAction = null;
+    _lastCommandResultBeforeSubmission = null;
   }
 
   void _selectTextAndFocus(
@@ -159,8 +230,7 @@ final class _CashierScreenState extends State<CashierScreen> {
       extentOffset: controller.text.length,
     );
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted &&
-          widget.controller.state.snapshot?.status == TransactionStatus.open) {
+      if (mounted && _canFocusOpenInputs) {
         focusNode.requestFocus();
       }
     });
@@ -168,113 +238,150 @@ final class _CashierScreenState extends State<CashierScreen> {
 
   void _requestBarcodeFocus() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted &&
-          widget.controller.state.snapshot?.status == TransactionStatus.open) {
+      if (mounted && _canFocusOpenInputs) {
         _barcodeFocusNode.requestFocus();
       }
     });
   }
 
+  bool get _canFocusOpenInputs {
+    final state = widget.controller.state;
+    return state.canExecuteNewMutation &&
+        state.snapshot?.status == TransactionStatus.open;
+  }
+
+  Object? _focusBarcode(_FocusBarcodeIntent intent) {
+    if (_canFocusOpenInputs) {
+      _barcodeFocusNode.requestFocus();
+    }
+    return null;
+  }
+
+  Object? _focusCash(_FocusCashIntent intent) {
+    if (_canFocusOpenInputs) {
+      _cashFocusNode.requestFocus();
+    }
+    return null;
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Grocery POS')),
-      body: SafeArea(
-        child: ListenableBuilder(
-          listenable: widget.controller,
-          builder: (context, _) {
-            final state = widget.controller.state;
-            final localRecoveryFailure = state.localRecoveryFailure;
-            if (localRecoveryFailure?.blocksSession ?? false) {
-              return _RecoveryView(
-                icon: Icons.warning_amber_outlined,
-                title: 'Register recovery required',
-                message: localRecoveryFailure!.message,
-              );
-            }
-            if (state.pendingCommand != null) {
-              return _RecoveryView(
-                icon: Icons.help_outline,
-                title: 'Command result unknown',
-                message:
-                    'POS Core could not confirm whether the last action '
-                    'completed. Retry the same command to safely resolve it.',
-                action: FilledButton.icon(
-                  onPressed: state.canRetryPendingCommand
-                      ? _retryPendingCommand
-                      : null,
-                  icon: const Icon(Icons.replay),
-                  label: const Text('Retry Command'),
-                ),
-                showProgress: state.isBusy,
-              );
-            }
+    return Shortcuts(
+      shortcuts: const <ShortcutActivator, Intent>{
+        SingleActivator(LogicalKeyboardKey.f2): _FocusBarcodeIntent(),
+        SingleActivator(LogicalKeyboardKey.f4): _FocusCashIntent(),
+      },
+      child: Actions(
+        actions: <Type, Action<Intent>>{
+          _FocusBarcodeIntent: CallbackAction<_FocusBarcodeIntent>(
+            onInvoke: _focusBarcode,
+          ),
+          _FocusCashIntent: CallbackAction<_FocusCashIntent>(
+            onInvoke: _focusCash,
+          ),
+        },
+        child: Scaffold(
+          appBar: AppBar(title: const Text('Grocery POS')),
+          body: SafeArea(
+            child: ListenableBuilder(
+              listenable: widget.controller,
+              builder: (context, _) {
+                final state = widget.controller.state;
+                final localRecoveryFailure = state.localRecoveryFailure;
+                if (localRecoveryFailure?.blocksSession ?? false) {
+                  return _RecoveryView(
+                    icon: Icons.warning_amber_outlined,
+                    title: 'Register recovery required',
+                    message: localRecoveryFailure!.message,
+                  );
+                }
+                if (state.pendingCommand != null) {
+                  return _RecoveryView(
+                    icon: Icons.help_outline,
+                    title: 'Command result unknown',
+                    message:
+                        'POS Core could not confirm whether the last action '
+                        'completed. Retry the same command to safely resolve it.',
+                    action: FilledButton.icon(
+                      style: _primaryActionStyle,
+                      onPressed: state.canRetryPendingCommand
+                          ? _retryPendingCommand
+                          : null,
+                      icon: const Icon(Icons.replay),
+                      label: const Text('Retry Command'),
+                    ),
+                    showProgress: state.isBusy,
+                  );
+                }
 
-            final snapshot = state.snapshot;
-            if (snapshot != null) {
-              return _ActiveTransactionView(
-                state: state,
-                snapshot: snapshot,
-                barcodeController: _barcodeController,
-                barcodeFocusNode: _barcodeFocusNode,
-                cashController: _cashController,
-                cashFocusNode: _cashFocusNode,
-                barcodeValidationMessage: _barcodeValidationMessage,
-                cashValidationMessage: _cashValidationMessage,
-                feedback:
-                    localRecoveryFailure?.message ??
-                    _resultFeedback(state.lastCommandResult),
-                onScan: () => _submitBarcode(_barcodeController.text),
-                onBarcodeSubmitted: _submitBarcode,
-                onTender: () => _submitTender(_cashController.text),
-                onCashSubmitted: _submitTender,
-                onComplete: _completeSale,
-                onNextSale: _beginNextSale,
-              );
-            }
+                final snapshot = state.snapshot;
+                if (snapshot != null) {
+                  return _ActiveTransactionView(
+                    state: state,
+                    snapshot: snapshot,
+                    barcodeController: _barcodeController,
+                    barcodeFocusNode: _barcodeFocusNode,
+                    cashController: _cashController,
+                    cashFocusNode: _cashFocusNode,
+                    barcodeValidationMessage: _barcodeValidationMessage,
+                    cashValidationMessage: _cashValidationMessage,
+                    feedback:
+                        localRecoveryFailure?.message ??
+                        _resultFeedback(state.lastCommandResult),
+                    onScan: () => _submitBarcode(_barcodeController.text),
+                    onBarcodeSubmitted: _submitBarcode,
+                    onTender: () => _submitTender(_cashController.text),
+                    onCashSubmitted: _submitTender,
+                    onComplete: _completeSale,
+                    onNextSale: _beginNextSale,
+                  );
+                }
 
-            if (state.isBusy) {
-              final message = switch (state.activity) {
-                CashierSessionActivity.executingCommand =>
-                  switch (_submittedAction) {
-                    null => 'Starting sale...',
-                    _SubmittedAction.scan => 'Processing item...',
-                    _SubmittedAction.tender => 'Taking cash...',
-                    _SubmittedAction.completion => 'Completing sale...',
-                  },
-                CashierSessionActivity.refreshingTransaction =>
-                  'Loading latest transaction state...',
-                CashierSessionActivity.preparingNextSale =>
-                  'Preparing the next sale...',
-                CashierSessionActivity.idle => 'Working...',
-              };
-              return _ProgressView(message: message);
-            }
+                if (state.isBusy) {
+                  final message = switch (state.activity) {
+                    CashierSessionActivity.executingCommand =>
+                      switch (_submittedAction) {
+                        null => 'Starting sale...',
+                        _SubmittedAction.scan => 'Processing item...',
+                        _SubmittedAction.tender => 'Taking cash...',
+                        _SubmittedAction.completion => 'Completing sale...',
+                      },
+                    CashierSessionActivity.refreshingTransaction =>
+                      'Loading latest transaction state...',
+                    CashierSessionActivity.preparingNextSale =>
+                      'Preparing the next sale...',
+                    CashierSessionActivity.idle => 'Working...',
+                  };
+                  return _ProgressView(message: message);
+                }
 
-            if (state.activeTransactionId != null) {
-              return _RecoveryView(
-                icon: Icons.sync_problem_outlined,
-                title: 'Transaction state unavailable',
-                message:
-                    'The last command was resolved, but the latest transaction '
-                    'state could not be loaded.',
-                detail: state.failure?.message,
-                action: FilledButton.icon(
-                  onPressed: state.canRefresh ? _refreshTransaction : null,
-                  icon: const Icon(Icons.refresh),
-                  label: const Text('Refresh Transaction'),
-                ),
-              );
-            }
+                if (state.activeTransactionId != null) {
+                  return _RecoveryView(
+                    icon: Icons.sync_problem_outlined,
+                    title: 'Transaction state unavailable',
+                    message:
+                        'The last command was resolved, but the latest transaction '
+                        'state could not be loaded.',
+                    detail: state.failure?.message,
+                    action: FilledButton.icon(
+                      style: _primaryActionStyle,
+                      onPressed: state.canRefresh ? _refreshTransaction : null,
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('Refresh Transaction'),
+                    ),
+                  );
+                }
 
-            return _NoTransactionView(
-              state: state,
-              feedback:
-                  localRecoveryFailure?.message ??
-                  _resultFeedback(state.lastCommandResult),
-              onStart: state.canStartTransaction ? _startSale : null,
-            );
-          },
+                return _NoTransactionView(
+                  state: state,
+                  feedback:
+                      localRecoveryFailure?.message ??
+                      _resultFeedback(state.lastCommandResult),
+                  onStart: state.canStartTransaction ? _startSale : null,
+                );
+              },
+            ),
+          ),
         ),
       ),
     );
@@ -335,12 +442,16 @@ final class _NoTransactionView extends StatelessWidget {
                 children: [
                   const Icon(Icons.point_of_sale, size: 64),
                   const SizedBox(height: 20),
-                  Text(
-                    failure == null
-                        ? 'Ready for the next sale'
-                        : 'POS Core request failed.',
-                    style: Theme.of(context).textTheme.headlineSmall,
-                    textAlign: TextAlign.center,
+                  Semantics(
+                    container: true,
+                    header: true,
+                    child: Text(
+                      failure == null
+                          ? 'Ready for the next sale'
+                          : 'POS Core request failed.',
+                      style: Theme.of(context).textTheme.headlineSmall,
+                      textAlign: TextAlign.center,
+                    ),
                   ),
                   if (feedback != null) ...[
                     const SizedBox(height: 12),
@@ -352,6 +463,7 @@ final class _NoTransactionView extends StatelessWidget {
                   ],
                   const SizedBox(height: 28),
                   FilledButton.icon(
+                    style: _primaryActionStyle,
                     onPressed: onStart,
                     icon: const Icon(Icons.add_shopping_cart),
                     label: const Text('Start Sale'),
@@ -418,10 +530,16 @@ final class _RecoveryView extends StatelessWidget {
                 children: [
                   Icon(icon, size: 56),
                   const SizedBox(height: 16),
-                  Text(
-                    title,
-                    style: Theme.of(context).textTheme.headlineSmall,
-                    textAlign: TextAlign.center,
+                  Semantics(
+                    container: true,
+                    header: true,
+                    label: title,
+                    excludeSemantics: true,
+                    child: Text(
+                      title,
+                      style: Theme.of(context).textTheme.headlineSmall,
+                      textAlign: TextAlign.center,
+                    ),
                   ),
                   const SizedBox(height: 12),
                   Text(message, textAlign: TextAlign.center),
@@ -520,7 +638,7 @@ final class _ActiveTransactionView extends StatelessWidget {
               children: [
                 Expanded(child: basket),
                 const SizedBox(width: 20),
-                SizedBox(width: 340, child: controls),
+                SizedBox(width: 360, child: controls),
               ],
             ),
           );
@@ -578,13 +696,22 @@ final class _BasketPanel extends StatelessWidget {
           children: [
             Text('Basket', style: Theme.of(context).textTheme.headlineSmall),
             const SizedBox(height: 4),
-            Text(
-              'Status: ${_transactionStatusLabel(snapshot.status)}',
-              style: Theme.of(context).textTheme.titleMedium,
+            Semantics(
+              container: true,
+              label:
+                  'Transaction status: '
+                  '${_transactionStatusLabel(snapshot.status)}',
+              excludeSemantics: true,
+              child: Text(
+                'Status: ${_transactionStatusLabel(snapshot.status)}',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
             ),
-            Text(
-              'Transaction version ${snapshot.version}',
-              style: Theme.of(context).textTheme.bodySmall,
+            ExcludeSemantics(
+              child: Text(
+                'Transaction version ${snapshot.version}',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
             ),
             const Divider(height: 28),
             if (compact) lineList else Expanded(child: lineList),
@@ -608,26 +735,58 @@ final class _BasketPanel extends StatelessWidget {
 
 final class _MoneyRow extends StatelessWidget {
   const _MoneyRow({
+    super.key,
     required this.label,
     required this.minorUnits,
     this.prominent = false,
+    this.attention = false,
   });
 
   final String label;
   final int minorUnits;
   final bool prominent;
+  final bool attention;
 
   @override
   Widget build(BuildContext context) {
-    final style = prominent
-        ? Theme.of(context).textTheme.headlineSmall
-        : Theme.of(context).textTheme.titleLarge;
-    return Row(
-      children: [
-        Expanded(child: Text(label, style: style)),
-        const SizedBox(width: 12),
-        Text(formatUsdMinorUnits(minorUnits), style: style),
-      ],
+    final theme = Theme.of(context);
+    final style = attention
+        ? theme.textTheme.headlineMedium?.copyWith(
+            color: theme.colorScheme.primary,
+            fontWeight: FontWeight.bold,
+          )
+        : prominent
+        ? theme.textTheme.headlineSmall
+        : theme.textTheme.titleLarge;
+    final formatted = formatUsdMinorUnits(minorUnits);
+    return Semantics(
+      container: true,
+      label: '$label: $formatted',
+      child: ExcludeSemantics(
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final scaledText = MediaQuery.textScalerOf(context).scale(1);
+            final stack = scaledText >= 1.5 && constraints.maxWidth < 420;
+            if (stack) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(label, style: style),
+                  const SizedBox(height: 4),
+                  Text(formatted, style: style, textAlign: TextAlign.end),
+                ],
+              );
+            }
+            return Row(
+              children: [
+                Expanded(child: Text(label, style: style)),
+                const SizedBox(width: 12),
+                Text(formatted, style: style),
+              ],
+            );
+          },
+        ),
+      ),
     );
   }
 }
@@ -679,12 +838,16 @@ final class _OpenTransactionControls extends StatelessWidget {
               key: const Key('cashier-barcode-field'),
               controller: barcodeController,
               focusNode: barcodeFocusNode,
-              autofocus: true,
+              autocorrect: false,
+              enableSuggestions: false,
+              smartDashesType: SmartDashesType.disabled,
+              smartQuotesType: SmartQuotesType.disabled,
               enabled: state.canExecuteNewMutation,
               textInputAction: TextInputAction.done,
               decoration: InputDecoration(
                 labelText: 'Barcode',
                 hintText: 'Scan or enter a barcode',
+                suffixText: 'F2',
                 errorText: barcodeValidationMessage,
                 border: const OutlineInputBorder(),
               ),
@@ -694,6 +857,7 @@ final class _OpenTransactionControls extends StatelessWidget {
             ),
             const SizedBox(height: 16),
             FilledButton.icon(
+              style: _primaryActionStyle,
               onPressed: state.canExecuteNewMutation ? onScan : null,
               icon: const Icon(Icons.qr_code_scanner),
               label: const Text('Scan Item'),
@@ -711,6 +875,7 @@ final class _OpenTransactionControls extends StatelessWidget {
               decoration: InputDecoration(
                 labelText: 'Cash received',
                 hintText: '0.00',
+                suffixText: 'F4',
                 errorText: cashValidationMessage,
                 border: const OutlineInputBorder(),
               ),
@@ -718,6 +883,7 @@ final class _OpenTransactionControls extends StatelessWidget {
             ),
             const SizedBox(height: 16),
             FilledButton.icon(
+              style: _primaryActionStyle,
               onPressed: state.canExecuteNewMutation ? onTender : null,
               icon: const Icon(Icons.payments_outlined),
               label: const Text('Take Cash'),
@@ -766,10 +932,14 @@ final class _PaymentControls extends StatelessWidget {
               size: 52,
             ),
             const SizedBox(height: 14),
-            Text(
-              completed ? 'Sale Complete' : 'Payment accepted',
-              style: Theme.of(context).textTheme.headlineSmall,
-              textAlign: TextAlign.center,
+            Semantics(
+              container: true,
+              header: true,
+              child: Text(
+                completed ? 'Sale Complete' : 'Payment accepted',
+                style: Theme.of(context).textTheme.headlineSmall,
+                textAlign: TextAlign.center,
+              ),
             ),
             const SizedBox(height: 24),
             _MoneyRow(label: 'Total', minorUnits: snapshot.totalMinorUnits),
@@ -778,9 +948,10 @@ final class _PaymentControls extends StatelessWidget {
               _MoneyRow(label: 'Cash received', minorUnits: tenderedCash),
               const SizedBox(height: 12),
               _MoneyRow(
+                key: const Key('cashier-change-due'),
                 label: 'Change due',
                 minorUnits: changeDue,
-                prominent: true,
+                attention: true,
               ),
             ] else ...[
               const SizedBox(height: 20),
@@ -792,6 +963,7 @@ final class _PaymentControls extends StatelessWidget {
             if (!completed) ...[
               const SizedBox(height: 28),
               FilledButton.icon(
+                style: _primaryActionStyle,
                 onPressed: onComplete,
                 icon: const Icon(Icons.done_all),
                 label: const Text('Complete Sale'),
@@ -799,6 +971,7 @@ final class _PaymentControls extends StatelessWidget {
             ] else ...[
               const SizedBox(height: 28),
               FilledButton.icon(
+                style: _primaryActionStyle,
                 onPressed: onNextSale,
                 icon: const Icon(Icons.add_shopping_cart),
                 label: const Text('Next Sale'),
@@ -822,17 +995,24 @@ final class _FeedbackBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.secondaryContainer,
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Text(
-          message,
-          style: Theme.of(context).textTheme.bodyLarge,
-          textAlign: TextAlign.center,
+    return Semantics(
+      container: true,
+      liveRegion: true,
+      label: message,
+      child: ExcludeSemantics(
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.secondaryContainer,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Text(
+              message,
+              style: Theme.of(context).textTheme.bodyLarge,
+              textAlign: TextAlign.center,
+            ),
+          ),
         ),
       ),
     );

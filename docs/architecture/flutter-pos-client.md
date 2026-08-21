@@ -228,6 +228,23 @@ old snapshot is withheld and the UI shows a loading state. After an accepted
 scan and successful refresh, the field is cleared and focused for the next
 keyboard/scanner entry. A rejected barcode remains available for correction.
 
+Open transactions are scanner-first. Barcode entry remains a keyboard-wedge
+integration: the scanner types an opaque identifier into the text field and
+sends Enter. Autocorrect, suggestions, and smart punctuation are disabled for
+that field, while identifier normalization and scanner timing heuristics remain
+absent. Focus is requested only at workflow transitions—when an authoritative
+open snapshot first becomes available, after a resolved scan refresh, after a
+restored-session refresh/retry, or after Next Sale reaches its authoritative
+new transaction. It is not requested on every build, so deliberately focusing
+cash or another control is not immediately undone.
+
+F2 focuses barcode and F4 focuses cash only while an authoritative open sale is
+idle. They are focus-only shortcuts: they never submit a mutation, generate an
+ID, bypass recovery, or operate during busy, paid, completed, or blocked states.
+Enter remains the only keyboard-wedge submission mechanism. While one scan is
+unresolved the input controls are unavailable, and no scan queue or buffered
+second intent exists.
+
 Cash input accepts whole dollars or one/two decimal places after ignoring
 surrounding whitespace. It rejects signs, currency symbols, commas, exponent
 notation, trailing decimal points, and more than two decimal places. Parsing
@@ -253,7 +270,23 @@ It is available only from an authoritative completed snapshot. One explicit
 press clears the completed local session before creating, persisting, and
 sending a new start intent with new transaction and command IDs. Open and paid
 sessions cannot be abandoned through this operation. Completion does not
-automatically begin another sale.
+automatically begin another sale. Barcode focus returns only after the new
+start command resolves and its authoritative GET reports an open transaction.
+
+High-frequency and recovery actions use enlarged text-labeled touch targets.
+Paid and completed presentations give the backend-provided Change Due value the
+strongest monetary emphasis while retaining Total and Cash Received. Combined
+semantic labels describe transaction status and authoritative money values;
+recovery titles are headings, important durable-result feedback is a live
+region, and the developer-oriented transaction version is excluded from the
+accessibility tree. Wide, narrow, long-basket, and 2× text-scale widget tests
+protect the current layout. These are targeted accessibility improvements, not
+a claim of a complete accessibility audit.
+
+Recovery interaction remains deliberately distinct: restored uncertain
+commands show Retry Command and recover correction focus from the exact pending
+typed command; known commands with unavailable current state show Refresh
+Transaction; corrupt local recovery state exposes neither normal mutation path.
 
 ## Command results and transaction reads
 

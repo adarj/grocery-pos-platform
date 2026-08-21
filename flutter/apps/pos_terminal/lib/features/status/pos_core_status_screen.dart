@@ -5,6 +5,14 @@ import '../../core/pos_core/pos_core_client.dart';
 import '../cashier/cashier_screen.dart';
 import '../cashier/cashier_session_controller.dart';
 
+final ButtonStyle _primaryStatusActionStyle = FilledButton.styleFrom(
+  minimumSize: const Size(0, 56),
+);
+
+final ButtonStyle _secondaryStatusActionStyle = OutlinedButton.styleFrom(
+  minimumSize: const Size(0, 56),
+);
+
 final class PosCoreStatusScreen extends StatefulWidget {
   const PosCoreStatusScreen({
     required this.client,
@@ -67,6 +75,7 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
                 icon: Icons.error_outline,
                 actions: [
                   FilledButton.icon(
+                    style: _primaryStatusActionStyle,
                     onPressed: _retry,
                     icon: const Icon(Icons.refresh),
                     label: const Text('Retry'),
@@ -85,6 +94,7 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
                 icon: Icons.warning_amber_outlined,
                 actions: [
                   FilledButton.icon(
+                    style: _primaryStatusActionStyle,
                     onPressed: _retry,
                     icon: const Icon(Icons.refresh),
                     label: const Text('Retry'),
@@ -101,11 +111,13 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
               icon: Icons.check_circle_outline,
               actions: [
                 FilledButton.icon(
+                  style: _primaryStatusActionStyle,
                   onPressed: _openRegister,
                   icon: const Icon(Icons.point_of_sale),
                   label: const Text('Open Register'),
                 ),
                 OutlinedButton.icon(
+                  style: _secondaryStatusActionStyle,
                   onPressed: _retry,
                   icon: const Icon(Icons.refresh),
                   label: const Text('Refresh'),

@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pos_terminal/app/pos_terminal_app.dart';
 import 'package:pos_terminal/core/pos_core/models/command_result.dart';
@@ -115,6 +116,10 @@ void main() {
     expect(find.text('grocery-pos-core 0.0.0-dev (dev)'), findsOneWidget);
     expect(find.text('Open Register'), findsOneWidget);
     expect(find.text('Refresh'), findsOneWidget);
+    expect(
+      tester.getSize(find.widgetWithText(FilledButton, 'Open Register')).height,
+      greaterThanOrEqualTo(52),
+    );
   });
 
   testWidgets('shows connecting state while health request is pending', (
