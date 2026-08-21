@@ -162,8 +162,9 @@ idempotency decision is recorded in
 The Flutter terminal now consumes this boundary through a typed `PosCoreClient`
 and strict HTTP adapter. Its command, durable-result, authoritative-snapshot,
 and failure models are documented in
-[Flutter POS Core Client Foundation](flutter-pos-client.md). Cashier workflow
-orchestration and widgets are not implemented yet.
+[Flutter POS Core Client Foundation](flutter-pos-client.md). The implemented
+cashier controller and widgets use that boundary for the current start, scan,
+cash-tender, completion, recovery, and next-sale workflow.
 
 ### Command IDs and expected versions
 
@@ -350,7 +351,10 @@ Flutter tests should verify:
 * structured errors map to appropriate UI states;
 * clients do not calculate authoritative business results independently.
 
-Later integration tests should exercise the complete Flutter → Racket boundary.
+The explicit real-process integration suite exercises the complete typed
+Flutter client/controller → HTTP → Racket runtime → file-backed SQLite
+boundary, including restart and same-command recovery. See
+[POS integration testing](../development/integration-testing.md).
 
 ## Current Implemented Surface
 

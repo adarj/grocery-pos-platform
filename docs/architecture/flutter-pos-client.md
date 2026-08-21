@@ -321,6 +321,40 @@ outcome kinds, unknown transaction statuses, missing authoritative fields, and
 floating-point or string money representations fail closed as invalid server
 responses.
 
+## Real POS Core integration evidence
+
+An explicitly invoked Linux integration suite now crosses the production
+boundary:
+
+```text
+CashierSessionController + FileCashierSessionStore
+  -> HttpPosCoreClient
+  -> real loopback HTTP
+  -> real Racket runtime and transaction service
+  -> isolated file-backed SQLite journal and command receipts
+```
+
+Each scenario owns a child POS Core process, a dynamically allocated loopback
+port, a temporary SQLite file, and a temporary Flutter recovery record. POS
+Core performs its normal startup migration; the harness does not create schema
+or use a test-only route. Readiness is established through bounded polling of
+the real `/health` endpoint, and teardown stops the child process before
+removing its temporary directory.
+
+The suite covers the full cash sale and Next Sale, three sequential scans, ten
+bounded full-sale cycles, active and paid transaction recovery across both
+Flutter-controller and POS Core restart, transport failure with a persisted
+pending command, and GET-only restoration when pending is null. It also models
+a real accepted scan whose local pending marker remains stale across POS Core
+restart: retrying that exact restored command resolves through the durable
+backend receipt and the authoritative basket contains the item exactly once.
+
+These tests remain outside ordinary `flutter test` discovery. The fast Flutter
+unit/widget suite continues to use deterministic clients, while
+`just test-pos-integration` owns the real backend automatically. Harness usage
+and diagnostics are documented in
+[POS integration testing](../development/integration-testing.md).
+
 ## Deliberately deferred
 
 This slice does not implement automatic retry, retry timers, cached/offline

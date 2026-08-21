@@ -145,6 +145,9 @@ Verified capabilities currently include:
 * Flutter cashier session orchestration and a start/scan/cash-tender/complete
   interface driven by authoritative transaction reads;
 * Flutter widget tests;
+* isolated Flutter-to-Racket real-process integration tests covering complete
+  cash sales, restart recovery, uncertain transport, and durable same-command
+  receipt resolution;
 * Flutter-to-Racket local health connection;
 * nixGL-based Flutter GUI launch in the current VM environment;
 * GitHub Actions workflow definitions for scaffold/Nix validation, Racket
@@ -275,6 +278,13 @@ Run Flutter tests:
 just test-flutter
 ```
 
+Run the isolated real POS Core integration suite (it starts and owns the Racket
+process automatically):
+
+```bash
+just test-pos-integration
+```
+
 Run Flutter static analysis:
 
 ```bash
@@ -287,7 +297,8 @@ Run the combined project test suite:
 just test
 ```
 
-Run the complete local quality gate, including Flutter static analysis and both test suites:
+Run the complete local quality gate, including Flutter static analysis, the
+fast Racket/Flutter suites, and the real-process POS integration suite:
 
 ```bash
 just check
