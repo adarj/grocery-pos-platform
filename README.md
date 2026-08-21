@@ -372,8 +372,10 @@ that retrying the same command cannot duplicate the current cash-sale facts.
 
 This transaction workflow is exposed through the narrow Transaction HTTP API
 v1 command and query routes. Flutter now implements the current cash-sale
-cashier slice through authoritative completion; next-sale reset and broader
-production checkout capabilities remain separately scoped work.
+cashier slice through authoritative completion, persists exact pending command
+identity before mutation POSTs for process-restart recovery, and starts the next
+sale only through an explicit completed-session action. Broader production
+checkout capabilities remain separately scoped work.
 
 ## Status
 

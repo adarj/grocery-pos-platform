@@ -11,6 +11,7 @@ import 'package:pos_terminal/core/pos_core/pos_core_client.dart';
 import 'package:pos_terminal/features/cashier/cashier_id_generator.dart';
 import 'package:pos_terminal/features/cashier/cashier_session_controller.dart';
 import 'package:pos_terminal/features/cashier/cashier_session_state.dart';
+import 'package:pos_terminal/features/cashier/cashier_session_store.dart';
 
 typedef CommandHandler =
     Future<PosCommandResult> Function(TransactionCommand command);
@@ -105,6 +106,23 @@ final class FakeCashierIdGenerator implements CashierIdGenerator {
   }
 }
 
+final class MemoryCashierSessionStore implements CashierSessionStore {
+  PersistedCashierSession? persisted;
+
+  @override
+  Future<PersistedCashierSession?> load() async => persisted;
+
+  @override
+  Future<void> save(PersistedCashierSession session) async {
+    persisted = session;
+  }
+
+  @override
+  Future<void> clear() async {
+    persisted = null;
+  }
+}
+
 PosCommandResult resultFor(
   TransactionCommand command, {
   PosCommandOutcomeKind kind = PosCommandOutcomeKind.accepted,
@@ -157,7 +175,11 @@ fixture({
     transactionIds: transactionIds,
   );
   return (
-    controller: CashierSessionController(client: client, idGenerator: ids),
+    controller: CashierSessionController(
+      client: client,
+      idGenerator: ids,
+      sessionStore: MemoryCashierSessionStore(),
+    ),
     client: client,
     ids: ids,
   );

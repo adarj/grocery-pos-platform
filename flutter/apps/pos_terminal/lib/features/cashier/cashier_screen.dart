@@ -112,6 +112,10 @@ final class _CashierScreenState extends State<CashierScreen> {
     _restoreInputWorkflowAfterResolution();
   }
 
+  Future<void> _beginNextSale() async {
+    await widget.controller.beginNextSale();
+  }
+
   void _restoreInputWorkflowAfterResolution() {
     if (!mounted) {
       return;
@@ -180,6 +184,14 @@ final class _CashierScreenState extends State<CashierScreen> {
           listenable: widget.controller,
           builder: (context, _) {
             final state = widget.controller.state;
+            final localRecoveryFailure = state.localRecoveryFailure;
+            if (localRecoveryFailure?.blocksSession ?? false) {
+              return _RecoveryView(
+                icon: Icons.warning_amber_outlined,
+                title: 'Register recovery required',
+                message: localRecoveryFailure!.message,
+              );
+            }
             if (state.pendingCommand != null) {
               return _RecoveryView(
                 icon: Icons.help_outline,
@@ -209,12 +221,15 @@ final class _CashierScreenState extends State<CashierScreen> {
                 cashFocusNode: _cashFocusNode,
                 barcodeValidationMessage: _barcodeValidationMessage,
                 cashValidationMessage: _cashValidationMessage,
-                feedback: _resultFeedback(state.lastCommandResult),
+                feedback:
+                    localRecoveryFailure?.message ??
+                    _resultFeedback(state.lastCommandResult),
                 onScan: () => _submitBarcode(_barcodeController.text),
                 onBarcodeSubmitted: _submitBarcode,
                 onTender: () => _submitTender(_cashController.text),
                 onCashSubmitted: _submitTender,
                 onComplete: _completeSale,
+                onNextSale: _beginNextSale,
               );
             }
 
@@ -229,6 +244,8 @@ final class _CashierScreenState extends State<CashierScreen> {
                   },
                 CashierSessionActivity.refreshingTransaction =>
                   'Loading latest transaction state...',
+                CashierSessionActivity.preparingNextSale =>
+                  'Preparing the next sale...',
                 CashierSessionActivity.idle => 'Working...',
               };
               return _ProgressView(message: message);
@@ -252,7 +269,9 @@ final class _CashierScreenState extends State<CashierScreen> {
 
             return _NoTransactionView(
               state: state,
-              feedback: _resultFeedback(state.lastCommandResult),
+              feedback:
+                  localRecoveryFailure?.message ??
+                  _resultFeedback(state.lastCommandResult),
               onStart: state.canStartTransaction ? _startSale : null,
             );
           },
@@ -372,7 +391,7 @@ final class _RecoveryView extends StatelessWidget {
     required this.icon,
     required this.title,
     required this.message,
-    required this.action,
+    this.action,
     this.detail,
     this.showProgress = false,
   });
@@ -381,7 +400,7 @@ final class _RecoveryView extends StatelessWidget {
   final String title;
   final String message;
   final String? detail;
-  final Widget action;
+  final Widget? action;
   final bool showProgress;
 
   @override
@@ -410,8 +429,7 @@ final class _RecoveryView extends StatelessWidget {
                     const SizedBox(height: 8),
                     Text(detail!, textAlign: TextAlign.center),
                   ],
-                  const SizedBox(height: 24),
-                  action,
+                  if (action != null) ...[const SizedBox(height: 24), action!],
                   if (showProgress) ...[
                     const SizedBox(height: 20),
                     const CircularProgressIndicator(),
@@ -442,6 +460,7 @@ final class _ActiveTransactionView extends StatelessWidget {
     required this.onTender,
     required this.onCashSubmitted,
     required this.onComplete,
+    required this.onNextSale,
   });
 
   final CashierSessionState state;
@@ -458,6 +477,7 @@ final class _ActiveTransactionView extends StatelessWidget {
   final VoidCallback onTender;
   final ValueChanged<String> onCashSubmitted;
   final VoidCallback onComplete;
+  final VoidCallback onNextSale;
 
   @override
   Widget build(BuildContext context) {
@@ -488,6 +508,7 @@ final class _ActiveTransactionView extends StatelessWidget {
           TransactionStatus.completed => _PaymentControls(
             snapshot: snapshot,
             feedback: feedback,
+            onNextSale: state.canBeginNextSale ? onNextSale : null,
           ),
         };
 
@@ -717,11 +738,13 @@ final class _PaymentControls extends StatelessWidget {
     required this.snapshot,
     required this.feedback,
     this.onComplete,
+    this.onNextSale,
   });
 
   final TransactionSnapshot snapshot;
   final String? feedback;
   final VoidCallback? onComplete;
+  final VoidCallback? onNextSale;
 
   @override
   Widget build(BuildContext context) {
@@ -772,6 +795,13 @@ final class _PaymentControls extends StatelessWidget {
                 onPressed: onComplete,
                 icon: const Icon(Icons.done_all),
                 label: const Text('Complete Sale'),
+              ),
+            ] else ...[
+              const SizedBox(height: 28),
+              FilledButton.icon(
+                onPressed: onNextSale,
+                icon: const Icon(Icons.add_shopping_cart),
+                label: const Text('Next Sale'),
               ),
             ],
             if (feedback != null) ...[

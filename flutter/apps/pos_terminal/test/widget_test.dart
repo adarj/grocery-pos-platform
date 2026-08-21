@@ -10,6 +10,24 @@ import 'package:pos_terminal/core/pos_core/models/transaction_snapshot.dart';
 import 'package:pos_terminal/core/pos_core/pos_core_client.dart';
 import 'package:pos_terminal/features/cashier/cashier_id_generator.dart';
 import 'package:pos_terminal/features/cashier/cashier_session_controller.dart';
+import 'package:pos_terminal/features/cashier/cashier_session_store.dart';
+
+final class MemoryCashierSessionStore implements CashierSessionStore {
+  PersistedCashierSession? persisted;
+
+  @override
+  Future<PersistedCashierSession?> load() async => persisted;
+
+  @override
+  Future<void> save(PersistedCashierSession session) async {
+    persisted = session;
+  }
+
+  @override
+  Future<void> clear() async {
+    persisted = null;
+  }
+}
 
 final class FixedCashierIds implements CashierIdGenerator {
   @override
@@ -81,6 +99,7 @@ PosTerminalApp testApp(PosCoreClient client) {
     cashierController: CashierSessionController(
       client: client,
       idGenerator: FixedCashierIds(),
+      sessionStore: MemoryCashierSessionStore(),
     ),
   );
 }

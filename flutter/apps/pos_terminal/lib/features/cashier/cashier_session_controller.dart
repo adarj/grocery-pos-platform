@@ -6,21 +6,55 @@ import '../../core/pos_core/models/transaction_command.dart';
 import '../../core/pos_core/models/transaction_snapshot.dart';
 import '../../core/pos_core/pos_core_client.dart';
 import 'cashier_id_generator.dart';
+import 'cashier_local_recovery_failure.dart';
 import 'cashier_session_state.dart';
+import 'cashier_session_store.dart';
 
 final class CashierSessionController extends ChangeNotifier {
   CashierSessionController({
     required PosCoreClient client,
     required CashierIdGenerator idGenerator,
+    required CashierSessionStore sessionStore,
   }) : _client = client,
-       _idGenerator = idGenerator;
+       _idGenerator = idGenerator,
+       _sessionStore = sessionStore;
 
   final PosCoreClient _client;
   final CashierIdGenerator _idGenerator;
+  final CashierSessionStore _sessionStore;
 
   CashierSessionState _state = CashierSessionState.initial;
 
   CashierSessionState get state => _state;
+
+  Future<void> restoreLocalSession() async {
+    _requireIdle();
+    if (_state.activeTransactionId != null ||
+        _state.snapshot != null ||
+        _state.pendingCommand != null) {
+      throw StateError('Cashier recovery can only be restored at startup.');
+    }
+
+    try {
+      final persisted = await _sessionStore.load();
+      if (persisted == null) {
+        _setState(CashierSessionState.initial);
+        return;
+      }
+      _setState(
+        CashierSessionState(
+          activeTransactionId: persisted.activeTransactionId,
+          pendingCommand: persisted.pendingCommand,
+        ),
+      );
+    } on CashierSessionStoreFailure catch (failure) {
+      _setState(
+        CashierSessionState(
+          localRecoveryFailure: _blockingLocalFailure(failure),
+        ),
+      );
+    }
+  }
 
   Future<void> startTransaction() async {
     _requireIdle();
@@ -38,7 +72,7 @@ final class CashierSessionController extends ChangeNotifier {
       expectedVersion: 0,
     );
 
-    await _executeCommand(command);
+    await _persistAndExecuteNewCommand(command);
   }
 
   Future<void> scanBarcode(String barcode) async {
@@ -53,7 +87,7 @@ final class CashierSessionController extends ChangeNotifier {
       expectedVersion: snapshot.version,
       barcode: barcode,
     );
-    await _executeCommand(command);
+    await _persistAndExecuteNewCommand(command);
   }
 
   Future<void> tenderCash(int amountMinorUnits) async {
@@ -72,7 +106,7 @@ final class CashierSessionController extends ChangeNotifier {
       expectedVersion: snapshot.version,
       amountMinorUnits: amountMinorUnits,
     );
-    await _executeCommand(command);
+    await _persistAndExecuteNewCommand(command);
   }
 
   Future<void> completeTransaction() async {
@@ -82,38 +116,103 @@ final class CashierSessionController extends ChangeNotifier {
       transactionId: snapshot.transactionId,
       expectedVersion: snapshot.version,
     );
-    await _executeCommand(command);
+    await _persistAndExecuteNewCommand(command);
   }
 
   Future<void> retryPendingCommand() async {
     _requireIdle();
-    final command = _state.pendingCommand;
-    if (command == null) {
+    if (!_state.canRetryPendingCommand) {
       throw StateError('There is no pending transaction command to retry.');
     }
-
-    await _executeCommand(command, pendingWhileExecuting: true);
+    await _executePersistedCommand(
+      _state.pendingCommand!,
+      pendingWhileExecuting: true,
+    );
   }
 
   Future<void> refreshTransaction() async {
     _requireIdle();
-    if (_state.pendingCommand != null) {
-      throw StateError(
-        'The pending command must be resolved before refreshing state.',
-      );
+    if (!_state.canRefresh) {
+      throw StateError('There is no active transaction to refresh safely.');
     }
-    final transactionId = _state.activeTransactionId;
-    if (transactionId == null) {
-      throw StateError('There is no active transaction to refresh.');
-    }
-
     await _refreshAuthoritativeTransaction(
-      transactionId,
+      _state.activeTransactionId!,
       lastCommandResult: _state.lastCommandResult,
     );
   }
 
-  Future<void> _executeCommand(
+  Future<void> beginNextSale() async {
+    _requireIdle();
+    if (!_state.canBeginNextSale) {
+      throw StateError(
+        'The current cashier session is not ready to begin the next sale.',
+      );
+    }
+
+    final completedState = _state;
+    _setState(
+      CashierSessionState(
+        activity: CashierSessionActivity.preparingNextSale,
+        activeTransactionId: completedState.activeTransactionId,
+        snapshot: completedState.snapshot,
+        lastCommandResult: completedState.lastCommandResult,
+      ),
+    );
+    try {
+      await _sessionStore.clear();
+    } on CashierSessionStoreFailure {
+      _setState(
+        CashierSessionState(
+          activeTransactionId: completedState.activeTransactionId,
+          snapshot: completedState.snapshot,
+          lastCommandResult: completedState.lastCommandResult,
+          localRecoveryFailure:
+              const CashierLocalRecoveryFailure.storageUnavailable(),
+        ),
+      );
+      return;
+    }
+
+    _setState(CashierSessionState.initial);
+    await startTransaction();
+  }
+
+  Future<void> _persistAndExecuteNewCommand(TransactionCommand command) async {
+    final stateBeforeCommand = _state;
+    _setState(
+      CashierSessionState(
+        activity: CashierSessionActivity.executingCommand,
+        activeTransactionId: command.transactionId,
+      ),
+    );
+    try {
+      await _sessionStore.save(
+        PersistedCashierSession(
+          activeTransactionId: command.transactionId,
+          pendingCommand: command,
+        ),
+      );
+    } on CashierSessionStoreFailure {
+      _setState(
+        CashierSessionState(
+          activeTransactionId: stateBeforeCommand.activeTransactionId,
+          snapshot: stateBeforeCommand.snapshot,
+          pendingCommand: stateBeforeCommand.pendingCommand,
+          lastCommandResult: stateBeforeCommand.lastCommandResult,
+          failure: stateBeforeCommand.failure,
+          localRecoveryFailure:
+              const CashierLocalRecoveryFailure.storageUnavailable(
+                commandWasNotSent: true,
+              ),
+        ),
+      );
+      return;
+    }
+
+    await _executePersistedCommand(command);
+  }
+
+  Future<void> _executePersistedCommand(
     TransactionCommand command, {
     bool pendingWhileExecuting = false,
   }) async {
@@ -127,70 +226,132 @@ final class CashierSessionController extends ChangeNotifier {
 
     try {
       final result = await _client.executeCommand(command);
-      await _handleResolvedCommand(command, result);
+      final cleanupFailure = await _recordKnownCommandResult(command, result);
+      await _handleResolvedCommand(
+        command,
+        result,
+        localRecoveryFailure: cleanupFailure,
+      );
     } on PosCoreFailure catch (failure) {
-      _recordCommandFailure(command, failure);
+      await _recordCommandFailure(command, failure);
     } catch (_) {
       _setState(
-        CashierSessionState(activeTransactionId: command.transactionId),
+        CashierSessionState(
+          activeTransactionId: command.transactionId,
+          pendingCommand: command,
+        ),
       );
       rethrow;
     }
   }
 
-  void _recordCommandFailure(
+  Future<CashierLocalRecoveryFailure?> _recordKnownCommandResult(
+    TransactionCommand command,
+    PosCommandResult result,
+  ) async {
+    final shouldClearSession =
+        (command is StartTransactionCommand &&
+            result.outcomeKind != PosCommandOutcomeKind.accepted) ||
+        (command is! StartTransactionCommand &&
+            result.outcomeKind == PosCommandOutcomeKind.notFound);
+    try {
+      if (shouldClearSession) {
+        await _sessionStore.clear();
+      } else {
+        await _sessionStore.save(
+          PersistedCashierSession(activeTransactionId: command.transactionId),
+        );
+      }
+      return null;
+    } on CashierSessionStoreFailure {
+      return const CashierLocalRecoveryFailure.storageUnavailable();
+    }
+  }
+
+  Future<void> _recordCommandFailure(
     TransactionCommand command,
     PosCoreFailure failure,
-  ) {
+  ) async {
     final requiresRetry = failure.retrySameCommandId;
     final keepTransactionId =
         requiresRetry || command is! StartTransactionCommand;
+    CashierLocalRecoveryFailure? localFailure;
+    if (!requiresRetry) {
+      try {
+        if (keepTransactionId) {
+          await _sessionStore.save(
+            PersistedCashierSession(activeTransactionId: command.transactionId),
+          );
+        } else {
+          await _sessionStore.clear();
+        }
+      } on CashierSessionStoreFailure {
+        localFailure = const CashierLocalRecoveryFailure.storageUnavailable();
+      }
+    }
+
     _setState(
       CashierSessionState(
         activeTransactionId: keepTransactionId ? command.transactionId : null,
         pendingCommand: requiresRetry ? command : null,
         failure: failure,
+        localRecoveryFailure: localFailure,
       ),
     );
   }
 
   Future<void> _handleResolvedCommand(
     TransactionCommand command,
-    PosCommandResult result,
-  ) async {
+    PosCommandResult result, {
+    CashierLocalRecoveryFailure? localRecoveryFailure,
+  }) async {
     if (command is StartTransactionCommand) {
       if (result.outcomeKind != PosCommandOutcomeKind.accepted) {
-        _setState(CashierSessionState(lastCommandResult: result));
+        _setState(
+          CashierSessionState(
+            lastCommandResult: result,
+            localRecoveryFailure: localRecoveryFailure,
+          ),
+        );
         return;
       }
 
       await _refreshAuthoritativeTransaction(
         command.transactionId,
         lastCommandResult: result,
+        localRecoveryFailure: localRecoveryFailure,
       );
       return;
     }
 
     if (result.outcomeKind == PosCommandOutcomeKind.notFound) {
-      _setState(CashierSessionState(lastCommandResult: result));
+      _setState(
+        CashierSessionState(
+          lastCommandResult: result,
+          localRecoveryFailure: localRecoveryFailure,
+        ),
+      );
       return;
     }
 
     await _refreshAuthoritativeTransaction(
       command.transactionId,
       lastCommandResult: result,
+      localRecoveryFailure: localRecoveryFailure,
     );
   }
 
   Future<void> _refreshAuthoritativeTransaction(
     String transactionId, {
     required PosCommandResult? lastCommandResult,
+    CashierLocalRecoveryFailure? localRecoveryFailure,
   }) async {
     _setState(
       CashierSessionState(
         activity: CashierSessionActivity.refreshingTransaction,
         activeTransactionId: transactionId,
         lastCommandResult: lastCommandResult,
+        localRecoveryFailure: localRecoveryFailure,
       ),
     );
 
@@ -201,17 +362,28 @@ final class CashierSessionController extends ChangeNotifier {
           activeTransactionId: transactionId,
           snapshot: snapshot,
           lastCommandResult: lastCommandResult,
+          localRecoveryFailure: localRecoveryFailure,
         ),
       );
     } on PosCoreFailure catch (failure) {
       final explicitlyNotFound =
           failure is PosCoreServerFailure &&
           failure.code == 'transaction_not_found';
+      var storageFailure = localRecoveryFailure;
+      if (explicitlyNotFound) {
+        try {
+          await _sessionStore.clear();
+        } on CashierSessionStoreFailure {
+          storageFailure =
+              const CashierLocalRecoveryFailure.storageUnavailable();
+        }
+      }
       _setState(
         CashierSessionState(
           activeTransactionId: explicitlyNotFound ? null : transactionId,
           lastCommandResult: lastCommandResult,
           failure: failure,
+          localRecoveryFailure: storageFailure,
         ),
       );
     } catch (_) {
@@ -219,10 +391,24 @@ final class CashierSessionController extends ChangeNotifier {
         CashierSessionState(
           activeTransactionId: transactionId,
           lastCommandResult: lastCommandResult,
+          localRecoveryFailure: localRecoveryFailure,
         ),
       );
       rethrow;
     }
+  }
+
+  CashierLocalRecoveryFailure _blockingLocalFailure(
+    CashierSessionStoreFailure failure,
+  ) {
+    return switch (failure.kind) {
+      CashierSessionStoreFailureKind.corruptData =>
+        const CashierLocalRecoveryFailure.corruptState(),
+      CashierSessionStoreFailureKind.storageUnavailable =>
+        const CashierLocalRecoveryFailure.storageUnavailable(
+          blocksSession: true,
+        ),
+    };
   }
 
   void _requireIdle() {
@@ -233,19 +419,12 @@ final class CashierSessionController extends ChangeNotifier {
 
   TransactionSnapshot _requireAuthoritativeSnapshot() {
     _requireIdle();
-    if (_state.pendingCommand != null) {
-      throw StateError(
-        'The pending command must be resolved before a new mutation.',
-      );
-    }
-    final snapshot = _state.snapshot;
-    if (snapshot == null ||
-        _state.activeTransactionId != snapshot.transactionId) {
+    if (!_state.canExecuteNewMutation) {
       throw StateError(
         'A current authoritative transaction is required for this mutation.',
       );
     }
-    return snapshot;
+    return _state.snapshot!;
   }
 
   void _setState(CashierSessionState nextState) {

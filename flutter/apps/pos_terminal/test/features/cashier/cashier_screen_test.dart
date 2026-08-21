@@ -12,6 +12,7 @@ import 'package:pos_terminal/core/pos_core/pos_core_client.dart';
 import 'package:pos_terminal/features/cashier/cashier_id_generator.dart';
 import 'package:pos_terminal/features/cashier/cashier_screen.dart';
 import 'package:pos_terminal/features/cashier/cashier_session_controller.dart';
+import 'package:pos_terminal/features/cashier/cashier_session_store.dart';
 
 typedef CommandHandler =
     Future<PosCommandResult> Function(TransactionCommand command);
@@ -87,6 +88,44 @@ final class DeterministicCashierIds implements CashierIdGenerator {
   String nextTransactionId() => _transactionIds.removeFirst();
 }
 
+final class MemoryCashierSessionStore implements CashierSessionStore {
+  MemoryCashierSessionStore({this.persisted});
+
+  PersistedCashierSession? persisted;
+  CashierSessionStoreFailure? loadFailure;
+  CashierSessionStoreFailure? nextSaveFailure;
+  CashierSessionStoreFailure? nextClearFailure;
+
+  @override
+  Future<PersistedCashierSession?> load() async {
+    final failure = loadFailure;
+    if (failure != null) {
+      throw failure;
+    }
+    return persisted;
+  }
+
+  @override
+  Future<void> save(PersistedCashierSession session) async {
+    final failure = nextSaveFailure;
+    nextSaveFailure = null;
+    if (failure != null) {
+      throw failure;
+    }
+    persisted = session;
+  }
+
+  @override
+  Future<void> clear() async {
+    final failure = nextClearFailure;
+    nextClearFailure = null;
+    if (failure != null) {
+      throw failure;
+    }
+    persisted = null;
+  }
+}
+
 PosCommandResult resultFor(
   TransactionCommand command, {
   PosCommandOutcomeKind kind = PosCommandOutcomeKind.accepted,
@@ -126,6 +165,7 @@ TransactionSnapshot snapshot({
 ({FakeCashierClient client, CashierSessionController controller}) fixture({
   Iterable<String> commandIds = const ['cmd-start', 'cmd-scan'],
   Iterable<String> transactionIds = const ['txn-1'],
+  MemoryCashierSessionStore? sessionStore,
 }) {
   final client = FakeCashierClient();
   final controller = CashierSessionController(
@@ -134,6 +174,7 @@ TransactionSnapshot snapshot({
       commandIds: commandIds,
       transactionIds: transactionIds,
     ),
+    sessionStore: sessionStore ?? MemoryCashierSessionStore(),
   );
   return (client: client, controller: controller);
 }
@@ -1124,5 +1165,166 @@ void main() {
     await pumpCashier(tester, completedFixture.controller);
     expect(tester.takeException(), isNull);
     expect(find.text('Sale Complete'), findsOneWidget);
+  });
+
+  testWidgets('restored pending command shows only same-command recovery', (
+    tester,
+  ) async {
+    final store = MemoryCashierSessionStore(
+      persisted: PersistedCashierSession(
+        activeTransactionId: 'txn-1',
+        pendingCommand: ScanBarcodeCommand(
+          commandId: 'cmd-restored',
+          transactionId: 'txn-1',
+          expectedVersion: 4,
+          barcode: 'restored-barcode',
+        ),
+      ),
+    );
+    final testFixture = fixture(
+      commandIds: const [],
+      transactionIds: const [],
+      sessionStore: store,
+    );
+    await testFixture.controller.restoreLocalSession();
+
+    await pumpCashier(tester, testFixture.controller);
+
+    expect(find.text('Command result unknown'), findsOneWidget);
+    expect(find.text('Retry Command'), findsOneWidget);
+    expect(find.text('Start Sale'), findsNothing);
+    expect(find.text('Refresh Transaction'), findsNothing);
+    expect(barcodeField, findsNothing);
+    expect(testFixture.client.commands, isEmpty);
+    expect(testFixture.client.reads, isEmpty);
+  });
+
+  testWidgets('restored known active session offers GET-only refresh', (
+    tester,
+  ) async {
+    final store = MemoryCashierSessionStore(
+      persisted: PersistedCashierSession(activeTransactionId: 'txn-1'),
+    );
+    final testFixture = fixture(
+      commandIds: const [],
+      transactionIds: const [],
+      sessionStore: store,
+    );
+    await testFixture.controller.restoreLocalSession();
+    await pumpCashier(tester, testFixture.controller);
+
+    expect(find.text('Transaction state unavailable'), findsOneWidget);
+    expect(find.text('Refresh Transaction'), findsOneWidget);
+    expect(find.text('Retry Command'), findsNothing);
+    expect(find.text('Start Sale'), findsNothing);
+  });
+
+  testWidgets('corrupt recovery state blocks register with safe guidance', (
+    tester,
+  ) async {
+    final store = MemoryCashierSessionStore()
+      ..loadFailure = const CashierSessionStoreFailure.corruptData();
+    final testFixture = fixture(sessionStore: store);
+    await testFixture.controller.restoreLocalSession();
+
+    await pumpCashier(tester, testFixture.controller);
+
+    expect(find.text('Register recovery required'), findsOneWidget);
+    expect(find.textContaining('could not be read safely'), findsOneWidget);
+    expect(find.text('Start Sale'), findsNothing);
+    expect(find.text('Retry Command'), findsNothing);
+    expect(testFixture.client.commands, isEmpty);
+  });
+
+  testWidgets('pre-send storage failure never claims command uncertainty', (
+    tester,
+  ) async {
+    final store = MemoryCashierSessionStore()
+      ..nextSaveFailure = const CashierSessionStoreFailure.storageUnavailable();
+    final testFixture = fixture(sessionStore: store);
+    await pumpCashier(tester, testFixture.controller);
+
+    await tester.tap(find.text('Start Sale'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text(
+        'Local recovery storage unavailable. The command was not sent.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Command result unknown'), findsNothing);
+    expect(find.text('Retry Command'), findsNothing);
+    expect(find.text('Start Sale'), findsOneWidget);
+    expect(testFixture.client.commands, isEmpty);
+  });
+
+  testWidgets('completed sale exposes explicit Next Sale controller path', (
+    tester,
+  ) async {
+    final testFixture = fixture(
+      commandIds: const ['cmd-old', 'cmd-next'],
+      transactionIds: const ['txn-1', 'txn-next'],
+    );
+    await establishTransaction(
+      testFixture,
+      snapshot(
+        status: TransactionStatus.completed,
+        total: 199,
+        tenderedCash: 500,
+        changeDue: 301,
+      ),
+    );
+    testFixture.client.enqueueResult(PosCommandOutcomeKind.accepted);
+    testFixture.client.enqueueSnapshot(
+      TransactionSnapshot(
+        transactionId: 'txn-next',
+        version: 1,
+        status: TransactionStatus.open,
+        lineItems: const [],
+        subtotalMinorUnits: 0,
+        totalMinorUnits: 0,
+        tenderedCashMinorUnits: null,
+        changeDueMinorUnits: null,
+      ),
+    );
+    await pumpCashier(tester, testFixture.controller);
+
+    expect(find.text('Next Sale'), findsOneWidget);
+    await tester.tap(find.text('Next Sale'));
+    await tester.pumpAndSettle();
+
+    final next = testFixture.client.commands.last as StartTransactionCommand;
+    expect(next.commandId, 'cmd-next');
+    expect(next.transactionId, 'txn-next');
+    expect(next.expectedVersion, 0);
+    expect(find.text('Status: Open'), findsOneWidget);
+  });
+
+  testWidgets('Next Sale storage failure preserves completed presentation', (
+    tester,
+  ) async {
+    final store = MemoryCashierSessionStore();
+    final testFixture = fixture(sessionStore: store);
+    await establishTransaction(
+      testFixture,
+      snapshot(
+        status: TransactionStatus.completed,
+        total: 199,
+        tenderedCash: 500,
+        changeDue: 301,
+      ),
+    );
+    store.nextClearFailure =
+        const CashierSessionStoreFailure.storageUnavailable();
+    await pumpCashier(tester, testFixture.controller);
+
+    await tester.tap(find.text('Next Sale'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Sale Complete'), findsOneWidget);
+    expect(find.text('Next Sale'), findsOneWidget);
+    expect(find.text('Local recovery storage unavailable.'), findsOneWidget);
+    expect(testFixture.client.commands, hasLength(1));
   });
 }

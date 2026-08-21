@@ -5,7 +5,8 @@
 The Flutter `pos_terminal` implements a typed client for the three current
 local POS Core routes, a cashier-session application controller, and the
 current cash-sale cashier slice: start, scan, cash tender, authoritative paid
-state/change, and completion.
+state/change, completion, crash-safe command-intent recovery, and explicit
+next-sale session transition.
 
 The backend wire contract remains authoritative and is documented in
 [Transaction HTTP API v1](transaction-http-api-v1.md). Command retry semantics
@@ -33,7 +34,7 @@ lib/
   app/pos_terminal_app.dart         Material application
   core/pos_core/                    typed client boundary and HTTP adapter
     models/                         wire-facing immutable values
-  features/cashier/                 session state, IDs, orchestration, and UI
+  features/cashier/                 session state, recovery, orchestration, UI
   features/status/                  health gateway to the cashier
 ```
 
@@ -114,6 +115,86 @@ While an uncertain command is pending, new mutations and ordinary refresh are
 blocked because GET alone cannot prove the original command's durable outcome.
 Only `retryPendingCommand` resolves it through the backend command receipt.
 
+## Crash-safe cashier recovery
+
+The controller persists a purpose-built local recovery record before every
+new mutation is sent:
+
+```text
+create exact typed command
+  -> save active transaction ID + pending command
+  -> POST command
+  -> known result saves active ID + pending null
+  -> authoritative GET
+```
+
+The versioned record contains exactly an active transaction ID and an optional
+Transaction Command Schema v1 command. It never contains a transaction
+snapshot, line items, totals, status, tender/change, command result, event, or
+backend receipt. This store is client intent/session metadata, not transaction
+truth; POS Core remains the only authority for sale state.
+
+```json
+{
+  "schema_version": 1,
+  "active_transaction_id": "txn_...",
+  "pending_command": {
+    "schema_version": 1,
+    "command_id": "cmd_...",
+    "transaction_id": "txn_...",
+    "expected_version": 3,
+    "command_type": "scan_barcode",
+    "payload": { "barcode": "049000001234" }
+  }
+}
+```
+
+`pending_command` may be null; when present, its transaction ID must equal the
+active transaction ID.
+
+The Linux file store resolves to:
+
+- `$XDG_STATE_HOME/grocery-pos/pos-terminal/cashier-session-v1.json` when
+  `XDG_STATE_HOME` is non-empty;
+- otherwise `$HOME/.local/state/grocery-pos/pos-terminal/cashier-session-v1.json`.
+
+If neither location is configured, local recovery is unavailable and the
+cashier fails closed. Saves write and flush a complete temporary file in the
+same directory before renaming it over the live record. This avoids normally
+exposing a partially serialized live JSON record; it is not a claim of stronger
+power-loss durability than the operating system/filesystem provides.
+
+Local decoding requires the exact v1 record fields and a supported, valid typed
+command. A schema mismatch, malformed field, unsupported command, or pending
+command whose transaction differs from the active transaction blocks the
+cashier as `Register recovery required`. Corrupt recovery state is neither
+deleted nor bypassed automatically.
+
+Startup performs only local restoration:
+
+```text
+no record
+  -> initial cashier session
+
+active ID + pending command
+  -> Retry Command with the exact restored command
+
+active ID + pending null
+  -> Refresh Transaction using GET
+```
+
+Startup never automatically sends a command or loads transaction state. If a
+command result was known and clearing its pending marker fails, the stale
+stored command is conservative: a restart may offer same-command retry, and
+the backend returns the original receipt without duplicating the business
+fact. If pending-null persistence succeeded but GET did not, restart offers
+refresh and never resends the resolved command.
+
+A local save failure before POST preserves the current trusted snapshot where
+one exists, reports that the command was not sent, and performs no backend
+mutation. A later explicit cashier action may try again after local storage is
+usable.
+
 ## Cashier presentation
 
 The health screen remains the liveness gateway and exposes an explicit
@@ -135,6 +216,7 @@ The current presentation supports:
 - cash-tender submission without locally deciding sufficiency;
 - authoritative paid-state, tendered-cash, and change presentation;
 - sale completion followed by an authoritative completed-state read;
+- an explicit `Next Sale` action after an authoritative completed snapshot;
 - concise feedback for unknown barcodes and version conflicts;
 - an explicit `Retry Command` recovery panel for an uncertain mutation;
 - a distinct `Refresh Transaction` panel when a command is known but the
@@ -165,6 +247,13 @@ the retained command identity is preserved. `Refresh Transaction` calls only
 `CashierSessionController.refreshTransaction`, so it cannot accidentally
 resend a command whose durable result is already known. These same recovery
 paths apply to scan, tender, and completion commands.
+
+`Next Sale` is a client-session safety operation, not a Racket lifecycle rule.
+It is available only from an authoritative completed snapshot. One explicit
+press clears the completed local session before creating, persisting, and
+sending a new start intent with new transaction and command IDs. Open and paid
+sessions cannot be abandoned through this operation. Completion does not
+automatically begin another sale.
 
 ## Command results and transaction reads
 
@@ -201,11 +290,12 @@ responses.
 
 ## Deliberately deferred
 
-Pending commands currently exist only in Flutter process memory. A Flutter
-process crash after an uncertain POST can therefore lose the retained command;
-durable client-side pending-intent recovery remains future work and must not be
-approximated by generating a replacement ID.
+This slice does not implement automatic retry, retry timers, cached/offline
+transaction truth, split tender, card/external payment behavior, receipt
+printing, or drawer behavior. The recovery file currently contains only
+barcode and integer-cash command payloads and is never logged.
 
-This slice does not implement automatic next-sale/session reset, automatic
-retry, retry timers, pending-command persistence, local Flutter storage, split
-tender, card/external payment behavior, receipt printing, or drawer behavior.
+Future payment, terminal, and device commands must not reuse this storage
+design automatically. They require separate security analysis and explicit
+unknown-external-effect recovery; in particular, this checkpoint does not
+implement `PaymentUnknown` or make an uncertain charge safe to submit again.
