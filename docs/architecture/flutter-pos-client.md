@@ -3,8 +3,9 @@
 ## Status
 
 The Flutter `pos_terminal` implements a typed client for the three current
-local POS Core routes and a cashier-session application controller over that
-client. Transaction workflow widgets remain deliberately deferred.
+local POS Core routes, a cashier-session application controller, and the first
+cashier presentation slice: starting a sale, submitting barcode scans, and
+rendering the authoritative basket returned by POS Core.
 
 The backend wire contract remains authoritative and is documented in
 [Transaction HTTP API v1](transaction-http-api-v1.md). Command retry semantics
@@ -32,8 +33,8 @@ lib/
   app/pos_terminal_app.dart         Material application
   core/pos_core/                    typed client boundary and HTTP adapter
     models/                         wire-facing immutable values
-  features/cashier/                 session state, IDs, and orchestration
-  features/status/                  current health/status presentation
+  features/cashier/                 session state, IDs, orchestration, and UI
+  features/status/                  health gateway to the cashier
 ```
 
 ## Commands
@@ -113,6 +114,38 @@ While an uncertain command is pending, new mutations and ordinary refresh are
 blocked because GET alone cannot prove the original command's durable outcome.
 Only `retryPendingCommand` resolves it through the backend command receipt.
 
+## Cashier presentation
+
+The health screen remains the liveness gateway and exposes an explicit
+`Open Register` action only after POS Core reports healthy. The cashier screen
+then renders `CashierSessionState` and invokes controller intent methods; it
+does not construct commands, generate IDs, choose expected versions, or call
+`PosCoreClient` directly.
+
+The current presentation supports:
+
+- `Start Sale`, whose basket appears only after the controller's authoritative
+  transaction GET succeeds;
+- barcode entry through a labeled field, button submission, or keyboard-wedge
+  scanner Enter submission;
+- backend-order line-item rendering and integer-only USD minor-unit formatting;
+- backend-provided subtotal and total rendering without local calculation;
+- concise feedback for unknown barcodes and version conflicts;
+- an explicit `Retry Command` recovery panel for an uncertain mutation;
+- a distinct `Refresh Transaction` panel when a command is known but the
+  subsequent authoritative read failed.
+
+The scan field is disabled while an operation is active. A scanned item is not
+added optimistically: while the POST is resolved but its GET is pending, the
+old snapshot is withheld and the UI shows a loading state. After an accepted
+scan and successful refresh, the field is cleared and focused for the next
+keyboard/scanner entry. A rejected barcode remains available for correction.
+
+`Retry Command` calls only `CashierSessionController.retryPendingCommand`, so
+the retained command identity is preserved. `Refresh Transaction` calls only
+`CashierSessionController.refreshTransaction`, so it cannot accidentally
+resend a command whose durable result is already known.
+
 ## Command results and transaction reads
 
 Documented `200`, `404`, and `409` command-result responses all decode to a
@@ -153,6 +186,7 @@ process crash after an uncertain POST can therefore lose the retained command;
 durable client-side pending-intent recovery remains future work and must not be
 approximated by generating a replacement ID.
 
-This foundation does not implement cashier widgets, barcode input, tender or
-completion controls, visual error mapping, automatic retry, retry timers,
-pending-command persistence, local Flutter storage, or payment behavior.
+This slice does not implement tender or completion controls, automatic retry,
+retry timers, pending-command persistence, local Flutter storage, or payment
+behavior. Tender and completion presentation are deferred to the next cashier
+checkpoint.

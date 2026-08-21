@@ -2,11 +2,18 @@ import 'package:flutter/material.dart';
 
 import '../../core/pos_core/models/pos_core_health.dart';
 import '../../core/pos_core/pos_core_client.dart';
+import '../cashier/cashier_screen.dart';
+import '../cashier/cashier_session_controller.dart';
 
 final class PosCoreStatusScreen extends StatefulWidget {
-  const PosCoreStatusScreen({required this.client, super.key});
+  const PosCoreStatusScreen({
+    required this.client,
+    required this.cashierController,
+    super.key,
+  });
 
   final PosCoreClient client;
+  final CashierSessionController cashierController;
 
   @override
   State<PosCoreStatusScreen> createState() => _PosCoreStatusScreenState();
@@ -25,6 +32,15 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
     setState(() {
       _healthFuture = widget.client.fetchHealth();
     });
+  }
+
+  void _openRegister() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) =>
+            CashierScreen(controller: widget.cashierController),
+      ),
+    );
   }
 
   @override
@@ -49,11 +65,13 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
                 status: 'POS Core Unavailable',
                 detail: snapshot.error.toString(),
                 icon: Icons.error_outline,
-                action: FilledButton.icon(
-                  onPressed: _retry,
-                  icon: const Icon(Icons.refresh),
-                  label: const Text('Retry'),
-                ),
+                actions: [
+                  FilledButton.icon(
+                    onPressed: _retry,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Retry'),
+                  ),
+                ],
               );
             }
 
@@ -65,11 +83,13 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
                 status: 'POS Core Unavailable',
                 detail: 'Health endpoint returned ok=false.',
                 icon: Icons.warning_amber_outlined,
-                action: FilledButton.icon(
-                  onPressed: _retry,
-                  icon: const Icon(Icons.refresh),
-                  label: const Text('Retry'),
-                ),
+                actions: [
+                  FilledButton.icon(
+                    onPressed: _retry,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Retry'),
+                  ),
+                ],
               );
             }
 
@@ -79,11 +99,18 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
               detail:
                   '${health.service} ${health.version} (${health.environment})',
               icon: Icons.check_circle_outline,
-              action: FilledButton.icon(
-                onPressed: _retry,
-                icon: const Icon(Icons.refresh),
-                label: const Text('Refresh'),
-              ),
+              actions: [
+                FilledButton.icon(
+                  onPressed: _openRegister,
+                  icon: const Icon(Icons.point_of_sale),
+                  label: const Text('Open Register'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: _retry,
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Refresh'),
+                ),
+              ],
             );
           },
         ),
@@ -98,14 +125,14 @@ final class _StatusLayout extends StatelessWidget {
     required this.status,
     required this.detail,
     required this.icon,
-    this.action,
+    this.actions = const [],
   });
 
   final String title;
   final String status;
   final String detail;
   final IconData icon;
-  final Widget? action;
+  final List<Widget> actions;
 
   @override
   Widget build(BuildContext context) {
@@ -141,7 +168,15 @@ final class _StatusLayout extends StatelessWidget {
                     style: textTheme.bodyMedium,
                     textAlign: TextAlign.center,
                   ),
-                  if (action != null) ...[const SizedBox(height: 24), action!],
+                  if (actions.isNotEmpty) ...[
+                    const SizedBox(height: 24),
+                    Wrap(
+                      alignment: WrapAlignment.center,
+                      spacing: 12,
+                      runSpacing: 12,
+                      children: actions,
+                    ),
+                  ],
                 ],
               ),
             ),
