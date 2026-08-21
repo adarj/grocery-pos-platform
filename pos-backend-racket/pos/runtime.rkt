@@ -4,7 +4,7 @@
          "runtime-config.rkt"
          "application/transaction-service.rkt"
          "domain/fake-catalog.rkt"
-         "persistence/transaction-journal-migrations.rkt")
+         "persistence/pos-database-migrations.rkt")
 
 (provide runtime-sqlite-max-connections
          runtime-sqlite-max-idle-connections
@@ -49,7 +49,7 @@
 (define (initialize-sqlite-database!
          database-path
          #:connect [connect open-sqlite-connection]
-         #:migrate! [migrate! migrate-transaction-journal!])
+         #:migrate! [migrate! migrate-pos-database!])
   (define who 'initialize-sqlite-database!)
   (unless (path-string? database-path)
     (raise-argument-error who "path-string?" database-path))

@@ -2,13 +2,14 @@
 
 (require (prefix-in db: db))
 
-(provide migrate-transaction-journal!)
+(provide migrate-pos-database!)
 
-(struct journal-migration (version name apply! validate!)
+(struct pos-database-migration (version name apply! validate!)
   #:transparent)
 
 (define migration-1-name "create_transaction_events")
 (define migration-2-name "create_transaction_command_receipts")
+(define migration-3-name "create_catalog")
 (define stream-sequence-index-name
   "transaction_events_stream_sequence_unique")
 
@@ -105,6 +106,50 @@ CREATE TABLE transaction_command_receipts (
 SQL
   )
 
+(define create-catalog-items-table-sql
+  #<<SQL
+CREATE TABLE catalog_items (
+  item_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(item_id) = 'text'
+      AND length(item_id) > 0
+    ),
+  description TEXT NOT NULL
+    CHECK (
+      typeof(description) = 'text'
+      AND length(description) > 0
+    ),
+  unit_price_minor_units INTEGER NOT NULL
+    CHECK (
+      typeof(unit_price_minor_units) = 'integer'
+      AND unit_price_minor_units >= 0
+    ),
+  active INTEGER NOT NULL
+    CHECK (
+      typeof(active) = 'integer'
+      AND active IN (0, 1)
+    )
+)
+SQL
+  )
+
+(define create-catalog-barcodes-table-sql
+  #<<SQL
+CREATE TABLE catalog_barcodes (
+  barcode TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(barcode) = 'text'
+      AND length(barcode) > 0
+    ),
+  item_id TEXT NOT NULL
+    CHECK (
+      typeof(item_id) = 'text'
+      AND length(item_id) > 0
+    )
+)
+SQL
+  )
+
 (define (schema-object-exists? connection type name)
   (= 1
      (db:query-value
@@ -119,7 +164,7 @@ SQL
 
 (define (validate-events-schema connection)
   (unless (schema-object-exists? connection "table" "transaction_events")
-    (error 'migrate-transaction-journal!
+    (error 'migrate-pos-database!
            "migration 1 is recorded but transaction_events is missing"))
   (define stream-index-row
     (for/first ([row (in-list
@@ -130,10 +175,10 @@ SQL
                                stream-sequence-index-name))
       row))
   (unless stream-index-row
-    (error 'migrate-transaction-journal!
+    (error 'migrate-pos-database!
            "migration 1 is recorded but its stream index is missing"))
   (unless (= (vector-ref stream-index-row 2) 1)
-    (error 'migrate-transaction-journal!
+    (error 'migrate-pos-database!
            "journal stream index must be unique"))
   (define stream-index-columns
     (for/list ([row (in-list
@@ -144,7 +189,7 @@ SQL
       (vector-ref row 2)))
   (unless (equal? stream-index-columns
                   '("transaction_id" "stream_sequence"))
-    (error 'migrate-transaction-journal!
+    (error 'migrate-pos-database!
            "journal stream index has unexpected columns: ~e"
            stream-index-columns)))
 
@@ -166,7 +211,7 @@ SQL
 (define (validate-command-receipts-schema connection)
   (unless (schema-object-exists?
            connection "table" "transaction_command_receipts")
-    (error 'migrate-transaction-journal!
+    (error 'migrate-pos-database!
            "migration 2 is recorded but transaction_command_receipts is missing"))
 
   (define actual-columns
@@ -179,7 +224,7 @@ SQL
               (vector-ref row 3)
               (vector-ref row 5))))
   (unless (equal? actual-columns expected-command-receipt-columns)
-    (error 'migrate-transaction-journal!
+    (error 'migrate-pos-database!
            "transaction command receipt table has unexpected columns: ~e"
            actual-columns))
 
@@ -198,8 +243,74 @@ SQL
   (unless (string=? (normalize-schema-sql recorded-sql)
                     (normalize-schema-sql
                      create-command-receipts-table-sql))
-    (error 'migrate-transaction-journal!
+    (error 'migrate-pos-database!
            "transaction command receipt table definition has drifted")))
+
+(define expected-catalog-item-columns
+  (list (vector "item_id" "TEXT" 1 1)
+        (vector "description" "TEXT" 1 0)
+        (vector "unit_price_minor_units" "INTEGER" 1 0)
+        (vector "active" "INTEGER" 1 0)))
+
+(define expected-catalog-barcode-columns
+  (list (vector "barcode" "TEXT" 1 1)
+        (vector "item_id" "TEXT" 1 0)))
+
+(define (validate-owned-table-schema connection
+                                     migration-version
+                                     table-name
+                                     expected-columns
+                                     expected-sql)
+  (unless (schema-object-exists? connection "table" table-name)
+    (error 'migrate-pos-database!
+           "migration ~a is recorded but ~a is missing"
+           migration-version
+           table-name))
+
+  (define actual-columns
+    (for/list ([row (in-list
+                     (db:query-rows
+                      connection
+                      (format "PRAGMA table_info('~a')" table-name)))])
+      (vector (vector-ref row 1)
+              (string-upcase (vector-ref row 2))
+              (vector-ref row 3)
+              (vector-ref row 5))))
+  (unless (equal? actual-columns expected-columns)
+    (error 'migrate-pos-database!
+           "~a has unexpected columns: ~e"
+           table-name
+           actual-columns))
+
+  ;; Both catalog tables are wholly owned by migration 3. Comparing their
+  ;; normalized DDL catches CHECK-constraint drift that PRAGMA table_info does
+  ;; not expose without pretending to parse arbitrary SQL.
+  (define recorded-sql
+    (db:query-value
+     connection
+     #<<SQL
+SELECT sql
+FROM sqlite_schema
+WHERE type = 'table' AND name = ?
+SQL
+     table-name))
+  (unless (string=? (normalize-schema-sql recorded-sql)
+                    (normalize-schema-sql expected-sql))
+    (error 'migrate-pos-database!
+           "~a definition has drifted"
+           table-name)))
+
+(define (validate-catalog-schema connection)
+  (validate-owned-table-schema connection
+                               3
+                               "catalog_items"
+                               expected-catalog-item-columns
+                               create-catalog-items-table-sql)
+  (validate-owned-table-schema connection
+                               3
+                               "catalog_barcodes"
+                               expected-catalog-barcode-columns
+                               create-catalog-barcodes-table-sql))
 
 (define (apply-migration-1! connection)
   (db:query-exec connection create-events-table-sql)
@@ -208,23 +319,31 @@ SQL
 (define (apply-migration-2! connection)
   (db:query-exec connection create-command-receipts-table-sql))
 
+(define (apply-migration-3! connection)
+  (db:query-exec connection create-catalog-items-table-sql)
+  (db:query-exec connection create-catalog-barcodes-table-sql))
+
 (define migrations
   (list
-   (journal-migration 1
-                      migration-1-name
-                      apply-migration-1!
-                      validate-events-schema)
-   (journal-migration 2
-                      migration-2-name
-                      apply-migration-2!
-                      validate-command-receipts-schema)))
+   (pos-database-migration 1
+                           migration-1-name
+                           apply-migration-1!
+                           validate-events-schema)
+   (pos-database-migration 2
+                           migration-2-name
+                           apply-migration-2!
+                           validate-command-receipts-schema)
+   (pos-database-migration 3
+                           migration-3-name
+                           apply-migration-3!
+                           validate-catalog-schema)))
 
 (define (migration-row-matches? row migration)
   (and (= (vector-length row) 2)
        (equal? (vector-ref row 0)
-               (journal-migration-version migration))
+               (pos-database-migration-version migration))
        (equal? (vector-ref row 1)
-               (journal-migration-name migration))))
+               (pos-database-migration-name migration))))
 
 (define (valid-migration-prefix? applied-migrations)
   (and (<= (length applied-migrations) (length migrations))
@@ -236,13 +355,13 @@ SQL
   (db:query-exec
    connection
    "INSERT INTO pos_schema_migrations (version, name) VALUES (?, ?)"
-   (journal-migration-version migration)
-   (journal-migration-name migration)))
+   (pos-database-migration-version migration)
+   (pos-database-migration-name migration)))
 
-(define (migrate-transaction-journal! connection)
+(define (migrate-pos-database! connection)
   (unless (db:connection? connection)
     (raise-argument-error
-     'migrate-transaction-journal!
+     'migrate-pos-database!
      "connection?"
      connection))
 
@@ -256,16 +375,16 @@ SQL
         "SELECT version, name FROM pos_schema_migrations ORDER BY version ASC"))
      (unless (valid-migration-prefix? applied-migrations)
        (error
-        'migrate-transaction-journal!
-        "unsupported journal migration history: ~e"
+        'migrate-pos-database!
+        "unsupported POS database migration history: ~e"
         applied-migrations))
 
      (define applied-count (length applied-migrations))
      (for ([migration (in-list (take migrations applied-count))])
-       ((journal-migration-validate! migration) connection))
+       ((pos-database-migration-validate! migration) connection))
      (for ([migration (in-list (drop migrations applied-count))])
-       ((journal-migration-apply! migration) connection)
-       ((journal-migration-validate! migration) connection)
+       ((pos-database-migration-apply! migration) connection)
+       ((pos-database-migration-validate! migration) connection)
        (record-migration! connection migration)))
    #:option 'immediate)
   (void))

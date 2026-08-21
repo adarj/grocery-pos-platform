@@ -46,7 +46,7 @@ load rejects a record if the copies disagree.
 
 ## Schema and Migration
 
-Schema migration is explicit. `migrate-transaction-journal!` creates and uses:
+Database migration is explicit. `migrate-pos-database!` creates and uses:
 
 ```sql
 CREATE TABLE pos_schema_migrations (
@@ -82,13 +82,18 @@ full schema and persistence contract are documented in
 receipts are not transaction facts and are never replayed as transaction
 state.
 
+Migration version 3, `create_catalog`, creates the persistent local catalog
+item and barcode-assignment tables. The catalog answers new-scan lookup
+questions; it is not transaction truth and is never consulted during replay.
+Its schema and read contract are documented in
+[Local Catalog Foundation](catalog.md).
+
 The migration runner treats recorded history as an exact prefix of the known
-ordered migration list. A fresh database applies versions 1 and 2. A real v1
-database validates and preserves its event schema and rows before applying only
-version 2. A correct v2 database is validated without schema mutation. Unknown,
-skipped, reordered, renamed, or drifted migration state fails rather than being
-silently repaired. This ordered-prefix mechanism can extend to migration 3
-without adding another historical-version conditional.
+ordered migration list. A fresh database applies versions 1, 2, and 3. A real
+v1 database validates and preserves its event schema and rows before applying
+versions 2 and 3; a real v2 database applies only version 3. A correct v3
+database is validated without schema mutation. Unknown, skipped, reordered,
+renamed, or drifted migration state fails rather than being silently repaired.
 
 Table creation is not hidden inside append or load. Application composition is
 responsible for running migrations explicitly before using the store.
@@ -353,8 +358,9 @@ observation; it is not a claim of arbitrary distributed exactly-once execution.
 ## Deliberately Deferred
 
 The persistent service is exposed through the narrow command/query routes in
-[Transaction HTTP API v1](transaction-http-api-v1.md), but not yet through a
-Flutter transaction workflow. The journal milestone also does not add:
+[Transaction HTTP API v1](transaction-http-api-v1.md), and the Flutter cashier
+uses those routes for the current cash-sale workflow. The journal design still
+does not add:
 
 - authoritative snapshots or projections;
 - timestamps or event UUIDs;

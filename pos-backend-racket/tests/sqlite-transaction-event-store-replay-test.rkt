@@ -7,7 +7,7 @@
          "../pos/domain/transaction-event.rkt"
          "../pos/domain/transaction.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt"
-         "../pos/persistence/transaction-journal-migrations.rkt")
+         "../pos/persistence/pos-database-migrations.rkt")
 
 (define (call-with-connection database-path mode procedure)
   (define connection
@@ -28,7 +28,7 @@
          database-path
          'create
          (lambda (writer)
-           (migrate-transaction-journal! writer)
+           (migrate-pos-database! writer)
            (define append-result
              (append-transaction-events!
               writer

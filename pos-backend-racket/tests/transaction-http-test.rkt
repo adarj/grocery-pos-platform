@@ -14,7 +14,7 @@
          "../pos/persistence/sqlite-transaction-event-store.rkt"
          "../pos/persistence/transaction-command-codec.rkt"
          "../pos/persistence/transaction-command-unit-of-work.rkt"
-         "../pos/persistence/transaction-journal-migrations.rkt"
+         "../pos/persistence/pos-database-migrations.rkt"
          "../pos/runtime-config.rkt"
          "../pos/runtime.rkt")
 
@@ -94,7 +94,7 @@
     (db:sqlite3-connect #:database 'memory))
   (dynamic-wind
     (lambda ()
-      (migrate-transaction-journal! connection))
+      (migrate-pos-database! connection))
     (lambda ()
       (define service
         (make-test-service

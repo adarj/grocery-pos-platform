@@ -133,6 +133,9 @@ Verified capabilities currently include:
   sequencing, atomic batch append, and optimistic stream-version checks;
 * migration v2 durable command receipts with database-global command IDs and
   atomic accepted-event/command-outcome persistence;
+* migration v3 persistent local catalog item/barcode schema with strict
+  checkout read semantics and sale-time transaction snapshot isolation (runtime
+  catalog cutover remains pending);
 * idempotent persistent transaction application service with deterministic
   two-connection concurrency and file-backed restart/retry coverage;
 * Racket runtime composition with startup migration, a bounded SQLite pool,

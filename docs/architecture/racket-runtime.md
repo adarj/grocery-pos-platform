@@ -49,7 +49,7 @@ succeeded:
 
 ```text
 open dedicated SQLite connection in create mode
-  -> run and validate transaction-journal migrations through v2
+  -> run and validate POS database migrations through v3
   -> disconnect dedicated startup connection
   -> construct request-time database resources
   -> construct HTTP application
@@ -103,10 +103,12 @@ rather than relying on a hidden global connection or process termination.
 ## Application and catalog composition
 
 The runtime passes the shared virtual connection and the current catalog lookup
-to `make-transaction-service`. The only implemented catalog is presently the
-development `fake-catalog-lookup`; a durable catalog subsystem remains future
-work. Historical replay still uses sale-time event snapshots and never queries
-that catalog.
+to `make-transaction-service`. Migration 3 and the SQLite catalog read adapter
+now provide the persistent catalog foundation, but the runtime intentionally
+continues to inject the development `fake-catalog-lookup` until controlled
+catalog population and activation arrive in the next checkpoint. Historical
+replay still uses sale-time event snapshots and never queries either catalog.
+See [Local Catalog Foundation](catalog.md).
 
 `make-app` requires the constructed transaction service and returns the servlet
 handler. The service is captured explicitly rather than stored in a global.
@@ -132,8 +134,8 @@ future checkout dependency is ready.
 
 Focused file-backed tests establish:
 
-- fresh runtime migration through schema v2;
-- idempotent startup against an existing v2 database without history loss;
+- fresh runtime migration through schema v3;
+- idempotent startup against an existing v3 database without history loss;
 - migration corruption preventing runtime construction;
 - failure on a missing database parent directory;
 - startup-connection cleanup on success and failure;
@@ -150,7 +152,7 @@ This runtime composition and HTTP adapter do not add:
 
 - a readiness endpoint;
 - authentication or authorization;
-- a persistent catalog;
+- persistent-catalog population and runtime checkout cutover;
 - automatic SQLite busy retry or backoff;
 - a generic service container or component framework;
 - payment, device, drawer, or receipt integration;

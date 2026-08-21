@@ -86,8 +86,9 @@ Localhost is still treated as an application trust boundary. Backend authorizati
 
 The Racket process now constructs its durable transaction service before the
 HTTP listener starts. Startup resolves `SQLITE_DB_PATH`, migrates and validates
-the journal through schema v2 using a dedicated connection, and then builds a
-bounded SQLite pool plus one thread-mapped virtual connection for request use.
+the POS database through schema v3 using a dedicated connection, and then
+builds a bounded SQLite pool plus one thread-mapped virtual connection for
+request use.
 The service held by the application uses that virtual connection; unrelated
 request threads therefore do not share one physical transaction context.
 
@@ -96,6 +97,11 @@ service as an explicit dependency. Transaction routes delegate through that
 same service rather than reimplementing its idempotency or transaction
 semantics. The detailed ownership and shutdown contract is documented in
 [Racket POS Core Runtime Composition](racket-runtime.md).
+
+Migration 3 includes the persistent local catalog foundation documented in
+[Local Catalog Foundation](catalog.md). Live runtime checkout still uses the
+development fake catalog until the controlled population and cutover work in
+the next checkpoint; the HTTP transaction contract is unchanged.
 
 ## Health Endpoint
 

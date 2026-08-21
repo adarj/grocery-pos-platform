@@ -89,7 +89,8 @@
            (check-equal?
             (migration-history database-path)
             (list (vector 1 "create_transaction_events")
-                  (vector 2 "create_transaction_command_receipts")))
+                  (vector 2 "create_transaction_command_receipts")
+                  (vector 3 "create_catalog")))
            (with-connection
             database-path
             (lambda (connection)
@@ -100,11 +101,19 @@
 SELECT name
 FROM sqlite_schema
 WHERE type = 'table'
-  AND name IN ('transaction_events', 'transaction_command_receipts')
+  AND name IN (
+    'transaction_events',
+    'transaction_command_receipts',
+    'catalog_items',
+    'catalog_barcodes'
+  )
 ORDER BY name
 SQL
                 )
-               '("transaction_command_receipts" "transaction_events"))))
+               '("catalog_barcodes"
+                 "catalog_items"
+                 "transaction_command_receipts"
+                 "transaction_events"))))
 
            (define receipt
              (resolved-receipt
@@ -189,7 +198,8 @@ SQL
            (check-equal?
             (migration-history database-path)
             (list (vector 1 "create_transaction_events")
-                  (vector 2 "create_transaction_command_receipts")))
+                  (vector 2 "create_transaction_command_receipts")
+                  (vector 3 "create_catalog")))
            (define service
              (pos-runtime-transaction-service runtime-B))
            (define retry-receipt

@@ -8,7 +8,7 @@
          "../pos/api/server.rkt"
          "../pos/application/transaction-service.rkt"
          "../pos/domain/fake-catalog.rkt"
-         "../pos/persistence/transaction-journal-migrations.rkt")
+         "../pos/persistence/pos-database-migrations.rkt")
 
 (define (make-request method path)
   (request method
@@ -28,7 +28,7 @@
 (module+ test
   (define connection
     (db:sqlite3-connect #:database 'memory))
-  (migrate-transaction-journal! connection)
+  (migrate-pos-database! connection)
   (define service
     (make-transaction-service
      connection

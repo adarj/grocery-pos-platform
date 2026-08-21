@@ -10,7 +10,7 @@
          "../pos/persistence/sqlite-transaction-event-store.rkt"
          "../pos/persistence/transaction-command-receipt-store.rkt"
          "../pos/persistence/transaction-command-unit-of-work.rkt"
-         "../pos/persistence/transaction-journal-migrations.rkt")
+         "../pos/persistence/pos-database-migrations.rkt")
 
 (define apples
   (sale-item-added "049000001234" "Test Apples" (money 199)))
@@ -30,7 +30,7 @@
   (dynamic-wind
     void
     (lambda ()
-      (migrate-transaction-journal! connection)
+      (migrate-pos-database! connection)
       (procedure connection))
     (lambda () (db:disconnect connection))))
 
@@ -587,7 +587,7 @@ SQL
         (dynamic-wind
           void
           (lambda ()
-            (migrate-transaction-journal! writer)
+            (migrate-pos-database! writer)
             (check-pred
              transaction-command-commit-resolved?
              (commit-transaction-command-outcome!
@@ -601,7 +601,7 @@ SQL
         (dynamic-wind
           void
           (lambda ()
-            (migrate-transaction-journal! reader)
+            (migrate-pos-database! reader)
             (check-equal? (loaded-events reader "txn-restart") events)
             (check-equal?
              (loaded-receipt reader "cmd-restart")
@@ -625,7 +625,7 @@ SQL
         (dynamic-wind
           void
           (lambda ()
-            (migrate-transaction-journal! writer)
+            (migrate-pos-database! writer)
             (define command
               (start-transaction-command
                "cmd-visibility" "txn-visibility" 0))

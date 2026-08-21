@@ -6,7 +6,7 @@
          "../pos/domain/transaction-event.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt"
          "../pos/persistence/transaction-event-codec.rkt"
-         "../pos/persistence/transaction-journal-migrations.rkt")
+         "../pos/persistence/pos-database-migrations.rkt")
 
 (define started
   (transaction-started "txn-001"))
@@ -28,7 +28,7 @@
   (dynamic-wind
     void
     (lambda ()
-      (migrate-transaction-journal! connection)
+      (migrate-pos-database! connection)
       (procedure connection))
     (lambda () (disconnect connection))))
 

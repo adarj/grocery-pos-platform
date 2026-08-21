@@ -13,7 +13,7 @@
          "../pos/persistence/sqlite-transaction-event-store.rkt"
          "../pos/persistence/transaction-command-receipt-store.rkt"
          "../pos/persistence/transaction-command-unit-of-work.rkt"
-         "../pos/persistence/transaction-journal-migrations.rkt")
+         "../pos/persistence/pos-database-migrations.rkt")
 
 (define test-barcode "049000001234")
 
@@ -37,12 +37,12 @@
             (db:sqlite3-connect
              #:database database-path
              #:mode 'create))
-      (migrate-transaction-journal! connection-A)
+      (migrate-pos-database! connection-A)
       (set! connection-B
             (db:sqlite3-connect
              #:database database-path
              #:mode 'read/write))
-      (migrate-transaction-journal! connection-B)
+      (migrate-pos-database! connection-B)
       (procedure database-path connection-A connection-B))
     (lambda ()
       (when (and connection-B (db:connected? connection-B))
@@ -367,7 +367,7 @@ SQL
         database-path
         'read/write
         (lambda (verification-connection)
-          (migrate-transaction-journal! verification-connection)
+          (migrate-pos-database! verification-connection)
           (check-equal?
            (loaded-receipt verification-connection "cmd-race-B")
            conflict-receipt)

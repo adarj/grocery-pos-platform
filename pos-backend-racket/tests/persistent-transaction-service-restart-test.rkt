@@ -13,7 +13,7 @@
          "../pos/persistence/sqlite-transaction-event-store.rkt"
          "../pos/persistence/transaction-command-receipt-store.rkt"
          "../pos/persistence/transaction-command-unit-of-work.rkt"
-         "../pos/persistence/transaction-journal-migrations.rkt")
+         "../pos/persistence/pos-database-migrations.rkt")
 
 (define test-barcode "049000001234")
 (define unknown-barcode "000000000000")
@@ -75,7 +75,7 @@ SQL
          database-path
          'create
          (lambda (connection-A)
-           (migrate-transaction-journal! connection-A)
+           (migrate-pos-database! connection-A)
            (define service-A
              (make-transaction-service
               connection-A
@@ -104,7 +104,7 @@ SQL
          database-path
          'read/write
          (lambda (connection-B)
-           (migrate-transaction-journal! connection-B)
+           (migrate-pos-database! connection-B)
            (define service-B
              (make-transaction-service
               connection-B
@@ -128,7 +128,7 @@ SQL
          database-path
          'read/write
          (lambda (connection-C)
-           (migrate-transaction-journal! connection-C)
+           (migrate-pos-database! connection-C)
            (define service-C
              (make-transaction-service
               connection-C
@@ -154,7 +154,7 @@ SQL
          database-path
          'read/write
          (lambda (connection-D)
-           (migrate-transaction-journal! connection-D)
+           (migrate-pos-database! connection-D)
            (define service-D
              (make-transaction-service
               connection-D
@@ -203,7 +203,7 @@ SQL
          database-path
          'create
          (lambda (connection)
-           (migrate-transaction-journal! connection)
+           (migrate-pos-database! connection)
            (define setup-service
              (make-transaction-service
               connection
@@ -284,7 +284,7 @@ SQL
          database-path
          'create
          (lambda (connection-A)
-           (migrate-transaction-journal! connection-A)
+           (migrate-pos-database! connection-A)
            (define setup-service
              (make-transaction-service
               connection-A
@@ -325,7 +325,7 @@ SQL
          database-path
          'read/write
          (lambda (connection-B)
-           (migrate-transaction-journal! connection-B)
+           (migrate-pos-database! connection-B)
            (define retry-service
              (make-transaction-service
               connection-B
@@ -363,7 +363,7 @@ SQL
          database-path
          'create
          (lambda (connection)
-           (migrate-transaction-journal! connection)
+           (migrate-pos-database! connection)
            (define setup-service
              (make-transaction-service
               connection
@@ -438,7 +438,7 @@ SQL
          database-path
          'create
          (lambda (connection-A)
-           (migrate-transaction-journal! connection-A)
+           (migrate-pos-database! connection-A)
            (define service-A
              (make-transaction-service
               connection-A
@@ -471,7 +471,7 @@ SQL
          database-path
          'read/write
          (lambda (connection-B)
-           (migrate-transaction-journal! connection-B)
+           (migrate-pos-database! connection-B)
            (define service-B
              (make-transaction-service
               connection-B
