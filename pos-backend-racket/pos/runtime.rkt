@@ -3,8 +3,8 @@
 (require (prefix-in db: db)
          "runtime-config.rkt"
          "application/transaction-service.rkt"
-         "domain/fake-catalog.rkt"
-         "persistence/pos-database-migrations.rkt")
+         "persistence/pos-database-migrations.rkt"
+         "persistence/sqlite-catalog.rkt")
 
 (provide runtime-sqlite-max-connections
          runtime-sqlite-max-idle-connections
@@ -80,13 +80,13 @@
 
 (define (start-pos-runtime
          config
-         #:catalog-lookup [catalog-lookup fake-catalog-lookup]
+         #:catalog-lookup [catalog-lookup #f]
          #:connect [connect open-sqlite-connection])
   (define who 'start-pos-runtime)
   (unless (pos-runtime-config? config)
     (raise-argument-error who "pos-runtime-config?" config))
-  (unless (procedure? catalog-lookup)
-    (raise-argument-error who "procedure?" catalog-lookup))
+  (unless (or (not catalog-lookup) (procedure? catalog-lookup))
+    (raise-argument-error who "(or/c #f procedure?)" catalog-lookup))
   (unless (procedure? connect)
     (raise-argument-error who "procedure?" connect))
 
@@ -119,9 +119,14 @@
            #:max-idle-seconds runtime-sqlite-max-idle-seconds))
         (define virtual-connection
           (db:virtual-connection pool))
+        (define effective-catalog-lookup
+          (or catalog-lookup
+              (lambda (barcode)
+                (lookup-catalog-item-by-barcode
+                 virtual-connection barcode))))
         (make-transaction-service
          virtual-connection
-         #:catalog-lookup catalog-lookup)))
+         #:catalog-lookup effective-catalog-lookup)))
     (pos-runtime service
                  database-path
                  runtime-custodian

@@ -1,4 +1,4 @@
-# Local Catalog Foundation
+# Local Catalog
 
 ## Purpose
 
@@ -51,7 +51,7 @@ The separation prevents barcode identity from becoming merchandise identity.
 It also leaves room for later barcode assignment changes without redefining
 historical transaction facts.
 
-## Price and Activation
+## Price and Checkout Availability
 
 `unit_price_minor_units` is the item's one current checkout price. SQLite must
 store it as an exact nonnegative integer. The repository converts that integer
@@ -94,28 +94,124 @@ barcode assignment are integrity/infrastructure failures and are allowed to
 propagate. The repository never turns corruption into a free item or an
 ordinary catalog miss.
 
-## Referential Integrity at This Checkpoint
+## Catalog Snapshot Schema v1
+
+Catalog activation accepts one strict, versioned JSON document:
+
+```json
+{
+  "schema_version": 1,
+  "items": [
+    {
+      "item_id": "item-apples",
+      "description": "Test Apples",
+      "unit_price_minor_units": 199,
+      "active": true
+    }
+  ],
+  "barcodes": [
+    {
+      "barcode": "049000001234",
+      "item_id": "item-apples"
+    }
+  ]
+}
+```
+
+This is a complete current-catalog snapshot, not a patch. Its root, item, and
+barcode objects accept exactly the documented fields. The strict decoder
+rejects malformed JSON, duplicate object members, unsupported schema versions,
+wrong primitive types, empty identifiers/descriptions, negative or noninteger
+prices, duplicate item IDs/barcodes, and barcode references to items outside
+the same staged document. It preserves strings exactly and requires JSON
+booleans for `active`.
+
+The successfully decoded value is a purpose-built immutable staged model. A
+summary reports only item, active-item, inactive-item, and barcode counts; it
+does not print the complete catalog or calculate monetary aggregates.
+
+## Atomic Activation and Referential Integrity
+
+The production write boundary is:
+
+```racket
+(activate-catalog-snapshot! connection snapshot)
+```
+
+It receives only a fully validated typed snapshot. One SQLite
+`BEGIN IMMEDIATE` transaction deletes current barcode assignments, deletes
+current items, inserts all staged items, inserts all staged barcode
+assignments, verifies counts and the absence of orphans, and commits. Any
+failure rolls the whole operation back, so the previous catalog remains live.
+After commit, the database catalog is exactly the supplied snapshot; omitted
+rows are gone.
+
+SQLite readers observe a consistent state from before or after the commit, not
+a half-replaced set. A scan that already read the old catalog can finish its
+decision after activation commits. Its accepted event records the merchandise
+facts that Racket actually observed for that decision.
+
+Write-time reference integrity is currently application-enforced by complete
+staged validation plus the single atomic activation boundary. All items are
+inserted before assignments, and activation verifies that no orphan exists.
+The lookup path independently fails closed on orphan/corrupt data.
 
 Ordinary Racket SQLite connections currently report
 `PRAGMA foreign_keys = 0`, and runtime composition does not yet enable that
 connection-local setting consistently. Migration 3 therefore does not declare
 a foreign key that would appear enforced while actually being disabled.
 
-The read repository uses an integrity-sensitive left join so an orphan barcode
-assignment fails closed instead of behaving like an unknown barcode. The
-catalog population/runtime-cutover checkpoint must establish a consistent
-write-time referential-integrity policy before exposing catalog writes.
+No arbitrary row-at-a-time production catalog write API is exposed. Enabling
+foreign keys consistently on every connection and adding a corresponding
+enforcing migration remains separate database hardening work.
 
-## Runtime Status
+## Runtime Composition
 
-Checkpoint 1 supplies the database schema, strict migration validation, and
-authoritative read repository. The production runtime intentionally continues
-to inject `fake-catalog-lookup`, including the Test Apples development fixture.
-Persistent catalog rows do not affect live checkout yet.
+The production runtime uses `lookup-catalog-item-by-barcode` over its existing
+bounded pool and virtual SQLite connection. It does not open a connection per
+scan, seed catalog data on startup, or fall back to the development fake
+catalog. A fresh migrated database therefore has an empty checkout catalog
+until an operator explicitly activates a snapshot.
 
-The next checkpoint will add controlled catalog population/activation, define
-the write-time integrity policy, switch runtime checkout to the SQLite lookup,
-and update cross-stack fixtures accordingly.
+`fake-catalog-lookup` remains only as focused test support. The versioned Test
+Apples JSON snapshot is a development/integration fixture, not a production
+default.
+
+## Operator Workflow
+
+From the repository root:
+
+```bash
+just catalog-validate path/to/catalog.json
+just catalog-activate path/to/catalog.json /explicit/path/to/pos.db
+```
+
+Validation performs no database work and prints concise counts. Activation
+strictly decodes and validates the complete file before opening the explicitly
+selected database, runs the normal database migration path, then replaces the
+catalog atomically. The database parent directory must already exist. Runtime
+startup never activates or rewrites a catalog automatically.
+
+Because activation replaces mutable checkout reference data, operators should
+prefer doing it between customer transactions where practical.
+
+## Catalog Changes and Command Retry
+
+A same-ID retry of a scan with an existing durable command receipt returns its
+original outcome before transaction replay or catalog lookup. Activating a new
+catalog cannot reprice or redescribe that known command, and its accepted event
+exists exactly once.
+
+A different boundary applies when Flutter preserved a scan command but POS
+Core never durably decided it. No sale-time reference facts exist yet. Its
+same-ID retry can perform the command's first catalog lookup later and is
+decided using the catalog active when Racket evaluates it. This preserves
+at-most-once command application, but command identity does not freeze mutable
+reference data before the backend makes a durable decision.
+
+Flutter does not send price or description and never becomes catalog or
+transaction authority. Catalog generations/effective pricing require a future
+explicit design if stronger timing semantics become necessary.
 
 ## Deliberately Deferred
 
@@ -130,3 +226,6 @@ This foundation does not implement:
 - price history or scheduled pricing.
 
 No catalog foreign reference is added to historical transaction events.
+
+See [ADR-0012](../adr/0012-use-atomic-local-catalog-snapshot-for-checkout-reference-data.md)
+for the durable architectural decision.

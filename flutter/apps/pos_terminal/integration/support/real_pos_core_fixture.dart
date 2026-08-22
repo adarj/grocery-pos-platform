@@ -15,6 +15,7 @@ final class RealPosCoreFixture {
   static const _healthAttemptTimeout = Duration(milliseconds: 400);
   static const _healthPollInterval = Duration(milliseconds: 50);
   static const _shutdownTimeout = Duration(seconds: 5);
+  static const _catalogActivationTimeout = Duration(seconds: 15);
 
   static Future<RealPosCoreFixture> create() async {
     final repositoryRoot = await _findRepositoryRoot(Directory.current);
@@ -39,6 +40,7 @@ final class RealPosCoreFixture {
   int? _observedExitCode;
   Uri? _baseUri;
   bool _disposed = false;
+  bool _catalogPrepared = false;
 
   String get databasePath => _join(temporaryDirectory.path, 'pos.db');
 
@@ -62,6 +64,8 @@ final class RealPosCoreFixture {
     if (_process != null) {
       throw StateError('POS Core fixture is already started.');
     }
+
+    await _prepareCatalogIfNeeded();
 
     final port = await _allocateLoopbackPort();
     final backendDirectory = _join(repositoryRoot.path, 'pos-backend-racket');
@@ -197,6 +201,47 @@ final class RealPosCoreFixture {
     } finally {
       client.close();
     }
+  }
+
+  Future<void> _prepareCatalogIfNeeded() async {
+    if (_catalogPrepared) {
+      return;
+    }
+
+    final backendDirectory = _join(repositoryRoot.path, 'pos-backend-racket');
+    final catalogPath = _join(
+      repositoryRoot.path,
+      'pos-backend-racket/fixtures/development/catalog-snapshot-v1.json',
+    );
+    final process = await Process.start(
+      'racket',
+      ['scripts/catalog.rkt', 'activate', catalogPath, databasePath],
+      workingDirectory: backendDirectory,
+      environment: Platform.environment,
+    );
+    final stdoutFuture = process.stdout.transform(utf8.decoder).join();
+    final stderrFuture = process.stderr.transform(utf8.decoder).join();
+
+    int exitCode;
+    try {
+      exitCode = await process.exitCode.timeout(_catalogActivationTimeout);
+    } on TimeoutException {
+      process.kill(ProcessSignal.sigkill);
+      await process.exitCode.timeout(_shutdownTimeout);
+      throw TimeoutException(
+        'Timed out activating the isolated development catalog.',
+        _catalogActivationTimeout,
+      );
+    }
+    final output = await stdoutFuture;
+    final errorOutput = await stderrFuture;
+    if (exitCode != 0) {
+      throw StateError(
+        'Catalog activation for POS Core fixture failed with exit code '
+        '$exitCode.\nstdout:\n$output\nstderr:\n$errorOutput',
+      );
+    }
+    _catalogPrepared = true;
   }
 }
 

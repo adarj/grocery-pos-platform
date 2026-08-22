@@ -657,7 +657,10 @@ SQL
     (dynamic-wind
       void
       (lambda ()
-        (define runtime-A (start-pos-runtime config))
+        (define runtime-A
+          (start-pos-runtime
+           config
+           #:catalog-lookup fake-catalog-lookup))
         (define original-scan
           (dynamic-wind
             void
@@ -672,7 +675,10 @@ SQL
             (lambda ()
               (stop-pos-runtime! runtime-A))))
 
-        (define runtime-B (start-pos-runtime config))
+        (define runtime-B
+          (start-pos-runtime
+           config
+           #:catalog-lookup fake-catalog-lookup))
         (dynamic-wind
           void
           (lambda ()

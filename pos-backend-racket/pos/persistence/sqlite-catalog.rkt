@@ -2,9 +2,11 @@
 
 (require (prefix-in db: db)
          "../domain/catalog-item.rkt"
-         "../domain/money.rkt")
+         "../domain/money.rkt"
+         "catalog-snapshot-codec.rkt")
 
-(provide lookup-catalog-item-by-barcode)
+(provide lookup-catalog-item-by-barcode
+         activate-catalog-snapshot!)
 
 (define (non-empty-string? value)
   (and (string? value)
@@ -85,3 +87,92 @@ SQL
           (catalog-item barcode
                         description
                         (money unit-price-minor-units)))]))
+
+(define (verify-activated-catalog! connection snapshot)
+  (define expected-item-count
+    (length (catalog-snapshot-items snapshot)))
+  (define expected-barcode-count
+    (length (catalog-snapshot-barcodes snapshot)))
+  (define actual-item-count
+    (db:query-value connection "SELECT COUNT(*) FROM catalog_items"))
+  (define actual-barcode-count
+    (db:query-value connection "SELECT COUNT(*) FROM catalog_barcodes"))
+  (define orphan-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM catalog_barcodes AS barcode_assignment
+LEFT JOIN catalog_items AS item
+  ON item.item_id = barcode_assignment.item_id
+WHERE item.item_id IS NULL
+SQL
+     ))
+  (unless (= actual-item-count expected-item-count)
+    (error
+     'activate-catalog-snapshot!
+     "catalog item count changed unexpectedly during activation"))
+  (unless (= actual-barcode-count expected-barcode-count)
+    (error
+     'activate-catalog-snapshot!
+     "catalog barcode count changed unexpectedly during activation"))
+  (unless (zero? orphan-count)
+    (error
+     'activate-catalog-snapshot!
+     "catalog activation produced orphan barcode assignments")))
+
+(define (activate-catalog-snapshot/observe!
+         connection snapshot after-clear)
+  (unless (db:connection? connection)
+    (raise-argument-error
+     'activate-catalog-snapshot! "connection?" connection))
+  (unless (catalog-snapshot? snapshot)
+    (raise-argument-error
+     'activate-catalog-snapshot! "catalog-snapshot?" snapshot))
+  (unless (and (procedure? after-clear)
+               (procedure-arity-includes? after-clear 0))
+    (raise-argument-error
+     'activate-catalog-snapshot! "zero-argument procedure?" after-clear))
+
+  (db:call-with-transaction
+   connection
+   (lambda ()
+     ;; Delete assignments first because they logically depend on items. All
+     ;; replacement rows remain invisible to other connections until commit.
+     (db:query-exec connection "DELETE FROM catalog_barcodes")
+     (db:query-exec connection "DELETE FROM catalog_items")
+     (after-clear)
+
+     ;; The typed snapshot has already proved all barcode references point to
+     ;; an item in this same set. Insert all items before their assignments.
+     (for ([item (in-list (catalog-snapshot-items snapshot))])
+       (db:query-exec
+        connection
+        #<<SQL
+INSERT INTO catalog_items
+  (item_id, description, unit_price_minor_units, active)
+VALUES (?, ?, ?, ?)
+SQL
+        (catalog-snapshot-item-item-id item)
+        (catalog-snapshot-item-description item)
+        (catalog-snapshot-item-unit-price-minor-units item)
+        (if (catalog-snapshot-item-active? item) 1 0)))
+     (for ([assignment (in-list (catalog-snapshot-barcodes snapshot))])
+       (db:query-exec
+        connection
+        #<<SQL
+INSERT INTO catalog_barcodes (barcode, item_id)
+VALUES (?, ?)
+SQL
+        (catalog-snapshot-barcode-barcode assignment)
+        (catalog-snapshot-barcode-item-id assignment)))
+     (verify-activated-catalog! connection snapshot))
+   #:option 'immediate)
+
+  (summarize-catalog-snapshot snapshot))
+
+(define (activate-catalog-snapshot! connection snapshot)
+  (activate-catalog-snapshot/observe! connection snapshot void))
+
+(module+ test-support
+  (provide activate-catalog-snapshot/observe!))

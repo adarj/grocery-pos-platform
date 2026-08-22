@@ -133,9 +133,9 @@ Verified capabilities currently include:
   sequencing, atomic batch append, and optimistic stream-version checks;
 * migration v2 durable command receipts with database-global command IDs and
   atomic accepted-event/command-outcome persistence;
-* migration v3 persistent local catalog item/barcode schema with strict
-  checkout read semantics and sale-time transaction snapshot isolation (runtime
-  catalog cutover remains pending);
+* migration v3 persistent local catalog with strict Catalog Snapshot v1
+  validation, atomic full replacement, SQLite runtime checkout lookup, and
+  sale-time transaction snapshot isolation;
 * idempotent persistent transaction application service with deterministic
   two-connection concurrency and file-backed restart/retry coverage;
 * Racket runtime composition with startup migration, a bounded SQLite pool,
@@ -201,6 +201,21 @@ just doctor
 ## Running the Walking Skeleton
 
 Use two terminals.
+
+### Prepare the development catalog
+
+For a fresh development database, validate and atomically activate the small
+version-controlled catalog fixture first:
+
+```bash
+just catalog-validate pos-backend-racket/fixtures/development/catalog-snapshot-v1.json
+just catalog-activate pos-backend-racket/fixtures/development/catalog-snapshot-v1.json .local/sqlite/pos-dev.db
+```
+
+Activation replaces the complete current catalog in the explicitly selected
+database. The development shell provisions `.local/sqlite`; other database
+parents must already exist. POS Core startup never seeds or rewrites catalog
+data automatically.
 
 ### Terminal 1 — POS Core
 

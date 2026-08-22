@@ -98,10 +98,11 @@ same service rather than reimplementing its idempotency or transaction
 semantics. The detailed ownership and shutdown contract is documented in
 [Racket POS Core Runtime Composition](racket-runtime.md).
 
-Migration 3 includes the persistent local catalog foundation documented in
-[Local Catalog Foundation](catalog.md). Live runtime checkout still uses the
-development fake catalog until the controlled population and cutover work in
-the next checkpoint; the HTTP transaction contract is unchanged.
+Migration 3 includes the persistent local catalog documented in
+[Local Catalog](catalog.md). Live runtime checkout resolves new scans from its
+explicitly activated SQLite catalog through the same virtual connection pool;
+runtime startup never seeds development merchandise. The HTTP transaction
+contract is unchanged.
 
 ## Health Endpoint
 

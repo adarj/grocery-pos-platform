@@ -102,13 +102,18 @@ rather than relying on a hidden global connection or process termination.
 
 ## Application and catalog composition
 
-The runtime passes the shared virtual connection and the current catalog lookup
-to `make-transaction-service`. Migration 3 and the SQLite catalog read adapter
-now provide the persistent catalog foundation, but the runtime intentionally
-continues to inject the development `fake-catalog-lookup` until controlled
-catalog population and activation arrive in the next checkpoint. Historical
-replay still uses sale-time event snapshots and never queries either catalog.
-See [Local Catalog Foundation](catalog.md).
+The runtime passes the shared virtual connection and a SQLite catalog lookup to
+`make-transaction-service`. New scans resolve active merchandise through the
+persistent normalized catalog created by migration 3. The lookup uses the same
+bounded pool/virtual connection and does not open one physical connection per
+scan.
+
+Runtime startup migrates but never seeds or activates catalog data. A fresh
+database has an empty catalog until an operator explicitly activates a strict
+full snapshot. Focused tests can still inject a catalog lookup override, but
+the development fake is no longer a production default. Historical replay
+continues to use sale-time event snapshots and never queries current catalog
+data. See [Local Catalog](catalog.md).
 
 `make-app` requires the constructed transaction service and returns the servlet
 handler. The service is captured explicitly rather than stored in a global.
@@ -135,6 +140,10 @@ future checkout dependency is ready.
 Focused file-backed tests establish:
 
 - fresh runtime migration through schema v3;
+- an empty persistent catalog rejecting the former development barcode rather
+  than falling back to a fake;
+- active/inactive/unknown persistent catalog lookup behavior and exact
+  sale-time event values;
 - idempotent startup against an existing v3 database without history loss;
 - migration corruption preventing runtime construction;
 - failure on a missing database parent directory;
@@ -152,7 +161,7 @@ This runtime composition and HTTP adapter do not add:
 
 - a readiness endpoint;
 - authentication or authorization;
-- persistent-catalog population and runtime checkout cutover;
+- catalog HTTP administration, patch updates, or cloud synchronization;
 - automatic SQLite busy retry or backoff;
 - a generic service container or component framework;
 - payment, device, drawer, or receipt integration;

@@ -26,6 +26,8 @@ Each test fixture:
   Racket entry point;
 - allocates an available loopback TCP port;
 - creates an isolated temporary directory;
+- activates the versioned development Catalog Snapshot v1 into that fixture's
+  SQLite database through the production catalog CLI before first startup;
 - starts `pos-backend-racket/main.rkt` with an absolute temporary
   `SQLITE_DB_PATH`;
 - waits for the real `GET /health` response with a bounded deadline;
@@ -37,7 +39,23 @@ Each test fixture:
 The fixture never touches `.local/sqlite/pos-dev.db` or the operator's normal
 XDG cashier recovery file. It adds no production endpoint or fault-injection
 behavior. Restart scenarios deliberately retain only their fixture's SQLite
-and recovery files between child-process instances.
+and recovery files between child-process instances. The catalog is activated
+only for the initial fresh fixture; POS Core restarts reuse the persisted rows
+without automatic reseeding.
+
+The full-sale expectations therefore cross the production path:
+
+```text
+Flutter controller
+  -> HttpPosCoreClient
+  -> Racket runtime
+  -> SQLite catalog lookup
+  -> sale-time transaction event
+```
+
+If catalog activation fails, the fixture fails before starting the server and
+reports bounded CLI output. Test Apples exists only in the version-controlled
+development snapshot; production runtime contains no implicit fixture lookup.
 
 ## Environment
 

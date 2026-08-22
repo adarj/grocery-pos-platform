@@ -86,7 +86,7 @@ Migration version 3, `create_catalog`, creates the persistent local catalog
 item and barcode-assignment tables. The catalog answers new-scan lookup
 questions; it is not transaction truth and is never consulted during replay.
 Its schema and read contract are documented in
-[Local Catalog Foundation](catalog.md).
+[Local Catalog](catalog.md).
 
 The migration runner treats recorded history as an exact prefix of the known
 ordered migration list. A fresh database applies versions 1, 2, and 3. A real

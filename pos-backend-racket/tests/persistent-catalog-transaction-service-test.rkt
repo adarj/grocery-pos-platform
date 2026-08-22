@@ -1,6 +1,7 @@
 #lang racket
 
 (require (prefix-in db: db)
+         json
          rackunit
          "../pos/application/transaction-command-receipt.rkt"
          "../pos/application/transaction-command.rkt"
@@ -9,11 +10,34 @@
          "../pos/domain/money.rkt"
          "../pos/domain/transaction-event.rkt"
          "../pos/domain/transaction.rkt"
+         "../pos/persistence/catalog-snapshot-codec.rkt"
          "../pos/persistence/pos-database-migrations.rkt"
          "../pos/persistence/sqlite-catalog.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt")
 
 (define barcode "049000001234")
+
+(define (catalog-jsexpr description price)
+  (hasheq
+   'schema_version 1
+   'items
+   (list
+    (hasheq 'item_id "item-apples"
+            'description description
+            'unit_price_minor_units price
+            'active #t))
+   'barcodes
+   (list (hasheq 'barcode barcode 'item_id "item-apples"))))
+
+(define (decode-snapshot value)
+  (define result
+    (json-string->catalog-snapshot (jsexpr->string value)))
+  (check-pred catalog-snapshot-decode-success? result)
+  (catalog-snapshot-decode-success-snapshot result))
+
+(define snapshot-a (decode-snapshot (catalog-jsexpr "Apples" 199)))
+(define snapshot-b
+  (decode-snapshot (catalog-jsexpr "Premium Apples" 299)))
 
 (define (call-with-store procedure)
   (define connection (db:sqlite3-connect #:database 'memory))
@@ -21,19 +45,7 @@
     void
     (lambda ()
       (migrate-pos-database! connection)
-      (db:query-exec
-       connection
-       #<<SQL
-INSERT INTO catalog_items
-  (item_id, description, unit_price_minor_units, active)
-VALUES ('item-apples', 'Apples', 199, 1)
-SQL
-       )
-      (db:query-exec
-       connection
-       "INSERT INTO catalog_barcodes (barcode, item_id) VALUES (?, ?)"
-       barcode
-       "item-apples")
+      (activate-catalog-snapshot! connection snapshot-a)
       (procedure connection))
     (lambda () (db:disconnect connection))))
 
@@ -48,7 +60,7 @@ SQL
 
 (module+ test
   (test-case
-      "persistent catalog scan snapshots sale-time facts and replay ignores edits"
+      "catalog replacement changes new scans but not history or durable retry"
     (call-with-store
      (lambda (connection)
        (define lookup-count 0)
@@ -92,20 +104,49 @@ SQL
         (list (transaction-started "txn-catalog")
               (sale-item-added barcode "Apples" (money 199))))
 
-       (db:query-exec
-        connection
-        #<<SQL
-UPDATE catalog_items
-SET description = 'Premium Apples',
-    unit_price_minor_units = 299
-WHERE item_id = 'item-apples'
-SQL
-        )
+       (activate-catalog-snapshot! connection snapshot-b)
        (define current-item
          (lookup-catalog-item-by-barcode connection barcode))
        (check-equal? (catalog-item-description current-item)
                      "Premium Apples")
        (check-equal? (catalog-item-unit-price current-item) (money 299))
+
+       ;; Receipt recovery precedes transaction replay and current catalog
+       ;; lookup, so replacement cannot alter the known command result.
+       (define lookups-before-retry lookup-count)
+       (define retry-receipt
+         (resolved-receipt
+          (transaction-service-execute-command service scan-command)))
+       (check-equal? retry-receipt scan-receipt)
+       (check-equal? lookup-count lookups-before-retry)
+       (define events-after-retry
+         (load-transaction-events connection "txn-catalog"))
+       (check-pred journal-load-succeeded? events-after-retry)
+       (check-equal?
+        (journal-load-succeeded-events events-after-retry)
+        (list (transaction-started "txn-catalog")
+              (sale-item-added barcode "Apples" (money 199))))
+
+       ;; A genuinely new transaction/command observes the replacement.
+       (resolved-receipt
+        (transaction-service-execute-command
+         service
+         (start-transaction-command
+          "cmd-catalog-new-start" "txn-catalog-new" 0)))
+       (resolved-receipt
+        (transaction-service-execute-command
+         service
+         (scan-barcode-command
+          "cmd-catalog-new-scan" "txn-catalog-new" 1 barcode)))
+       (check-equal? lookup-count (add1 lookups-before-retry))
+       (define new-events
+         (load-transaction-events connection "txn-catalog-new"))
+       (check-pred journal-load-succeeded? new-events)
+       (check-equal?
+        (journal-load-succeeded-events new-events)
+        (list (transaction-started "txn-catalog-new")
+              (sale-item-added
+               barcode "Premium Apples" (money 299))))
 
        (define replay-catalog-lookups 0)
        (define replay-service
@@ -131,4 +172,40 @@ SQL
        (check-equal? (transaction-line-item-description recovered-item)
                      "Apples")
        (check-equal? (transaction-line-item-unit-price recovered-item)
-                     (money 199))))))
+                     (money 199)))))
+
+  (test-case
+      "unresolved scan uses catalog active when backend first decides it"
+    (call-with-store
+     (lambda (connection)
+       (define service
+         (make-catalog-service
+          connection
+          (lambda (scanned-barcode)
+            (lookup-catalog-item-by-barcode connection scanned-barcode))))
+       (resolved-receipt
+        (transaction-service-execute-command
+         service
+         (start-transaction-command
+          "cmd-unresolved-start" "txn-unresolved" 0)))
+       (define persisted-but-unresolved-command
+         (scan-barcode-command
+          "cmd-unresolved-scan" "txn-unresolved" 1 barcode))
+
+       ;; No receipt or event has established a merchandise interpretation.
+       (activate-catalog-snapshot! connection snapshot-b)
+       (define receipt
+         (resolved-receipt
+          (transaction-service-execute-command
+           service persisted-but-unresolved-command)))
+       (check-equal?
+        (transaction-command-receipt-outcome-kind receipt)
+        'accepted)
+       (define events
+         (load-transaction-events connection "txn-unresolved"))
+       (check-pred journal-load-succeeded? events)
+       (check-equal?
+        (journal-load-succeeded-events events)
+        (list (transaction-started "txn-unresolved")
+              (sale-item-added
+               barcode "Premium Apples" (money 299))))))))

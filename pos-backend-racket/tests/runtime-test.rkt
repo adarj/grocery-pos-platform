@@ -1,6 +1,7 @@
 #lang racket
 
 (require (prefix-in db: db)
+         json
          rackunit
          racket/file
          "../pos/runtime-config.rkt"
@@ -9,7 +10,10 @@
          "../pos/application/transaction-command.rkt"
          "../pos/application/transaction-service.rkt"
          "../pos/domain/fake-catalog.rkt"
+         "../pos/domain/money.rkt"
          "../pos/domain/transaction-event.rkt"
+         "../pos/persistence/catalog-snapshot-codec.rkt"
+         "../pos/persistence/sqlite-catalog.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt")
 
 (define (call-with-temporary-database proc)
@@ -47,6 +51,42 @@
      (db:query-rows
       connection
       "SELECT version, name FROM pos_schema_migrations ORDER BY version"))))
+
+(define persistent-runtime-catalog
+  (hasheq
+   'schema_version 1
+   'items
+   (list
+    (hasheq 'item_id "item-apples"
+            'description "Persistent Test Apples"
+            'unit_price_minor_units 199
+            'active #t)
+    (hasheq 'item_id "item-inactive"
+            'description "Inactive Item"
+            'unit_price_minor_units 250
+            'active #f))
+   'barcodes
+   (list
+    (hasheq 'barcode "049000001234" 'item_id "item-apples")
+    (hasheq 'barcode "000000000099" 'item_id "item-inactive"))))
+
+(define (activate-runtime-catalog! database-path catalog-jsexpr)
+  (initialize-sqlite-database! database-path)
+  (define decoded
+    (json-string->catalog-snapshot (jsexpr->string catalog-jsexpr)))
+  (check-pred catalog-snapshot-decode-success? decoded)
+  (with-connection
+   database-path
+   (lambda (connection)
+     (activate-catalog-snapshot!
+      connection
+      (catalog-snapshot-decode-success-snapshot decoded)))))
+
+(define (check-command-outcome result kind code)
+  (define receipt (resolved-receipt result))
+  (check-equal? (transaction-command-receipt-outcome-kind receipt) kind)
+  (check-equal? (transaction-command-receipt-outcome-code receipt) code)
+  receipt)
 
 (module+ test
   (test-case "startup migration connection is disconnected on success and failure"
@@ -128,6 +168,105 @@ SQL
             1))
          (lambda ()
            (stop-pos-runtime! runtime))))))
+
+  (test-case "default runtime uses only persisted active catalog rows"
+    (call-with-temporary-database
+     (lambda (database-path _directory)
+       (define runtime-empty
+         (start-pos-runtime (runtime-config database-path)))
+       (dynamic-wind
+         void
+         (lambda ()
+           (define service
+             (pos-runtime-transaction-service runtime-empty))
+           (check-command-outcome
+            (execute service
+                     (start-transaction-command
+                      "cmd-empty-start" "txn-empty" 0))
+            'accepted
+            "accepted")
+           ;; The old Test Apples fixture must not be implicitly available.
+           (check-command-outcome
+            (execute service
+                     (scan-barcode-command
+                      "cmd-empty-scan"
+                      "txn-empty"
+                      1
+                      "049000001234"))
+            'domain-rejected
+            "unknown_barcode"))
+         (lambda () (stop-pos-runtime! runtime-empty)))
+
+       (activate-runtime-catalog! database-path persistent-runtime-catalog)
+       (define runtime-persisted
+         (start-pos-runtime (runtime-config database-path)))
+       (dynamic-wind
+         void
+         (lambda ()
+           (define service
+             (pos-runtime-transaction-service runtime-persisted))
+           (check-command-outcome
+            (execute service
+                     (start-transaction-command
+                      "cmd-persisted-start" "txn-persisted" 0))
+            'accepted
+            "accepted")
+           (check-command-outcome
+            (execute service
+                     (scan-barcode-command
+                      "cmd-persisted-scan"
+                      "txn-persisted"
+                      1
+                      "049000001234"))
+            'accepted
+            "accepted")
+
+           (check-command-outcome
+            (execute service
+                     (start-transaction-command
+                      "cmd-inactive-start" "txn-inactive" 0))
+            'accepted
+            "accepted")
+           (check-command-outcome
+            (execute service
+                     (scan-barcode-command
+                      "cmd-inactive-scan"
+                      "txn-inactive"
+                      1
+                      "000000000099"))
+            'domain-rejected
+            "unknown_barcode")
+
+           (check-command-outcome
+            (execute service
+                     (start-transaction-command
+                      "cmd-unknown-start" "txn-unknown" 0))
+            'accepted
+            "accepted")
+           (check-command-outcome
+            (execute service
+                     (scan-barcode-command
+                      "cmd-unknown-scan"
+                      "txn-unknown"
+                      1
+                      "does-not-exist"))
+            'domain-rejected
+            "unknown_barcode")
+
+           (define recovered
+             (transaction-service-load-transaction service "txn-persisted"))
+           (check-pred transaction-service-success? recovered)
+           (define events
+             (with-connection
+              database-path
+              (lambda (connection)
+                (load-transaction-events connection "txn-persisted"))))
+           (check-pred journal-load-succeeded? events)
+           (check-equal?
+            (second (journal-load-succeeded-events events))
+            (sale-item-added
+             "049000001234" "Persistent Test Apples" (money 199))))
+         (lambda () (stop-pos-runtime! runtime-persisted))))))
 
   (test-case "runtime separates startup/request connections and owns shutdown"
     (call-with-temporary-database
@@ -265,7 +404,9 @@ SQL
     (call-with-temporary-database
      (lambda (database-path _directory)
        (define runtime
-         (start-pos-runtime (runtime-config database-path)))
+         (start-pos-runtime
+          (runtime-config database-path)
+          #:catalog-lookup fake-catalog-lookup))
        (dynamic-wind
          void
          (lambda ()
