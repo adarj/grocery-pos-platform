@@ -6,6 +6,7 @@
          "../pos/application/transaction-command-receipt.rkt"
          "../pos/application/transaction-command.rkt"
          "../pos/application/transaction-service.rkt"
+         "../pos/domain/canonical-receipt.rkt"
          "../pos/domain/catalog-item.rkt"
          "../pos/domain/money.rkt"
          "../pos/domain/tax.rkt"
@@ -201,6 +202,83 @@
                      (money 199))
        (check-equal? (transaction-line-item-tax-amount recovered-item)
                      (money 20)))))
+
+  (test-case "completed receipts retain old reference data after replacement"
+    (call-with-store
+     (lambda (connection)
+       (define lookup-count 0)
+       (define service
+         (make-catalog-service
+          connection
+          (lambda (scanned-barcode)
+            (set! lookup-count (add1 lookup-count))
+            (lookup-catalog-item-by-barcode connection scanned-barcode))))
+
+       (define (complete-one-sale! prefix transaction-id)
+         (resolved-receipt
+          (transaction-service-execute-command
+           service
+           (start-transaction-command
+            (string-append prefix "-start") transaction-id 0)))
+         (resolved-receipt
+          (transaction-service-execute-command
+           service
+           (scan-barcode-command
+            (string-append prefix "-scan") transaction-id 1 barcode)))
+         (resolved-receipt
+          (transaction-service-execute-command
+           service
+           (tender-cash-command
+            (string-append prefix "-tender")
+            transaction-id
+            2
+            (money 500))))
+         (resolved-receipt
+          (transaction-service-execute-command
+           service
+           (complete-transaction-command
+            (string-append prefix "-complete") transaction-id 3))))
+
+       (complete-one-sale! "cmd-old" "txn-old-catalog-receipt")
+       (check-equal? lookup-count 1)
+       (activate-catalog-snapshot! connection snapshot-b)
+
+       (define old-result
+         (transaction-service-load-canonical-receipt
+          service
+          "txn-old-catalog-receipt"))
+       (check-pred transaction-service-receipt-success? old-result)
+       (check-equal? lookup-count 1)
+       (define old-line
+         (first
+          (canonical-receipt-line-items
+           (transaction-service-receipt-success-receipt old-result))))
+       (check-equal? (canonical-receipt-line-description old-line) "Apples")
+       (check-equal? (canonical-receipt-line-unit-price old-line) (money 199))
+       (check-equal? (canonical-receipt-line-tax-category-id old-line)
+                     "standard")
+       (check-equal? (canonical-receipt-line-tax-rate old-line)
+                     (tax-rate 100000))
+       (check-equal? (canonical-receipt-line-tax-amount old-line) (money 20))
+
+       (complete-one-sale! "cmd-new" "txn-new-catalog-receipt")
+       (check-equal? lookup-count 2)
+       (define new-result
+         (transaction-service-load-canonical-receipt
+          service
+          "txn-new-catalog-receipt"))
+       (check-pred transaction-service-receipt-success? new-result)
+       (define new-line
+         (first
+          (canonical-receipt-line-items
+           (transaction-service-receipt-success-receipt new-result))))
+       (check-equal? (canonical-receipt-line-description new-line)
+                     "Premium Apples")
+       (check-equal? (canonical-receipt-line-unit-price new-line) (money 299))
+       (check-equal? (canonical-receipt-line-tax-category-id new-line)
+                     "exempt")
+       (check-equal? (canonical-receipt-line-tax-rate new-line) (tax-rate 0))
+       (check-equal? (canonical-receipt-line-tax-amount new-line) (money 0)))))
 
   (test-case
       "unresolved scan uses catalog active when backend first decides it"

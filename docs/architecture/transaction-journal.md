@@ -280,7 +280,8 @@ resources.
 The service provides operations to:
 
 - execute one of the six typed mutating transaction commands;
-- load/recover current authoritative transaction state.
+- load/recover current authoritative transaction state;
+- derive a canonical receipt from a completed replay.
 
 ### Duplicate, Recover, Decide, Commit
 
@@ -387,6 +388,21 @@ before the unit of work leaves no event or receipt, so retrying that same ID can
 execute normally. This is a retry-based recovery protocol for uncertain caller
 observation; it is not a claim of arbitrary distributed exactly-once execution.
 
+### Canonical completed-sale receipts
+
+A completed transaction replay plus its final stream version contains every
+fact needed for Receipt Schema v1. POS Core maps final retained lines and the
+transaction projection into an immutable canonical receipt. It does not query
+current catalog/tax data or reconstruct merchandise through command receipts.
+Open, paid, and voided streams are explicitly ineligible.
+
+No materialized receipt table is added. This avoids a second historical sale
+authority and projection-synchronization boundary. Exact lookup is exposed by
+`GET /receipts/{transaction_id}` and remains deterministic after process
+restart and current reference-data replacement. See
+[Canonical Completed-Sale Receipts](receipts.md) and
+[ADR-0015](../adr/0015-derive-canonical-receipts-from-completed-transaction-replay.md).
+
 ## Deliberately Deferred
 
 The persistent service is exposed through the narrow command/query routes in
@@ -398,7 +414,7 @@ does not add:
 - timestamps or event UUIDs;
 - hash chaining or integrity signatures;
 - outbox or cloud synchronization tables;
-- sale-receipt, tender, inventory, or card-payment tables;
+- materialized sale-receipt, tender, inventory, or card-payment tables;
 - partial/split tender or other new transaction behavior;
 - post-payment refund/reversal behavior.
 

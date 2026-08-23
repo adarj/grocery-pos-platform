@@ -4,6 +4,8 @@ import 'package:flutter/services.dart';
 import '../../core/pos_core/models/command_result.dart';
 import '../../core/pos_core/models/transaction_command.dart';
 import '../../core/pos_core/models/transaction_snapshot.dart';
+import '../../core/pos_core/pos_core_client.dart';
+import '../receipt/receipt_screen.dart';
 import 'cashier_money_format.dart';
 import 'cashier_money_input.dart';
 import 'cashier_session_controller.dart';
@@ -24,9 +26,14 @@ final ButtonStyle _primaryActionStyle = FilledButton.styleFrom(
 );
 
 final class CashierScreen extends StatefulWidget {
-  const CashierScreen({required this.controller, super.key});
+  const CashierScreen({
+    required this.controller,
+    required this.client,
+    super.key,
+  });
 
   final CashierSessionController controller;
+  final PosCoreClient client;
 
   @override
   State<CashierScreen> createState() => _CashierScreenState();
@@ -260,6 +267,15 @@ final class _CashierScreenState extends State<CashierScreen> {
     _requestBarcodeFocus();
   }
 
+  void _viewReceipt(String transactionId) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) =>
+            ReceiptScreen(client: widget.client, transactionId: transactionId),
+      ),
+    );
+  }
+
   void _restorePendingInputContext(TransactionCommand command) {
     switch (command) {
       case ScanBarcodeCommand():
@@ -451,6 +467,7 @@ final class _CashierScreenState extends State<CashierScreen> {
                     onRemove: _confirmRemoveLine,
                     onVoid: _confirmVoidSale,
                     onNextSale: _beginNextSale,
+                    onViewReceipt: _viewReceipt,
                   );
                 }
 
@@ -703,6 +720,7 @@ final class _ActiveTransactionView extends StatelessWidget {
     required this.onRemove,
     required this.onVoid,
     required this.onNextSale,
+    required this.onViewReceipt,
   });
 
   final CashierSessionState state;
@@ -723,6 +741,7 @@ final class _ActiveTransactionView extends StatelessWidget {
   onRemove;
   final Future<void> Function(TransactionSnapshot snapshot) onVoid;
   final VoidCallback onNextSale;
+  final ValueChanged<String> onViewReceipt;
 
   @override
   Widget build(BuildContext context) {
@@ -763,6 +782,7 @@ final class _ActiveTransactionView extends StatelessWidget {
             snapshot: snapshot,
             feedback: feedback,
             onNextSale: state.canBeginNextSale ? onNextSale : null,
+            onViewReceipt: () => onViewReceipt(snapshot.transactionId),
           ),
           TransactionStatus.voided => _VoidedControls(
             snapshot: snapshot,
@@ -1129,12 +1149,14 @@ final class _PaymentControls extends StatelessWidget {
     required this.feedback,
     this.onComplete,
     this.onNextSale,
+    this.onViewReceipt,
   });
 
   final TransactionSnapshot snapshot;
   final String? feedback;
   final VoidCallback? onComplete;
   final VoidCallback? onNextSale;
+  final VoidCallback? onViewReceipt;
 
   @override
   Widget build(BuildContext context) {
@@ -1206,6 +1228,13 @@ final class _PaymentControls extends StatelessWidget {
                 onPressed: onNextSale,
                 icon: const Icon(Icons.add_shopping_cart),
                 label: const Text('Next Sale'),
+              ),
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(minimumSize: const Size(0, 52)),
+                onPressed: onViewReceipt,
+                icon: const Icon(Icons.receipt_long_outlined),
+                label: const Text('View Receipt'),
               ),
             ],
             if (feedback != null) ...[

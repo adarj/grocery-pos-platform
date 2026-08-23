@@ -101,8 +101,9 @@ Transaction, tender, payment, receipt, drawer, synchronization, and recovery sta
 
 For the implemented cash-sale slice, SQLite is now the durable local journal
 of accepted transaction facts, and Racket replay reconstructs authoritative
-transaction state. Persistence for the other listed concerns remains future
-work.
+transaction state and canonical completed-sale receipts. A second materialized
+receipt store is not required. Persistence for the other listed concerns
+remains future work.
 
 ### Specialized Rust Edges
 
@@ -142,11 +143,13 @@ Verified capabilities currently include:
   two-connection concurrency and file-backed restart/retry coverage;
 * Racket runtime composition with startup migration, a bounded SQLite pool,
   thread-mapped virtual request connections, and explicit shutdown ownership;
-* Transaction HTTP API v1 with one strict idempotent command route and one
-  authoritative transaction-state query route;
+* Transaction HTTP API v1 with one strict idempotent command route,
+  authoritative transaction-state reads, and exact completed-sale canonical
+  receipt lookup derived from journal replay;
 * Flutter Linux ARM64 POS terminal;
 * typed Flutter POS Core client models for transaction commands, durable command
-  outcomes, authoritative transaction snapshots, and safe failures;
+  outcomes, authoritative transaction snapshots, canonical receipts, and safe
+  failures;
 * Flutter cashier session orchestration and a
   start/scan/remove/void/cash-tender/complete interface rendering authoritative
   basket, subtotal, tax, total, payment, and change;

@@ -9,6 +9,7 @@ This document defines the initial communication boundary between local Flutter a
 The health endpoint and Transaction HTTP API v1 are implemented. The detailed
 transaction command/query contract is documented in
 [Transaction HTTP API v1](transaction-http-api-v1.md).
+That contract also defines exact read-only completed-sale receipt lookup.
 
 ## Purpose
 
@@ -173,7 +174,9 @@ and failure models are documented in
 [Flutter POS Core Client Foundation](flutter-pos-client.md). The implemented
 cashier controller and widgets use that boundary for the current start, scan,
 cash-tender, completion, open-sale removal/void, recovery, and next-sale
-workflow.
+workflow. Completed receipt display and exact historical lookup use the typed
+read-only receipt query rather than adding receipt behavior to cashier mutation
+orchestration.
 
 ### Command IDs and expected versions
 
@@ -383,10 +386,13 @@ Currently implemented:
 GET /health
 POST /transaction-commands
 GET /transactions/{transaction_id}
+GET /receipts/{transaction_id}
 ```
 
-The two transaction routes expose only the implemented durable typed-command
-mutation and authoritative journal-replay query. Command-specific mutation
-routes and speculative transaction operations are deliberately absent.
+The transaction routes expose the durable typed-command mutation,
+authoritative current-state replay query, and canonical completed-sale receipt
+derived from that same replay. Receipt lookup creates no command or cashier
+recovery record. Command-specific mutation routes, broad sale search, and
+speculative transaction operations are deliberately absent.
 
 The domain model should drive the interface, not the reverse.

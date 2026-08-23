@@ -4,8 +4,9 @@
 
 Transaction HTTP API v1 exposes the implemented durable cash-sale application
 boundary through the local Racket server. It is a transport adapter over the
-existing typed command service and authoritative transaction query; it does not
-implement transaction rules, idempotency, replay, or SQLite persistence.
+existing typed command service, authoritative transaction query, and canonical
+completed-sale receipt query; it does not implement transaction rules,
+idempotency, replay, or SQLite persistence.
 
 The implemented routes are:
 
@@ -14,6 +15,7 @@ The implemented routes are:
 | `GET` | `/health` | Process liveness |
 | `POST` | `/transaction-commands` | Execute or resolve one typed transaction command |
 | `GET` | `/transactions/{transaction_id}` | Read current authoritative transaction state |
+| `GET` | `/receipts/{transaction_id}` | Derive the canonical completed-sale receipt |
 
 No command-specific mutation routes exist. The one command endpoint mirrors
 `transaction-service-execute-command` and prevents route handlers from
@@ -220,6 +222,52 @@ A missing transaction returns `404 Not Found` with code
 unexpected query exception returns the generic code `internal_error`. None of
 these responses exposes an internal exception message.
 
+## Canonical completed-sale receipt query
+
+`GET /receipts/{transaction_id}` is a read-only exact lookup. It loads and
+replays the same authoritative journal stream as the transaction query, then
+requires the reconstructed status to be `completed`. It takes no command ID or
+expected version and never reads current catalog/tax data for sale facts.
+
+A successful response is:
+
+```json
+{
+  "ok": true,
+  "receipt": {
+    "schema_version": 1,
+    "transaction_id": "txn_001",
+    "transaction_version": 4,
+    "line_items": [
+      {
+        "barcode": "049000001234",
+        "description": "Test Apples",
+        "unit_price_minor_units": 199,
+        "tax_category_id": "development-standard",
+        "tax_rate_millionths": 100000,
+        "tax_amount_minor_units": 20
+      }
+    ],
+    "subtotal_minor_units": 199,
+    "tax_minor_units": 20,
+    "total_minor_units": 219,
+    "tendered_cash_minor_units": 500,
+    "change_due_minor_units": 281
+  }
+}
+```
+
+Lines are the final retained sale lines after append-only corrections. Legacy
+untaxed lines use JSON null for category/rate and zero line tax. All monetary
+fields are exact integer minor units; Flutter must not reconstruct them.
+
+An unknown stream returns `404 transaction_not_found`. An existing open, paid,
+or voided transaction returns `409 receipt_not_available` with reason
+`transaction_not_completed`. Journal/replay corruption returns the same safe
+`500 transaction_recovery_failed` code as authoritative transaction recovery.
+Receipt Schema v1 contains no status, generated receipt ID, or fabricated
+timestamp. See [Canonical Completed-Sale Receipts](receipts.md).
+
 ## Routing and common errors
 
 Recognized routes with the wrong method return `405 Method Not Allowed` and an
@@ -230,6 +278,7 @@ Recognized routes with the wrong method return `405 Method Not Allowed` and an
 | `/health` | `GET` |
 | `/transaction-commands` | `POST` |
 | `/transactions/{transaction_id}` | `GET` |
+| `/receipts/{transaction_id}` | `GET` |
 
 Unknown paths and malformed transaction query shapes return the common
 structured `404` response:
@@ -261,6 +310,8 @@ streaming/body-size guarantee, readiness endpoint, automatic SQLite busy
 retry, payment behavior, or external-effect exactly-once
 semantics. Flutter now has a typed client and the current start, scan, cash
 tender, pre-payment line removal/void, authoritative tax/change, completion,
-and next-sale cashier slice. Paid reversal/refund and manager authorization are
-not part of this correction model. The current single-category line-tax model
-is not a claim of universal tax compliance.
+next-sale cashier slice, and exact completed-sale receipt lookup. Receipt
+printing, timestamps, broad sale search, paid reversal/refund, and manager
+authorization are not part of the current surface. The current
+single-category line-tax model and on-screen receipt are not claims of
+universal tax or fiscal compliance.

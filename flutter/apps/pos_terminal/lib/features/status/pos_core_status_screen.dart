@@ -4,6 +4,7 @@ import '../../core/pos_core/models/pos_core_health.dart';
 import '../../core/pos_core/pos_core_client.dart';
 import '../cashier/cashier_screen.dart';
 import '../cashier/cashier_session_controller.dart';
+import '../receipt/receipt_lookup_screen.dart';
 
 final ButtonStyle _primaryStatusActionStyle = FilledButton.styleFrom(
   minimumSize: const Size(0, 56),
@@ -45,8 +46,18 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
   void _openRegister() {
     Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (context) =>
-            CashierScreen(controller: widget.cashierController),
+        builder: (context) => CashierScreen(
+          controller: widget.cashierController,
+          client: widget.client,
+        ),
+      ),
+    );
+  }
+
+  void _openReceiptLookup() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) => ReceiptLookupScreen(client: widget.client),
       ),
     );
   }
@@ -115,6 +126,12 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
                   onPressed: _openRegister,
                   icon: const Icon(Icons.point_of_sale),
                   label: const Text('Open Register'),
+                ),
+                OutlinedButton.icon(
+                  style: _secondaryStatusActionStyle,
+                  onPressed: _openReceiptLookup,
+                  icon: const Icon(Icons.receipt_long_outlined),
+                  label: const Text('Lookup Completed Sale'),
                 ),
                 OutlinedButton.icon(
                   style: _secondaryStatusActionStyle,

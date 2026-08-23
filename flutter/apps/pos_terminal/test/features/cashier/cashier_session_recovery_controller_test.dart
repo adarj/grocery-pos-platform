@@ -3,6 +3,7 @@ import 'dart:collection';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pos_terminal/core/pos_core/models/command_result.dart';
+import 'package:pos_terminal/core/pos_core/models/canonical_receipt.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_failure.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_health.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_command.dart';
@@ -26,6 +27,11 @@ final class RecordingClient implements PosCoreClient {
   final Queue<TransactionHandler> transactionHandlers = Queue();
   final List<TransactionCommand> commands = [];
   final List<String> reads = [];
+
+  @override
+  Future<CanonicalReceipt> fetchReceipt(String transactionId) {
+    throw UnimplementedError();
+  }
 
   @override
   Future<PosCoreHealth> fetchHealth() => throw UnimplementedError();

@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import 'models/command_result.dart';
+import 'models/canonical_receipt.dart';
 import 'models/json_fields.dart';
 import 'models/pos_core_failure.dart';
 import 'models/pos_core_health.dart';
@@ -130,6 +131,52 @@ final class HttpPosCoreClient implements PosCoreClient {
 
     throw const PosCoreInvalidResponseFailure(
       'Transaction query response has neither transaction nor error.',
+    );
+  }
+
+  @override
+  Future<CanonicalReceipt> fetchReceipt(String transactionId) async {
+    if (transactionId.isEmpty) {
+      throw ArgumentError.value(
+        transactionId,
+        'transactionId',
+        'must not be empty',
+      );
+    }
+
+    final encodedId = Uri.encodeComponent(transactionId);
+    final response = await _get(baseUri.resolve('/receipts/$encodedId'));
+    final body = _decodeObject(response);
+    final ok = requireJsonBool(body, 'ok', 'receipt query response');
+
+    if (response.statusCode == 200 && body.containsKey('receipt')) {
+      if (!ok) {
+        throw const PosCoreInvalidResponseFailure(
+          'A successful receipt query response must have ok=true.',
+        );
+      }
+      final receipt = CanonicalReceipt.fromJson(
+        expectJsonObject(body['receipt'], 'receipt query response receipt'),
+      );
+      if (receipt.transactionId != transactionId) {
+        throw const PosCoreInvalidResponseFailure(
+          'Receipt response identity does not match the request.',
+        );
+      }
+      return receipt;
+    }
+
+    if (body.containsKey('error')) {
+      if (ok) {
+        throw const PosCoreInvalidResponseFailure(
+          'A receipt query error response cannot have ok=true.',
+        );
+      }
+      throw _serverFailureFrom(body, response.statusCode);
+    }
+
+    throw const PosCoreInvalidResponseFailure(
+      'Receipt query response has neither receipt nor error.',
     );
   }
 

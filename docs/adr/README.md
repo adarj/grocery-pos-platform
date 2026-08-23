@@ -20,3 +20,4 @@ ADRs document important architectural decisions, their context, and their conseq
 - [ADR-0012: Use an atomic local catalog snapshot for checkout reference data](0012-use-atomic-local-catalog-snapshot-for-checkout-reference-data.md)
 - [ADR-0013: Snapshot exact line tax in transaction events](0013-snapshot-exact-line-tax-in-transaction-events.md)
 - [ADR-0014: Represent cashier corrections as append-only transaction events](0014-represent-cashier-corrections-as-append-only-transaction-events.md)
+- [ADR-0015: Derive canonical receipts from completed transaction replay](0015-derive-canonical-receipts-from-completed-transaction-replay.md)

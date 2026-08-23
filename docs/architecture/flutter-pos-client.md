@@ -2,11 +2,12 @@
 
 ## Status
 
-The Flutter `pos_terminal` implements a typed client for the three current
+The Flutter `pos_terminal` implements a typed client for the four current
 local POS Core routes, a cashier-session application controller, and the
 current cash-sale cashier slice: start, scan, cash tender, authoritative paid
 state/change, completion, open-sale line removal/void, crash-safe
-command-intent recovery, and explicit next-sale session transition.
+command-intent recovery, explicit next-sale session transition, and read-only
+canonical completed-sale receipt lookup.
 
 The backend wire contract remains authoritative and is documented in
 [Transaction HTTP API v1](transaction-http-api-v1.md). Command retry semantics
@@ -20,6 +21,7 @@ are governed by
 - reading process health;
 - executing one typed transaction command;
 - reading current authoritative transaction state.
+- reading a canonical completed-sale receipt by exact transaction ID.
 
 Widgets do not receive raw `http.Response` values or package HTTP exceptions.
 Flutter owns presentation and cashier intent orchestration; it does not
@@ -35,6 +37,7 @@ lib/
   core/pos_core/                    typed client boundary and HTTP adapter
     models/                         wire-facing immutable values
   features/cashier/                 session state, recovery, orchestration, UI
+  features/receipt/                 read-only receipt lookup and presentation
   features/status/                  health gateway to the cashier
 ```
 
@@ -332,6 +335,28 @@ renders all three summary values independently. Tender and change are nullable
 until the backend reports them. The client does not derive totals or synthesize
 an empty transaction after a failed read.
 
+## Canonical receipt reads
+
+`CanonicalReceipt` and `CanonicalReceiptLine` strictly parse Receipt Schema v1.
+They preserve the backend's final stream version, retained line order,
+sale-time price/tax fields, transaction totals, cash, and change. A legacy line
+retains paired null category/rate metadata and zero stored line tax. Flutter
+does not recalculate consistency: subtotal, tax, total, tender, and change are
+rendered independently from the response.
+
+`fetchReceipt(transactionId)` is a query, not a mutation. It generates no
+command ID or expected version, receives no same-command retry semantics, and
+never touches `CashierSessionStore`. Explicitly repeating a failed GET is safe.
+
+An authoritative completed cashier view exposes `View Receipt`, which opens a
+dedicated screen and fetches the receipt from POS Core. It does not copy the
+visible `TransactionSnapshot`. The connected gateway separately exposes
+`Lookup Completed Sale`; lookup sends the exact submitted transaction ID only
+after Enter/button activation and performs no normalization, case folding, or
+search-as-you-type. Unknown and non-completed transactions receive distinct
+safe messages. A failed receipt read leaves the completed cashier session
+unchanged. Voided transactions do not expose View Receipt.
+
 ## Failures and uncertain mutations
 
 The client distinguishes:
@@ -379,6 +404,10 @@ persisted pending command, and GET-only restoration when pending is null. It als
 a real accepted scan whose local pending marker remains stale across POS Core
 restart: retrying that exact restored command resolves through the durable
 backend receipt and the authoritative basket contains the item exactly once.
+It also loads a corrected completed-sale receipt through real HTTP, verifies
+semantic receipt equality after POS Core restart, rejects a voided receipt,
+and proves that replacing the current persistent catalog/tax snapshot cannot
+change an old receipt's sale-time facts.
 
 These tests remain outside ordinary `flutter test` discovery. The fast Flutter
 unit/widget suite continues to use deterministic clients, while
@@ -390,7 +419,8 @@ and diagnostics are documented in
 
 This slice does not implement automatic retry, retry timers, cached/offline
 transaction truth, quantity editing, post-payment refund/reversal, split
-tender, card/external payment behavior, receipt printing, or drawer behavior.
+tender, card/external payment behavior, receipt printing, receipt numbering or
+date/recent-sale search, or drawer behavior.
 Current recovery payloads may contain an opaque barcode, integer cash amount,
 or nonnegative removal line index; void and lifecycle commands have empty
 payloads. The recovery record is never logged.

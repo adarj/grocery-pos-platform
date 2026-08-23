@@ -112,6 +112,15 @@ final class RealPosCoreFixture {
     await start();
   }
 
+  Future<void> activateCatalogSnapshot(String catalogPath) async {
+    if (_disposed) {
+      throw StateError(
+        'A disposed POS Core fixture cannot activate a catalog.',
+      );
+    }
+    await _runCatalogActivation(catalogPath);
+  }
+
   Future<void> stop() async {
     final process = _process;
     final exitCodeFuture = _exitCodeFuture;
@@ -208,11 +217,16 @@ final class RealPosCoreFixture {
       return;
     }
 
-    final backendDirectory = _join(repositoryRoot.path, 'pos-backend-racket');
     final catalogPath = _join(
       repositoryRoot.path,
       'pos-backend-racket/fixtures/development/catalog-snapshot-v2.json',
     );
+    await _runCatalogActivation(catalogPath);
+    _catalogPrepared = true;
+  }
+
+  Future<void> _runCatalogActivation(String catalogPath) async {
+    final backendDirectory = _join(repositoryRoot.path, 'pos-backend-racket');
     final process = await Process.start(
       'racket',
       ['scripts/catalog.rkt', 'activate', catalogPath, databasePath],
@@ -241,7 +255,6 @@ final class RealPosCoreFixture {
         '$exitCode.\nstdout:\n$output\nstderr:\n$errorOutput',
       );
     }
-    _catalogPrepared = true;
   }
 }
 

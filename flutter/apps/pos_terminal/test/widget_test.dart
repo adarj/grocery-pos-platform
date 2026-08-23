@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pos_terminal/app/pos_terminal_app.dart';
 import 'package:pos_terminal/core/pos_core/models/command_result.dart';
+import 'package:pos_terminal/core/pos_core/models/canonical_receipt.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_failure.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_health.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_command.dart';
@@ -40,6 +41,11 @@ final class FixedCashierIds implements CashierIdGenerator {
 
 class FakeConnectedPosCoreClient implements PosCoreClient {
   @override
+  Future<CanonicalReceipt> fetchReceipt(String transactionId) {
+    throw UnimplementedError();
+  }
+
+  @override
   Future<PosCoreHealth> fetchHealth() async {
     return const PosCoreHealth(
       ok: true,
@@ -62,6 +68,11 @@ class FakeConnectedPosCoreClient implements PosCoreClient {
 
 class FakeUnavailablePosCoreClient implements PosCoreClient {
   @override
+  Future<CanonicalReceipt> fetchReceipt(String transactionId) {
+    throw UnimplementedError();
+  }
+
+  @override
   Future<PosCoreHealth> fetchHealth() async {
     throw const PosCoreTransportFailure('Connection refused.');
   }
@@ -78,6 +89,11 @@ class FakeUnavailablePosCoreClient implements PosCoreClient {
 }
 
 final class FakeConnectingPosCoreClient implements PosCoreClient {
+  @override
+  Future<CanonicalReceipt> fetchReceipt(String transactionId) {
+    throw UnimplementedError();
+  }
+
   final Completer<PosCoreHealth> health = Completer();
 
   @override
@@ -115,6 +131,7 @@ void main() {
     expect(find.text('POS Core Connected'), findsOneWidget);
     expect(find.text('grocery-pos-core 0.0.0-dev (dev)'), findsOneWidget);
     expect(find.text('Open Register'), findsOneWidget);
+    expect(find.text('Lookup Completed Sale'), findsOneWidget);
     expect(find.text('Refresh'), findsOneWidget);
     expect(
       tester.getSize(find.widgetWithText(FilledButton, 'Open Register')).height,
@@ -158,5 +175,22 @@ void main() {
 
     expect(find.text('Grocery POS'), findsOneWidget);
     expect(find.text('Start Sale'), findsOneWidget);
+  });
+
+  testWidgets('connected gateway opens exact completed-sale lookup', (
+    tester,
+  ) async {
+    await tester.pumpWidget(testApp(FakeConnectedPosCoreClient()));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Lookup Completed Sale'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Lookup Completed Sale'), findsOneWidget);
+    expect(
+      find.byKey(const Key('receipt-transaction-id-field')),
+      findsOneWidget,
+    );
+    expect(find.text('Find Receipt'), findsOneWidget);
   });
 }

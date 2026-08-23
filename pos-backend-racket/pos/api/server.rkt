@@ -3,6 +3,7 @@
 (require net/url
          web-server/http
          "http-response.rkt"
+         "receipt-http.rkt"
          "transaction-http.rkt"
          "../application/transaction-service.rkt"
          "../support/health.rkt")
@@ -36,6 +37,12 @@
        (string? (second path))
        (positive? (string-length (second path)))))
 
+(define (receipt-query-path? path)
+  (and (= (length path) 2)
+       (equal? (first path) "receipts")
+       (string? (second path))
+       (positive? (string-length (second path)))))
+
 (define (make-app transaction-service)
   (unless (transaction-service? transaction-service)
     (raise-argument-error
@@ -59,6 +66,13 @@
       [(transaction-query-path? path)
        (if (equal? method #"GET")
            (handle-transaction-query-request
+            transaction-service
+            (second path))
+           (method-not-allowed-response #"GET"))]
+
+      [(receipt-query-path? path)
+       (if (equal? method #"GET")
+           (handle-receipt-query-request
             transaction-service
             (second path))
            (method-not-allowed-response #"GET"))]

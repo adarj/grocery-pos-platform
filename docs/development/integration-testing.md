@@ -60,6 +60,11 @@ removes a middle line through the production command path, retries an already
 accepted removal with the same ID across POS Core restart to prove only one
 line is removed, and verifies that a voided basket/tax projection survives
 restart before explicit Next Sale creates a clean transaction.
+Canonical receipt scenarios fetch a corrected completed sale through the real
+HTTP client, compare its semantic value across POS Core restart, reject a
+voided lookup, and explicitly activate a replacement catalog/tax snapshot to
+prove the old receipt still uses sale-time journal facts. Replacement is
+scenario-controlled; ordinary fixture restart never re-seeds the catalog.
 
 If catalog activation fails, the fixture fails before starting the server and
 reports bounded CLI output. The fixture activates Catalog Snapshot Schema v2,

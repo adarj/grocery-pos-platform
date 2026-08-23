@@ -3,6 +3,7 @@ import 'dart:collection';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pos_terminal/core/pos_core/models/command_result.dart';
+import 'package:pos_terminal/core/pos_core/models/canonical_receipt.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_failure.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_health.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_command.dart';
@@ -19,6 +20,11 @@ typedef TransactionHandler =
     Future<TransactionSnapshot> Function(String transactionId);
 
 final class FakePosCoreClient implements PosCoreClient {
+  @override
+  Future<CanonicalReceipt> fetchReceipt(String transactionId) {
+    throw UnimplementedError();
+  }
+
   final Queue<CommandHandler> commandHandlers = Queue();
   final Queue<TransactionHandler> transactionHandlers = Queue();
   final List<TransactionCommand> commands = [];

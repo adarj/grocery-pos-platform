@@ -1,8 +1,10 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pos_terminal/core/pos_core/http_pos_core_client.dart';
 import 'package:pos_terminal/core/pos_core/models/command_result.dart';
+import 'package:pos_terminal/core/pos_core/models/pos_core_failure.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_command.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_snapshot.dart';
 import 'package:pos_terminal/features/cashier/cashier_id_generator.dart';
@@ -263,6 +265,26 @@ void main() {
       expect(completed.status, TransactionStatus.completed);
       expect(completed.lineItems, hasLength(2));
       expect(completed.totalMinorUnits, 438);
+
+      final receipt = await cashier.client.fetchReceipt(
+        completed.transactionId,
+      );
+      expect(receipt.transactionId, completed.transactionId);
+      expect(receipt.transactionVersion, 7);
+      expect(receipt.lineItems, hasLength(2));
+      for (final line in receipt.lineItems) {
+        expect(line.barcode, _developmentBarcode);
+        expect(line.description, _developmentDescription);
+        expect(line.unitPriceMinorUnits, 199);
+        expect(line.taxCategoryId, 'development-standard');
+        expect(line.taxRateMillionths, 100000);
+        expect(line.taxAmountMinorUnits, 20);
+      }
+      expect(receipt.subtotalMinorUnits, 398);
+      expect(receipt.taxMinorUnits, 40);
+      expect(receipt.totalMinorUnits, 438);
+      expect(receipt.tenderedCashMinorUnits, 500);
+      expect(receipt.changeDueMinorUnits, 62);
     },
   );
 
@@ -339,6 +361,16 @@ void main() {
     expect(beforeRestart.totalMinorUnits, 219);
     expect(beforeRestart.tenderedCashMinorUnits, isNull);
     expect(beforeRestart.changeDueMinorUnits, isNull);
+    await expectLater(
+      firstCashier.client.fetchReceipt(voidedTransactionId),
+      throwsA(
+        isA<PosCoreServerFailure>().having(
+          (failure) => failure.code,
+          'code',
+          'receipt_not_available',
+        ),
+      ),
+    );
 
     firstCashier.close();
     await fixture.restart();
@@ -607,6 +639,118 @@ void main() {
     expect(restored.lineItems, hasLength(1));
     expect(restoredCashier.ids.commandIdCalls, 0);
   });
+
+  test(
+    'completed canonical receipt is identical after POS Core restart',
+    () async {
+      final fixture = await _startFixture();
+      final firstCashier = await _createCashier(
+        fixture,
+        'receipt_restart_before',
+      );
+
+      await firstCashier.controller.startTransaction();
+      await firstCashier.controller.scanBarcode(_developmentBarcode);
+      await firstCashier.controller.tenderCash(500);
+      await firstCashier.controller.completeTransaction();
+      final transactionId = _snapshot(firstCashier.controller).transactionId;
+      final before = await firstCashier.client.fetchReceipt(transactionId);
+
+      firstCashier.close();
+      await fixture.restart();
+      final restoredCashier = await _createCashier(
+        fixture,
+        'receipt_restart_after',
+      );
+      final after = await restoredCashier.client.fetchReceipt(transactionId);
+
+      expect(after.transactionId, before.transactionId);
+      expect(after.transactionVersion, before.transactionVersion);
+      expect(after.lineItems, hasLength(before.lineItems.length));
+      expect(after.lineItems.single.barcode, before.lineItems.single.barcode);
+      expect(
+        after.lineItems.single.description,
+        before.lineItems.single.description,
+      );
+      expect(
+        after.lineItems.single.unitPriceMinorUnits,
+        before.lineItems.single.unitPriceMinorUnits,
+      );
+      expect(
+        after.lineItems.single.taxCategoryId,
+        before.lineItems.single.taxCategoryId,
+      );
+      expect(
+        after.lineItems.single.taxRateMillionths,
+        before.lineItems.single.taxRateMillionths,
+      );
+      expect(
+        after.lineItems.single.taxAmountMinorUnits,
+        before.lineItems.single.taxAmountMinorUnits,
+      );
+      expect(after.subtotalMinorUnits, before.subtotalMinorUnits);
+      expect(after.taxMinorUnits, before.taxMinorUnits);
+      expect(after.totalMinorUnits, before.totalMinorUnits);
+      expect(after.tenderedCashMinorUnits, before.tenderedCashMinorUnits);
+      expect(after.changeDueMinorUnits, before.changeDueMinorUnits);
+    },
+  );
+
+  test(
+    'completed receipt ignores later persistent catalog and tax replacement',
+    () async {
+      final fixture = await _startFixture();
+      final cashier = await _createCashier(fixture, 'receipt_catalog_change');
+
+      await cashier.controller.startTransaction();
+      await cashier.controller.scanBarcode(_developmentBarcode);
+      await cashier.controller.tenderCash(500);
+      await cashier.controller.completeTransaction();
+      final transactionId = _snapshot(cashier.controller).transactionId;
+
+      final replacementFile = File(
+        '${fixture.temporaryDirectory.path}${Platform.pathSeparator}'
+        'replacement-catalog-v2.json',
+      );
+      await replacementFile.writeAsString(
+        jsonEncode({
+          'schema_version': 2,
+          'tax_categories': [
+            {
+              'tax_category_id': 'replacement-exempt',
+              'description': 'Replacement development exempt tax',
+              'rate_millionths': 0,
+            },
+          ],
+          'items': [
+            {
+              'item_id': 'replacement-apples',
+              'description': 'Replacement Apples',
+              'unit_price_minor_units': 299,
+              'active': true,
+              'tax_category_id': 'replacement-exempt',
+            },
+          ],
+          'barcodes': [
+            {'barcode': _developmentBarcode, 'item_id': 'replacement-apples'},
+          ],
+        }),
+        flush: true,
+      );
+      await fixture.activateCatalogSnapshot(replacementFile.path);
+
+      final receipt = await cashier.client.fetchReceipt(transactionId);
+      final line = receipt.lineItems.single;
+      expect(line.description, _developmentDescription);
+      expect(line.unitPriceMinorUnits, 199);
+      expect(line.taxCategoryId, 'development-standard');
+      expect(line.taxRateMillionths, 100000);
+      expect(line.taxAmountMinorUnits, 20);
+      expect(receipt.subtotalMinorUnits, 199);
+      expect(receipt.taxMinorUnits, 20);
+      expect(receipt.totalMinorUnits, 219);
+    },
+  );
 
   test(
     'fixture shutdown and temporary-directory cleanup are idempotent',

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pos_terminal/core/pos_core/models/command_result.dart';
+import 'package:pos_terminal/core/pos_core/models/canonical_receipt.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_failure.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_health.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_command.dart';
@@ -19,12 +20,25 @@ typedef CommandHandler =
     Future<PosCommandResult> Function(TransactionCommand command);
 typedef TransactionHandler =
     Future<TransactionSnapshot> Function(String transactionId);
+typedef ReceiptHandler =
+    Future<CanonicalReceipt> Function(String transactionId);
 
 final class FakeCashierClient implements PosCoreClient {
   final Queue<CommandHandler> commandHandlers = Queue();
   final Queue<TransactionHandler> transactionHandlers = Queue();
+  final Queue<ReceiptHandler> receiptHandlers = Queue();
   final List<TransactionCommand> commands = [];
   final List<String> reads = [];
+  final List<String> receiptReads = [];
+
+  @override
+  Future<CanonicalReceipt> fetchReceipt(String transactionId) {
+    receiptReads.add(transactionId);
+    if (receiptHandlers.isEmpty) {
+      throw StateError('No receipt response queued.');
+    }
+    return receiptHandlers.removeFirst()(transactionId);
+  }
 
   @override
   Future<PosCoreHealth> fetchHealth() {
@@ -174,6 +188,29 @@ TransactionSnapshot snapshot({
   );
 }
 
+CanonicalReceipt canonicalReceipt({String transactionId = 'txn-1'}) {
+  return CanonicalReceipt(
+    schemaVersion: 1,
+    transactionId: transactionId,
+    transactionVersion: 6,
+    lineItems: const [
+      CanonicalReceiptLine(
+        barcode: 'receipt-barcode',
+        description: 'Receipt-only Apples',
+        unitPriceMinorUnits: 321,
+        taxCategoryId: 'receipt-tax',
+        taxRateMillionths: 100000,
+        taxAmountMinorUnits: 32,
+      ),
+    ],
+    subtotalMinorUnits: 321,
+    taxMinorUnits: 32,
+    totalMinorUnits: 353,
+    tenderedCashMinorUnits: 500,
+    changeDueMinorUnits: 147,
+  );
+}
+
 ({
   FakeCashierClient client,
   CashierSessionController controller,
@@ -215,8 +252,12 @@ Future<void> pumpCashier(
   WidgetTester tester,
   CashierSessionController controller, {
   TextScaler? textScaler,
+  PosCoreClient? receiptClient,
 }) async {
-  Widget screen = CashierScreen(controller: controller);
+  Widget screen = CashierScreen(
+    controller: controller,
+    client: receiptClient ?? FakeCashierClient(),
+  );
   if (textScaler != null) {
     screen = MediaQuery(
       data: MediaQueryData(textScaler: textScaler),
@@ -2340,5 +2381,126 @@ void main() {
     expect(find.text('Retry Command'), findsNothing);
     expect(find.text('Sale Voided'), findsNothing);
     expect(testFixture.client.commands, hasLength(2));
+  });
+
+  testWidgets('completed sale loads View Receipt through receipt query', (
+    tester,
+  ) async {
+    final store = MemoryCashierSessionStore();
+    final testFixture = fixture(
+      commandIds: const ['cmd-start'],
+      sessionStore: store,
+    );
+    await establishTransaction(
+      testFixture,
+      snapshot(
+        status: TransactionStatus.completed,
+        version: 6,
+        lineItems: const [
+          TransactionLineItem(
+            barcode: 'snapshot-barcode',
+            description: 'Snapshot Basket Item',
+            unitPriceMinorUnits: 1,
+          ),
+        ],
+        subtotal: 1,
+        tax: 2,
+        total: 3,
+        tenderedCash: 4,
+        changeDue: 5,
+      ),
+    );
+    final persistedBefore = store.persisted;
+    testFixture.client.receiptHandlers.add(
+      (transactionId) async => canonicalReceipt(transactionId: transactionId),
+    );
+    await pumpCashier(
+      tester,
+      testFixture.controller,
+      receiptClient: testFixture.client,
+    );
+
+    expect(find.text('View Receipt'), findsOneWidget);
+    await tester.ensureVisible(find.text('View Receipt'));
+    await tester.tap(find.text('View Receipt'));
+    await tester.pumpAndSettle();
+
+    expect(testFixture.client.receiptReads, ['txn-1']);
+    expect(testFixture.client.commands, hasLength(1));
+    expect(testFixture.ids.commandIdCalls, 1);
+    expect(testFixture.ids.transactionIdCalls, 1);
+    expect(
+      testFixture.controller.state.snapshot!.status,
+      TransactionStatus.completed,
+    );
+    expect(find.text('Receipt-only Apples'), findsOneWidget);
+    expect(find.text('Snapshot Basket Item'), findsNothing);
+    expect(find.text(r'Subtotal $3.21'), findsOneWidget);
+    expect(find.text(r'Total $3.53'), findsOneWidget);
+    expect(
+      store.persisted!.activeTransactionId,
+      persistedBefore!.activeTransactionId,
+    );
+    expect(store.persisted!.pendingCommand, persistedBefore.pendingCommand);
+  });
+
+  testWidgets('receipt query failure leaves completed cashier state intact', (
+    tester,
+  ) async {
+    final testFixture = fixture(commandIds: const ['cmd-start']);
+    await establishTransaction(
+      testFixture,
+      snapshot(
+        status: TransactionStatus.completed,
+        version: 4,
+        tenderedCash: 500,
+        changeDue: 500,
+      ),
+    );
+    testFixture.client.receiptHandlers.add(
+      (_) async => throw const PosCoreTransportFailure('offline'),
+    );
+    await pumpCashier(
+      tester,
+      testFixture.controller,
+      receiptClient: testFixture.client,
+    );
+
+    await tester.ensureVisible(find.text('View Receipt'));
+    await tester.tap(find.text('View Receipt'));
+    await tester.pumpAndSettle();
+    expect(
+      find.text('Unable to load the completed sale receipt.'),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.byTooltip('Back'));
+    await tester.pumpAndSettle();
+    expect(find.text('Sale Complete'), findsOneWidget);
+    expect(find.text('Next Sale'), findsOneWidget);
+    expect(
+      testFixture.controller.state.snapshot!.status,
+      TransactionStatus.completed,
+    );
+    expect(testFixture.client.commands, hasLength(1));
+  });
+
+  testWidgets('voided sale does not offer a completed-sale receipt', (
+    tester,
+  ) async {
+    final testFixture = fixture(commandIds: const ['cmd-start']);
+    await establishTransaction(
+      testFixture,
+      snapshot(status: TransactionStatus.voided, version: 2),
+    );
+    await pumpCashier(
+      tester,
+      testFixture.controller,
+      receiptClient: testFixture.client,
+    );
+
+    expect(find.text('Sale Voided'), findsOneWidget);
+    expect(find.text('View Receipt'), findsNothing);
+    expect(testFixture.client.receiptReads, isEmpty);
   });
 }

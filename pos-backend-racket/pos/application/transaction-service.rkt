@@ -3,6 +3,7 @@
 (require (prefix-in db: db)
          "transaction-command-receipt.rkt"
          "transaction-command.rkt"
+         "../domain/canonical-receipt.rkt"
          "../domain/transaction.rkt"
          "../persistence/sqlite-transaction-event-store.rkt"
          "../persistence/transaction-command-receipt-store.rkt"
@@ -11,6 +12,7 @@
 (provide make-transaction-service
          transaction-service?
          transaction-service-load-transaction
+         transaction-service-load-canonical-receipt
          transaction-service-execute-command
          transaction-service-success?
          transaction-service-success-transaction
@@ -24,6 +26,13 @@
          transaction-service-recovery-failed-position
          transaction-service-recovery-failed-detail
          transaction-service-recovery-failed-message
+         transaction-service-receipt-success?
+         transaction-service-receipt-success-receipt
+         transaction-service-receipt-not-found?
+         transaction-service-receipt-not-found-transaction-id
+         transaction-service-receipt-not-available?
+         transaction-service-receipt-not-available-transaction-id
+         transaction-service-receipt-not-available-reason
          transaction-service-command-resolved?
          transaction-service-command-resolved-receipt
          transaction-service-command-id-reused?
@@ -46,6 +55,18 @@
 
 (struct transaction-service-recovery-failed
   (transaction-id stage code position detail message)
+  #:transparent)
+
+;; Receipt reads remain distinct from transaction snapshots because their
+;; eligibility and wire model are narrower, while recovery failures retain the
+;; same journal/replay result used by the authoritative transaction query.
+(struct transaction-service-receipt-success (receipt)
+  #:transparent)
+
+(struct transaction-service-receipt-not-found (transaction-id)
+  #:transparent)
+
+(struct transaction-service-receipt-not-available (transaction-id reason)
   #:transparent)
 
 ;; Mutation results expose only the durable command outcome. In particular, a
@@ -146,6 +167,37 @@
     [else
      (error who "event store returned an unsupported load result: ~e"
             journal-result)]))
+
+(define (transaction-service-load-canonical-receipt service transaction-id)
+  (define current
+    (transaction-service-load-transaction service transaction-id))
+  (cond
+    [(transaction-service-success? current)
+     (define derived
+       (derive-canonical-receipt
+        (transaction-service-success-transaction current)
+        (transaction-service-success-version current)))
+     (cond
+       [(receipt-created? derived)
+        (transaction-service-receipt-success
+         (receipt-created-receipt derived))]
+       [(receipt-unavailable? derived)
+        (transaction-service-receipt-not-available
+         transaction-id
+         (receipt-unavailable-reason derived))]
+       [else
+        (error
+         'transaction-service-load-canonical-receipt
+         "receipt derivation returned an unsupported result: ~e"
+         derived)])]
+    [(transaction-service-not-found? current)
+     (transaction-service-receipt-not-found transaction-id)]
+    [(transaction-service-recovery-failed? current) current]
+    [else
+     (error
+      'transaction-service-load-canonical-receipt
+      "transaction query returned an unsupported result: ~e"
+      current)]))
 
 (define (domain-rejection-code->outcome-code code)
   (case code
