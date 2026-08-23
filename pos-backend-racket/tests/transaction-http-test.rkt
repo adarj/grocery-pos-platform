@@ -559,6 +559,106 @@ SQL
        (check-equal? (hash-ref completed 'tendered_cash_minor_units) 500)
        (check-equal? (hash-ref completed 'change_due_minor_units) 301))))
 
+  (test-case "remove command returns durable outcomes and authoritative basket"
+    (call-with-http-app
+     (lambda (_connection _service app)
+       (accepted-start app "txn-http-remove")
+       (for ([index (in-range 3)])
+         (accepted-scan app
+                        "txn-http-remove"
+                        (add1 index)
+                        (format "cmd-http-remove-scan-~a" index)))
+       (define remove-command
+         (remove-line-item-command
+          "cmd-http-remove" "txn-http-remove" 4 1))
+       (check-command-result
+        (post-command app remove-command)
+        200 #t "cmd-http-remove" "txn-http-remove"
+        "accepted" "accepted" 5)
+
+       (define transaction
+         (hash-ref (response-json (get-transaction app "txn-http-remove"))
+                   'transaction))
+       (check-equal? (hash-ref transaction 'version) 5)
+       (check-equal? (length (hash-ref transaction 'line_items)) 2)
+       (check-equal? (hash-ref transaction 'subtotal_minor_units) 398)
+       (check-equal? (hash-ref transaction 'tax_minor_units) 0)
+       (check-equal? (hash-ref transaction 'total_minor_units) 398)
+
+       (check-command-result
+        (post-command
+         app
+         (remove-line-item-command
+          "cmd-http-remove-miss" "txn-http-remove" 5 9))
+        409 #f "cmd-http-remove-miss" "txn-http-remove"
+        "domain_rejected" "line_item_not_found" 5)
+       (check-command-result
+        (post-command
+         app
+         (remove-line-item-command
+          "cmd-http-remove-stale" "txn-http-remove" 4 0))
+        409 #f "cmd-http-remove-stale" "txn-http-remove"
+        "version_conflict" "stale_expected_version" 5))))
+
+  (test-case "void command produces an authoritative terminal projection"
+    (call-with-http-app
+     (lambda (_connection _service app)
+       (accepted-start app "txn-http-void")
+       (accepted-scan app "txn-http-void" 1 "cmd-http-void-scan")
+       (define void-command
+         (void-transaction-command
+          "cmd-http-void" "txn-http-void" 2))
+       (check-command-result
+        (post-command app void-command)
+        200 #t "cmd-http-void" "txn-http-void"
+        "accepted" "accepted" 3)
+
+       (define transaction
+         (hash-ref (response-json (get-transaction app "txn-http-void"))
+                   'transaction))
+       (check-equal? (hash-ref transaction 'status) "voided")
+       (check-equal? (length (hash-ref transaction 'line_items)) 1)
+       (check-equal? (hash-ref transaction 'subtotal_minor_units) 199)
+       (check-equal? (hash-ref transaction 'tax_minor_units) 0)
+       (check-equal? (hash-ref transaction 'total_minor_units) 199)
+       (check-equal? (hash-ref transaction 'tendered_cash_minor_units) 'null)
+       (check-equal? (hash-ref transaction 'change_due_minor_units) 'null)
+
+       (check-command-result
+        (post-command
+         app
+         (void-transaction-command
+          "cmd-http-void-again" "txn-http-void" 3))
+        409 #f "cmd-http-void-again" "txn-http-void"
+        "domain_rejected" "invalid_transaction_state" 3))))
+
+  (test-case "malformed correction payloads fail before command execution"
+    (call-with-http-app
+     (lambda (_connection _service app)
+       (for ([body
+              (in-list
+               (list
+                #"{\"schema_version\":1,\"command_id\":\"cmd\",\"transaction_id\":\"txn\",\"expected_version\":1,\"command_type\":\"remove_line_item\",\"payload\":{\"line_index\":-1}}"
+                #"{\"schema_version\":1,\"command_id\":\"cmd\",\"transaction_id\":\"txn\",\"expected_version\":1,\"command_type\":\"remove_line_item\",\"payload\":{\"line_index\":1.5}}"))])
+         (define response
+           (post-command
+            app
+            (start-transaction-command "unused" "unused" 0)
+            #:body body))
+         (check-safe-error response 400 "invalid_transaction_command")
+         (check-equal? (hash-ref (error-result response) 'reason)
+                       "invalid_line_index"))
+
+       (define unexpected-void
+         (post-command
+          app
+          (start-transaction-command "unused" "unused" 0)
+          #:body
+          #"{\"schema_version\":1,\"command_id\":\"cmd\",\"transaction_id\":\"txn\",\"expected_version\":1,\"command_type\":\"void_transaction\",\"payload\":{\"unexpected\":true}}"))
+       (check-safe-error unexpected-void 400 "invalid_transaction_command")
+       (check-equal? (hash-ref (error-result unexpected-void) 'reason)
+                     "unexpected_field"))))
+
   (test-case "query not found and recovery failure are safe"
     (call-with-http-app
      (lambda (connection _service app)

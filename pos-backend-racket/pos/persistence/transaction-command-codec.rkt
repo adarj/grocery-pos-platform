@@ -54,7 +54,13 @@
          'amount_minor_units
          (money-minor-units (tender-cash-command-amount command))))]
       [(complete-transaction-command? command)
-       (values "complete_transaction" (hasheq))]))
+       (values "complete_transaction" (hasheq))]
+      [(remove-line-item-command? command)
+       (values "remove_line_item"
+               (hasheq 'line_index
+                       (remove-line-item-command-line-index command)))]
+      [(void-transaction-command? command)
+       (values "void_transaction" (hasheq))]))
 
   (hasheq 'schema_version schema-version
           'command_id (transaction-command-command-id command)
@@ -178,6 +184,29 @@
                                expected-version
                                amount)))]))
 
+(define (decode-remove-payload payload
+                               command-id
+                               transaction-id
+                               expected-version)
+  (define shape-failure
+    (validate-exact-fields payload
+                           '(line_index)
+                           "remove_line_item payload"))
+  (cond
+    [shape-failure shape-failure]
+    [else
+     (define line-index (hash-ref payload 'line_index))
+     (if (and (exact-integer? line-index)
+              (>= line-index 0))
+         (command-decode-success
+          (remove-line-item-command command-id
+                                    transaction-id
+                                    expected-version
+                                    line-index))
+         (command-decode-failure
+          'invalid-line-index
+          "field 'line_index must contain an exact nonnegative integer"))]))
+
 (define (decode-command-payload command-type
                                 payload
                                 command-id
@@ -210,6 +239,19 @@
         (complete-transaction-command command-id
                                       transaction-id
                                       expected-version)))]
+    [(string=? command-type "remove_line_item")
+     (decode-remove-payload payload
+                            command-id
+                            transaction-id
+                            expected-version)]
+    [(string=? command-type "void_transaction")
+     (decode-empty-payload
+      payload
+      "void_transaction payload"
+      (lambda ()
+        (void-transaction-command command-id
+                                  transaction-id
+                                  expected-version)))]
     [else
      (command-decode-failure
       'unknown-command-type

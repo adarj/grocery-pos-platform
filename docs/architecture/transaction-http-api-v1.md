@@ -66,6 +66,14 @@ Malformed transport data receives `400 Bad Request` and creates no command
 receipt. The response never echoes the invalid body or exposes the codec's
 free-form diagnostic.
 
+The six current Schema v1 command types are `start_transaction`,
+`scan_barcode`, `tender_cash`, `complete_transaction`, `remove_line_item`, and
+`void_transaction`. Removal carries exactly one nonnegative, zero-based
+`line_index`; void carries an empty payload. The expected stream version binds
+a line index to the authoritative line list the caller observed. Structural
+index errors return `400`, while an exact nonnegative index that is not present
+is a durable domain rejection.
+
 ## Durable command result
 
 A resolved command returns only its durable original receipt metadata:
@@ -101,6 +109,7 @@ Durable receipt outcomes map as follows:
 
 `outcome_code` is the stable durable application code, such as
 `unknown_barcode`, `transaction_not_found`, `transaction_already_exists`,
+`line_item_not_found`, `invalid_transaction_state`,
 `stale_expected_version`, or `stream_version_conflict`.
 
 The command endpoint uses `200`, not `201`, for every accepted command because
@@ -190,13 +199,20 @@ A successful response is:
 }
 ```
 
-Current status values are exactly `open`, `paid`, and `completed`. All currency
-values are exact JSON integer minor units. `subtotal_minor_units` is the sum of
-stored base line prices, `tax_minor_units` is the sum of stored rounded line
-tax, and `total_minor_units` is their authoritative Racket-calculated sum.
+Current status values are exactly `open`, `paid`, `completed`, and `voided`.
+All currency values are exact JSON integer minor units.
+`subtotal_minor_units` is the sum of stored base line prices,
+`tax_minor_units` is the sum of stored rounded line tax, and
+`total_minor_units` is their authoritative Racket-calculated sum.
 Tender sufficiency and change use that tax-inclusive total. Tender and change
 fields remain present as JSON null before tender. The response contains no
 command receipts, event history, database row IDs, or journal metadata.
+
+An accepted line removal is visible only through a subsequent authoritative
+query. It removes exactly one current line and its stored price/tax
+contribution. A voided projection retains the cancelled line list, subtotal,
+tax, and total, while tender and change remain null. `voided` is terminal; it
+describes a cancelled open basket and is not completed revenue.
 
 A missing transaction returns `404 Not Found` with code
 `transaction_not_found`. A journal or replay recovery failure returns
@@ -244,5 +260,7 @@ authorization, or production security claims. It also does not add a request
 streaming/body-size guarantee, readiness endpoint, automatic SQLite busy
 retry, payment behavior, or external-effect exactly-once
 semantics. Flutter now has a typed client and the current start, scan, cash
-tender, authoritative tax/change, and completion cashier slice. The current
-single-category line-tax model is not a claim of universal tax compliance.
+tender, pre-payment line removal/void, authoritative tax/change, completion,
+and next-sale cashier slice. Paid reversal/refund and manager authorization are
+not part of this correction model. The current single-category line-tax model
+is not a claim of universal tax compliance.

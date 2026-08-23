@@ -4,7 +4,8 @@ import 'pos_core_failure.dart';
 enum TransactionStatus {
   open('open'),
   paid('paid'),
-  completed('completed');
+  completed('completed'),
+  voided('voided');
 
   const TransactionStatus(this.wireName);
 
@@ -15,6 +16,7 @@ enum TransactionStatus {
       'open' => TransactionStatus.open,
       'paid' => TransactionStatus.paid,
       'completed' => TransactionStatus.completed,
+      'voided' => TransactionStatus.voided,
       _ => throw const PosCoreInvalidResponseFailure(
         'Unknown transaction status.',
       ),

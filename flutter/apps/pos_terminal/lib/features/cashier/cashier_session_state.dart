@@ -62,5 +62,7 @@ final class CashierSessionState {
       activeTransactionId != null;
 
   bool get canBeginNextSale =>
-      canExecuteNewMutation && snapshot!.status == TransactionStatus.completed;
+      canExecuteNewMutation &&
+      (snapshot!.status == TransactionStatus.completed ||
+          snapshot!.status == TransactionStatus.voided);
 }

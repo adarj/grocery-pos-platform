@@ -234,6 +234,14 @@ void main() {
         testFixture.controller.completeTransaction(),
         throwsStateError,
       );
+      await expectLater(
+        testFixture.controller.removeLineItem(0),
+        throwsStateError,
+      );
+      await expectLater(
+        testFixture.controller.voidTransaction(),
+        throwsStateError,
+      );
 
       expect(testFixture.ids.commandIdCalls, 0);
       expect(testFixture.ids.transactionIdCalls, 0);
@@ -930,8 +938,124 @@ void main() {
       testFixture.controller.tenderCash(-1),
       throwsArgumentError,
     );
+    await expectLater(
+      testFixture.controller.removeLineItem(-1),
+      throwsArgumentError,
+    );
 
     expect(testFixture.ids.commandIdCalls, 1);
     expect(testFixture.client.commands, hasLength(1));
   });
+
+  test(
+    'correction commands use the trusted snapshot version and one new ID',
+    () async {
+      final testFixture = fixture(
+        commandIds: const ['cmd-start', 'cmd-remove', 'cmd-void'],
+      );
+      await establishTransaction(
+        testFixture,
+        snapshot(transactionId: 'txn-1', version: 7),
+      );
+      testFixture.client.enqueueCommandResult(PosCommandOutcomeKind.accepted);
+      testFixture.client.enqueueSnapshot(
+        snapshot(transactionId: 'txn-1', version: 8),
+      );
+
+      await testFixture.controller.removeLineItem(2);
+
+      final remove = testFixture.client.commands[1] as RemoveLineItemCommand;
+      expect(remove.commandId, 'cmd-remove');
+      expect(remove.transactionId, 'txn-1');
+      expect(remove.expectedVersion, 7);
+      expect(remove.lineIndex, 2);
+
+      testFixture.client.enqueueCommandResult(PosCommandOutcomeKind.accepted);
+      testFixture.client.enqueueSnapshot(
+        snapshot(
+          transactionId: 'txn-1',
+          version: 9,
+          status: TransactionStatus.voided,
+        ),
+      );
+
+      await testFixture.controller.voidTransaction();
+
+      final voidCommand =
+          testFixture.client.commands[2] as VoidTransactionCommand;
+      expect(voidCommand.commandId, 'cmd-void');
+      expect(voidCommand.transactionId, 'txn-1');
+      expect(voidCommand.expectedVersion, 8);
+      expect(
+        testFixture.controller.state.snapshot!.status,
+        TransactionStatus.voided,
+      );
+      expect(testFixture.ids.commandIdCalls, 3);
+    },
+  );
+
+  test(
+    'accepted corrections never update state before authoritative GET',
+    () async {
+      final testFixture = fixture(
+        commandIds: const ['cmd-start', 'cmd-remove', 'cmd-void'],
+      );
+      final original = snapshot(
+        transactionId: 'txn-1',
+        version: 4,
+        lineItems: const [
+          TransactionLineItem(
+            barcode: 'A',
+            description: 'Apples',
+            unitPriceMinorUnits: 199,
+          ),
+        ],
+        subtotalMinorUnits: 199,
+        totalMinorUnits: 199,
+      );
+      await establishTransaction(testFixture, original);
+      final removeResult = Completer<PosCommandResult>();
+      final removeRead = Completer<TransactionSnapshot>();
+      testFixture.client.commandHandlers.add((command) => removeResult.future);
+      testFixture.client.transactionHandlers.add((_) => removeRead.future);
+
+      final removal = testFixture.controller.removeLineItem(0);
+      removeResult.complete(
+        resultFor(testFixture.client.commands.last, outcomeVersion: 5),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(testFixture.controller.state.snapshot, isNull);
+      expect(
+        testFixture.controller.state.activity,
+        CashierSessionActivity.refreshingTransaction,
+      );
+      removeRead.complete(snapshot(transactionId: 'txn-1', version: 5));
+      await removal;
+
+      final voidResult = Completer<PosCommandResult>();
+      final voidRead = Completer<TransactionSnapshot>();
+      testFixture.client.commandHandlers.add((command) => voidResult.future);
+      testFixture.client.transactionHandlers.add((_) => voidRead.future);
+      final voiding = testFixture.controller.voidTransaction();
+      voidResult.complete(
+        resultFor(testFixture.client.commands.last, outcomeVersion: 6),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(testFixture.controller.state.snapshot, isNull);
+      expect(
+        testFixture.controller.state.activity,
+        CashierSessionActivity.refreshingTransaction,
+      );
+      final authoritativeVoided = snapshot(
+        transactionId: 'txn-1',
+        version: 6,
+        status: TransactionStatus.voided,
+      );
+      voidRead.complete(authoritativeVoided);
+      await voiding;
+      expect(testFixture.controller.state.snapshot, same(authoritativeVoided));
+    },
+  );
 }

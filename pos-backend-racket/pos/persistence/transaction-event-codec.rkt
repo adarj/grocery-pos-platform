@@ -78,8 +78,16 @@
         (hasheq
          'amount_minor_units
          (money-minor-units (cash-tendered-amount event))))]
+      [(sale-line-removed? event)
+       (values
+        1
+        "sale_line_removed"
+        (hasheq 'line_index
+                (sale-line-removed-line-index event)))]
       [(transaction-completed? event)
-       (values 1 "transaction_completed" (hasheq))]))
+       (values 1 "transaction_completed" (hasheq))]
+      [(transaction-voided? event)
+       (values 1 "transaction_voided" (hasheq))]))
 
   (hasheq 'schema_version schema-version
           'event_type event-type
@@ -254,6 +262,31 @@
       shape-failure
       (event-decode-success (transaction-completed))))
 
+(define (decode-sale-line-removed payload)
+  (define shape-failure
+    (validate-exact-fields payload
+                           '(line_index)
+                           "sale_line_removed payload"))
+  (cond
+    [shape-failure shape-failure]
+    [else
+     (define line-index (hash-ref payload 'line_index))
+     (if (and (exact-integer? line-index)
+              (>= line-index 0))
+         (event-decode-success (sale-line-removed line-index))
+         (event-decode-failure
+          'invalid-line-index
+          "field 'line_index must contain an exact nonnegative integer"))]))
+
+(define (decode-transaction-voided payload)
+  (define shape-failure
+    (validate-exact-fields payload
+                           '()
+                           "transaction_voided payload"))
+  (if shape-failure
+      shape-failure
+      (event-decode-success (transaction-voided))))
+
 (define (jsexpr->transaction-event value)
   (cond
     [(not (hash? value))
@@ -297,8 +330,12 @@
               (decode-sale-item-added payload)]
              [(string=? event-type "cash_tendered")
               (decode-cash-tendered payload)]
+             [(string=? event-type "sale_line_removed")
+              (decode-sale-line-removed payload)]
              [(string=? event-type "transaction_completed")
               (decode-transaction-completed payload)]
+             [(string=? event-type "transaction_voided")
+              (decode-transaction-voided payload)]
              [else
               (event-decode-failure
                'unknown-event-type

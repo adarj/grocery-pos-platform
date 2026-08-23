@@ -822,6 +822,164 @@ SQL
               test-sale-item-event
               test-sale-item-event)))))
 
+  (test-case "accepted remove appends one correction and same-ID retry is inert"
+    (call-with-store
+     (lambda (connection)
+       (define lookup-count 0)
+       (define service
+         (make-test-service
+          connection
+          #:catalog-lookup
+          (lambda (barcode)
+            (set! lookup-count (add1 lookup-count))
+            (fake-catalog-lookup barcode))))
+       (execute-start! service "txn-remove" "cmd-remove-start")
+       (for ([index (in-range 3)])
+         (execute-scan! service
+                        "txn-remove"
+                        (format "cmd-remove-scan-~a" index)
+                        (add1 index)
+                        test-barcode))
+       (define command
+         (remove-line-item-command
+          "cmd-remove-once" "txn-remove" 4 1))
+       (define lookups-before lookup-count)
+       (define original
+         (resolved-receipt
+          (transaction-service-execute-command service command)))
+       (define retried
+         (resolved-receipt
+          (transaction-service-execute-command service command)))
+
+       (check-equal? original retried)
+       (check-outcome original command 'accepted "accepted" 5)
+       (check-equal? lookup-count lookups-before)
+       (check-equal?
+        (journal-events connection "txn-remove")
+        (list (transaction-started "txn-remove")
+              test-sale-item-event
+              test-sale-item-event
+              test-sale-item-event
+              (sale-line-removed 1)))
+       (define transaction
+         (query-transaction service "txn-remove" 5))
+       (check-equal? (length (transaction-line-items transaction)) 2)
+       (check-equal? (transaction-subtotal transaction) (money 398)))))
+
+  (test-case "out-of-range removal is durable and does no catalog work"
+    (call-with-store
+     (lambda (connection)
+       (define lookup-count 0)
+       (define service
+         (make-test-service
+          connection
+          #:catalog-lookup
+          (lambda (barcode)
+            (set! lookup-count (add1 lookup-count))
+            (fake-catalog-lookup barcode))))
+       (execute-start! service "txn-remove-miss" "cmd-remove-miss-start")
+       (define command
+         (remove-line-item-command
+          "cmd-remove-miss" "txn-remove-miss" 1 0))
+       (define receipt
+         (resolved-receipt
+          (transaction-service-execute-command service command)))
+
+       (check-outcome
+        receipt command 'domain-rejected "line_item_not_found" 1)
+       (check-equal? lookup-count 0)
+       (check-equal?
+        (journal-events connection "txn-remove-miss")
+        (list (transaction-started "txn-remove-miss"))))))
+
+  (test-case "stale line index is never interpreted against a newer basket"
+    (call-with-store
+     (lambda (connection)
+       (define service (make-test-service connection))
+       (execute-start! service "txn-stale-remove" "cmd-stale-remove-start")
+       (for ([index (in-range 3)])
+         (execute-scan! service
+                        "txn-stale-remove"
+                        (format "cmd-stale-remove-scan-~a" index)
+                        (add1 index)
+                        test-barcode))
+       (define stale-command
+         (remove-line-item-command
+          "cmd-stale-remove" "txn-stale-remove" 4 1))
+       (execute-scan! service
+                      "txn-stale-remove"
+                      "cmd-advance-before-remove"
+                      4
+                      test-barcode)
+       (define receipt
+         (resolved-receipt
+          (transaction-service-execute-command service stale-command)))
+
+       (check-outcome
+        receipt stale-command 'version-conflict "stale_expected_version" 5)
+       (define transaction
+         (query-transaction service "txn-stale-remove" 5))
+       (check-equal? (length (transaction-line-items transaction)) 4)
+       (check-false
+        (ormap sale-line-removed?
+               (journal-events connection "txn-stale-remove"))))))
+
+  (test-case "void is durable, terminal, catalog-independent, and idempotent"
+    (call-with-store
+     (lambda (connection)
+       (define lookup-count 0)
+       (define service
+         (make-test-service
+          connection
+          #:catalog-lookup
+          (lambda (barcode)
+            (set! lookup-count (add1 lookup-count))
+            (fake-catalog-lookup barcode))))
+       (start-and-scan! service "txn-void" "cmd-void")
+       (define command
+         (void-transaction-command "cmd-void-once" "txn-void" 2))
+       (define lookups-before lookup-count)
+       (define original
+         (resolved-receipt
+          (transaction-service-execute-command service command)))
+       (define retried
+         (resolved-receipt
+          (transaction-service-execute-command service command)))
+
+       (check-equal? original retried)
+       (check-outcome original command 'accepted "accepted" 3)
+       (check-equal? lookup-count lookups-before)
+       (check-equal?
+        (journal-events connection "txn-void")
+        (list (transaction-started "txn-void")
+              test-sale-item-event
+              (transaction-voided)))
+       (define transaction (query-transaction service "txn-void" 3))
+       (check-equal? (transaction-status transaction) 'voided)
+       (check-equal? (transaction-subtotal transaction) (money 199)))))
+
+  (test-case "same command ID cannot change correction identity"
+    (call-with-store
+     (lambda (connection)
+       (define service (make-test-service connection))
+       (start-and-scan! service "txn-reuse-correction" "cmd-reuse-correction")
+       (define original
+         (remove-line-item-command
+          "cmd-correction-reuse" "txn-reuse-correction" 2 0))
+       (resolved-receipt
+        (transaction-service-execute-command service original))
+
+       (for ([different
+              (in-list
+               (list
+                (remove-line-item-command
+                 "cmd-correction-reuse" "txn-reuse-correction" 2 1)
+                (void-transaction-command
+                 "cmd-correction-reuse" "txn-reuse-correction" 2)))])
+         (check-pred
+          transaction-service-command-id-reused?
+          (transaction-service-execute-command service different))))))
+
   (test-case "unsafe identity-free mutation functions are no longer exported"
     (for ([name (in-list '(transaction-service-start-transaction
                            transaction-service-scan-barcode

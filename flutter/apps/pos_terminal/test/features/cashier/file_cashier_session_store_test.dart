@@ -80,6 +80,46 @@ void main() {
     },
   );
 
+  test('correction commands survive the real file store unchanged', () async {
+    final removal = RemoveLineItemCommand(
+      commandId: 'cmd-remove',
+      transactionId: 'txn-1',
+      expectedVersion: 7,
+      lineIndex: 2,
+    );
+    await store.save(
+      PersistedCashierSession(
+        activeTransactionId: 'txn-1',
+        pendingCommand: removal,
+      ),
+    );
+
+    final restoredRemoval =
+        (await store.load())!.pendingCommand! as RemoveLineItemCommand;
+    expect(restoredRemoval.commandId, removal.commandId);
+    expect(restoredRemoval.transactionId, removal.transactionId);
+    expect(restoredRemoval.expectedVersion, removal.expectedVersion);
+    expect(restoredRemoval.lineIndex, removal.lineIndex);
+
+    final voidCommand = VoidTransactionCommand(
+      commandId: 'cmd-void',
+      transactionId: 'txn-1',
+      expectedVersion: 8,
+    );
+    await store.save(
+      PersistedCashierSession(
+        activeTransactionId: 'txn-1',
+        pendingCommand: voidCommand,
+      ),
+    );
+
+    final restoredVoid =
+        (await store.load())!.pendingCommand! as VoidTransactionCommand;
+    expect(restoredVoid.commandId, voidCommand.commandId);
+    expect(restoredVoid.transactionId, voidCommand.transactionId);
+    expect(restoredVoid.expectedVersion, voidCommand.expectedVersion);
+  });
+
   test('clear removes the live record and is idempotent', () async {
     await store.save(PersistedCashierSession(activeTransactionId: 'txn-1'));
 

@@ -2,6 +2,7 @@
 
 (require rackunit
          "../pos/domain/money.rkt"
+         "../pos/domain/tax.rkt"
          "../pos/domain/transaction-event.rkt"
          "../pos/domain/transaction.rkt")
 
@@ -195,4 +196,82 @@
                   'invalid-transaction-state)
     (check-eq? (event-rejected-transaction result) completed)
     (check-equal? (transaction-status completed) 'completed)
-    (check-equal? (transaction-subtotal completed) (money 199))))
+    (check-equal? (transaction-subtotal completed) (money 199)))
+
+  (test-case "line removal replay removes exactly one indexed occurrence"
+    (define events
+      (list (transaction-started "txn-remove")
+            (sale-item-added "A" "Apples" (money 100))
+            (sale-item-added "A" "Apples" (money 100))
+            (sale-item-added "B" "Bananas" (money 200))
+            (sale-line-removed 1)))
+    (define result (replay-transaction events))
+
+    (check-pred replay-succeeded? result)
+    (define transaction (replay-succeeded-transaction result))
+    (check-equal?
+     (map transaction-line-item-barcode
+          (transaction-line-items transaction))
+     '("A" "B"))
+    (check-equal? (transaction-subtotal transaction) (money 300)))
+
+  (test-case "line removal subtracts the selected stored taxed contribution"
+    (define result
+      (replay-transaction
+       (list (transaction-started "txn-tax-remove")
+             (taxed-sale-item-added
+              "taxed" "Taxed" (money 199) "standard" (tax-rate 100000)
+              (money 20))
+             (sale-item-added "legacy" "Legacy" (money 299))
+             (sale-line-removed 0))))
+
+    (check-pred replay-succeeded? result)
+    (define transaction (replay-succeeded-transaction result))
+    (check-equal? (transaction-subtotal transaction) (money 299))
+    (check-equal? (transaction-tax transaction) (money 0))
+    (check-equal? (transaction-total transaction) (money 299)))
+
+  (test-case "invalid historical removal fails closed"
+    (define result
+      (replay-transaction
+       (list (transaction-started "txn-invalid-remove")
+             test-item-added
+             (sale-line-removed 1))))
+
+    (check-pred replay-failed? result)
+    (check-equal? (replay-failed-event-index result) 2)
+    (check-equal? (replay-failed-code result) 'line-item-not-found))
+
+  (test-case "void replay is terminal and retains the cancelled projection"
+    (define result
+      (replay-transaction
+       (list (transaction-started "txn-void")
+             test-item-added
+             (transaction-voided))))
+
+    (check-pred replay-succeeded? result)
+    (define transaction (replay-succeeded-transaction result))
+    (check-equal? (transaction-status transaction) 'voided)
+    (check-equal? (length (transaction-line-items transaction)) 1)
+    (check-equal? (transaction-subtotal transaction) (money 199))
+    (check-equal? (transaction-tax transaction) (money 0))
+    (check-equal? (transaction-total transaction) (money 199))
+    (check-false (transaction-tendered-cash transaction))
+    (check-false (transaction-change-due transaction)))
+
+  (test-case "post-void mutation events fail replay"
+    (for ([event (in-list (list test-item-added
+                                (sale-line-removed 0)
+                                (cash-tendered (money 500))
+                                (transaction-completed)
+                                (transaction-voided)))])
+      (define result
+        (replay-transaction
+         (list (transaction-started "txn-post-void")
+               test-item-added
+               (transaction-voided)
+               event)))
+      (check-pred replay-failed? result)
+      (check-equal? (replay-failed-event-index result) 3)
+      (check-equal? (replay-failed-code result)
+                    'invalid-transaction-state))))

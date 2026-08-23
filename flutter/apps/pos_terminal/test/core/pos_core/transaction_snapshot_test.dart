@@ -44,18 +44,22 @@ void main() {
     expect(snapshot.changeDueMinorUnits, isNull);
   });
 
-  test('paid and completed transaction statuses parse explicitly', () {
+  test('paid, completed, and voided transaction statuses parse explicitly', () {
     final paid = TransactionSnapshot.fromJson(
       snapshotJson(status: 'paid', tenderedCash: 500, changeDue: 301),
     );
     final completed = TransactionSnapshot.fromJson(
       snapshotJson(status: 'completed', tenderedCash: 500, changeDue: 301),
     );
+    final voided = TransactionSnapshot.fromJson(snapshotJson(status: 'voided'));
 
     expect(paid.status, TransactionStatus.paid);
     expect(completed.status, TransactionStatus.completed);
     expect(completed.tenderedCashMinorUnits, 500);
     expect(completed.changeDueMinorUnits, 301);
+    expect(voided.status, TransactionStatus.voided);
+    expect(voided.tenderedCashMinorUnits, isNull);
+    expect(voided.changeDueMinorUnits, isNull);
   });
 
   test('unknown status fails closed', () {

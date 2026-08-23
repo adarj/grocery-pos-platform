@@ -21,6 +21,12 @@
 (define completed-event
   (transaction-completed))
 
+(define removed-event
+  (sale-line-removed 1))
+
+(define voided-event
+  (transaction-voided))
+
 (define taxed-item-added-event
   (taxed-sale-item-added "049000001234"
                          "Test Apples"
@@ -65,6 +71,16 @@
           'event_type "transaction_completed"
           'payload (hasheq)))
 
+(define expected-removed
+  (hasheq 'schema_version 1
+          'event_type "sale_line_removed"
+          'payload (hasheq 'line_index 1)))
+
+(define expected-voided
+  (hasheq 'schema_version 1
+          'event_type "transaction_voided"
+          'payload (hasheq)))
+
 (define (check-failure value expected-code)
   (define result (jsexpr->transaction-event value))
   (check-pred event-decode-failure? result)
@@ -90,7 +106,11 @@
     (check-equal? (transaction-event->jsexpr tendered-event)
                   expected-tendered)
     (check-equal? (transaction-event->jsexpr completed-event)
-                  expected-completed))
+                  expected-completed)
+    (check-equal? (transaction-event->jsexpr removed-event)
+                  expected-removed)
+    (check-equal? (transaction-event->jsexpr voided-event)
+                  expected-voided))
 
   (test-case "taxed sale item encodes exact schema v2 golden representation"
     (check-equal? (transaction-event->jsexpr taxed-item-added-event)
@@ -141,7 +161,9 @@
     (for ([event (in-list (list started-event
                                 item-added-event
                                 tendered-event
-                                completed-event))])
+                                completed-event
+                                removed-event
+                                voided-event))])
       (define representation (transaction-event->jsexpr event))
       (define string-result
         (json-string->transaction-event
@@ -163,6 +185,27 @@
                     representation)
       (check-equal? (bytes->jsexpr (transaction-event->json-bytes event))
                     representation)))
+
+  (test-case "correction event payloads are strict"
+    (for ([invalid-index (in-list (list -1 1.5 "1"))])
+      (check-failure
+       (hash-set expected-removed
+                 'payload
+                 (hasheq 'line_index invalid-index))
+       'invalid-line-index))
+    (check-failure
+     (hash-set expected-removed 'payload (hasheq))
+     'missing-field)
+    (check-failure
+     (hash-set expected-removed
+               'payload
+               (hasheq 'line_index 1 'unexpected #t))
+     'unexpected-field)
+    (check-failure
+     (hash-set expected-voided
+               'payload
+               (hasheq 'unexpected #t))
+     'unexpected-field))
 
   (test-case "malformed JSON produces a predictable codec failure"
     (define string-result (json-string->transaction-event "{not-json"))

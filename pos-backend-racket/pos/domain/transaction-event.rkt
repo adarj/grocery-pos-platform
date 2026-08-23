@@ -7,8 +7,10 @@
          (struct-out transaction-started)
          (struct-out sale-item-added)
          (struct-out taxed-sale-item-added)
+         (struct-out sale-line-removed)
          (struct-out cash-tendered)
-         (struct-out transaction-completed))
+         (struct-out transaction-completed)
+         (struct-out transaction-voided))
 
 (struct transaction-event ()
   #:transparent)
@@ -81,5 +83,20 @@
       (raise-argument-error type-name "money?" amount))
     amount))
 
+(struct sale-line-removed transaction-event (line-index)
+  #:transparent
+  #:guard
+  (lambda (line-index type-name)
+    (unless (and (exact-integer? line-index)
+                 (>= line-index 0))
+      (raise-argument-error
+       type-name
+       "exact nonnegative integer"
+       line-index))
+    line-index))
+
 (struct transaction-completed transaction-event ()
+  #:transparent)
+
+(struct transaction-voided transaction-event ()
   #:transparent)

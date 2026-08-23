@@ -172,7 +172,8 @@ and strict HTTP adapter. Its command, durable-result, authoritative-snapshot,
 and failure models are documented in
 [Flutter POS Core Client Foundation](flutter-pos-client.md). The implemented
 cashier controller and widgets use that boundary for the current start, scan,
-cash-tender, completion, recovery, and next-sale workflow.
+cash-tender, completion, open-sale removal/void, recovery, and next-sale
+workflow.
 
 ### Command IDs and expected versions
 
@@ -205,6 +206,15 @@ This requirement becomes especially important for:
 * voids;
 * drawer operations;
 * remote management commands.
+
+The implemented pre-payment correction commands are `remove_line_item` and
+`void_transaction`. Removal addresses one zero-based line in the authoritative
+state at `expected_version`; the server checks that version before interpreting
+the index. An accepted correction appends a new event, and Flutter waits for a
+new authoritative query rather than editing its basket locally. Void is
+accepted only from open state, produces terminal `voided`, and retains the
+cancelled basket and monetary projection. Paid reversal/refund remains a
+separate future contract.
 
 ### Mutation outcomes and current state
 
@@ -244,7 +254,8 @@ Refunded
 RecoveryRequired
 ```
 
-Not all of these states are implemented yet.
+The current transaction slice implements open, paid, completed, and voided;
+the other listed states remain prospective.
 
 Invalid transitions must be rejected by the backend.
 

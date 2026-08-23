@@ -55,7 +55,11 @@ Flutter controller
 
 The suite verifies the configured development line tax, tax-inclusive tender
 sufficiency and change, repeated per-line rounding, restart replay, and
-same-command recovery without duplicate merchandise or tax facts.
+same-command recovery without duplicate merchandise or tax facts. It also
+removes a middle line through the production command path, retries an already
+accepted removal with the same ID across POS Core restart to prove only one
+line is removed, and verifies that a voided basket/tax projection survives
+restart before explicit Next Sale creates a clean transaction.
 
 If catalog activation fails, the fixture fails before starting the server and
 reports bounded CLI output. The fixture activates Catalog Snapshot Schema v2,

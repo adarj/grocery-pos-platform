@@ -234,6 +234,137 @@ void main() {
     },
   );
 
+  test(
+    'real removal preserves authoritative remaining tax and totals',
+    () async {
+      final fixture = await _startFixture();
+      final cashier = await _createCashier(fixture, 'remove_sale');
+
+      await cashier.controller.startTransaction();
+      await _scanThreeTimes(cashier.controller);
+
+      await cashier.controller.removeLineItem(1);
+      final corrected = _snapshot(cashier.controller);
+      expect(corrected.status, TransactionStatus.open);
+      expect(corrected.version, 5);
+      expect(corrected.lineItems, hasLength(2));
+      expect(corrected.subtotalMinorUnits, 398);
+      expect(corrected.taxMinorUnits, 40);
+      expect(corrected.totalMinorUnits, 438);
+
+      await cashier.controller.tenderCash(500);
+      final paid = _snapshot(cashier.controller);
+      expect(paid.status, TransactionStatus.paid);
+      expect(paid.totalMinorUnits, 438);
+      expect(paid.changeDueMinorUnits, 62);
+
+      await cashier.controller.completeTransaction();
+      final completed = _snapshot(cashier.controller);
+      expect(completed.status, TransactionStatus.completed);
+      expect(completed.lineItems, hasLength(2));
+      expect(completed.totalMinorUnits, 438);
+    },
+  );
+
+  test(
+    'same-ID real remove retry after backend restart removes one line only',
+    () async {
+      final fixture = await _startFixture();
+      final firstCashier = await _createCashier(fixture, 'remove_retry_before');
+
+      await firstCashier.controller.startTransaction();
+      await _scanThreeTimes(firstCashier.controller);
+      final beforeRemove = _snapshot(firstCashier.controller);
+      final exactCommand = RemoveLineItemCommand(
+        commandId: 'cmd_remove_stale_pending_exact',
+        transactionId: beforeRemove.transactionId,
+        expectedVersion: beforeRemove.version,
+        lineIndex: 1,
+      );
+      await firstCashier.store.save(
+        PersistedCashierSession(
+          activeTransactionId: beforeRemove.transactionId,
+          pendingCommand: exactCommand,
+        ),
+      );
+
+      final committed = await firstCashier.client.executeCommand(exactCommand);
+      expect(committed.outcomeKind, PosCommandOutcomeKind.accepted);
+      expect(committed.outcomeStreamVersion, 5);
+
+      firstCashier.close();
+      await fixture.restart();
+      final restoredCashier = await _createCashier(
+        fixture,
+        'remove_retry_after',
+      );
+      final restoredPending =
+          restoredCashier.controller.state.pendingCommand!
+              as RemoveLineItemCommand;
+      expect(restoredPending.commandId, exactCommand.commandId);
+      expect(restoredPending.transactionId, exactCommand.transactionId);
+      expect(restoredPending.expectedVersion, exactCommand.expectedVersion);
+      expect(restoredPending.lineIndex, exactCommand.lineIndex);
+      expect(restoredCashier.ids.commandIdCalls, 0);
+
+      await restoredCashier.controller.retryPendingCommand();
+      final retryResult = restoredCashier.controller.state.lastCommandResult!;
+      final authoritative = _snapshot(restoredCashier.controller);
+      expect(retryResult.outcomeKind, PosCommandOutcomeKind.accepted);
+      expect(retryResult.outcomeStreamVersion, 5);
+      expect(authoritative.version, 5);
+      expect(authoritative.lineItems, hasLength(2));
+      expect(authoritative.subtotalMinorUnits, 398);
+      expect(authoritative.taxMinorUnits, 40);
+      expect(authoritative.totalMinorUnits, 438);
+      expect(restoredCashier.controller.state.pendingCommand, isNull);
+      expect(restoredCashier.ids.commandIdCalls, 0);
+    },
+  );
+
+  test('real void survives restart and can begin a clean next sale', () async {
+    final fixture = await _startFixture();
+    final firstCashier = await _createCashier(fixture, 'void_before');
+
+    await firstCashier.controller.startTransaction();
+    await firstCashier.controller.scanBarcode(_developmentBarcode);
+    await firstCashier.controller.voidTransaction();
+    final beforeRestart = _snapshot(firstCashier.controller);
+    final voidedTransactionId = beforeRestart.transactionId;
+    expect(beforeRestart.status, TransactionStatus.voided);
+    expect(beforeRestart.version, 3);
+    expect(beforeRestart.lineItems, hasLength(1));
+    expect(beforeRestart.subtotalMinorUnits, 199);
+    expect(beforeRestart.taxMinorUnits, 20);
+    expect(beforeRestart.totalMinorUnits, 219);
+    expect(beforeRestart.tenderedCashMinorUnits, isNull);
+    expect(beforeRestart.changeDueMinorUnits, isNull);
+
+    firstCashier.close();
+    await fixture.restart();
+    final restoredCashier = await _createCashier(fixture, 'void_after');
+    expect(
+      restoredCashier.controller.state.activeTransactionId,
+      voidedTransactionId,
+    );
+    expect(restoredCashier.controller.state.snapshot, isNull);
+    expect(restoredCashier.controller.state.pendingCommand, isNull);
+
+    await restoredCashier.controller.refreshTransaction();
+    final restored = _snapshot(restoredCashier.controller);
+    expect(restored.transactionId, voidedTransactionId);
+    expect(restored.status, TransactionStatus.voided);
+    expect(restored.lineItems, hasLength(1));
+    expect(restored.subtotalMinorUnits, 199);
+    expect(restored.taxMinorUnits, 20);
+    expect(restored.totalMinorUnits, 219);
+
+    await restoredCashier.controller.beginNextSale();
+    final nextSale = _snapshot(restoredCashier.controller);
+    expect(nextSale.transactionId, isNot(voidedTransactionId));
+    _expectOpenEmpty(nextSale);
+  });
+
   test('ten bounded complete sale cycles do not leak session state', () async {
     final fixture = await _startFixture();
     final cashier = await _createCashier(fixture, 'endurance');

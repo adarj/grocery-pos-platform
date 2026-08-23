@@ -14,6 +14,10 @@
   (tender-cash-command "cmd-tender" "txn-001" 2 (money 500)))
 (define completion-command
   (complete-transaction-command "cmd-complete" "txn-001" 3))
+(define remove-command
+  (remove-line-item-command "cmd-remove" "txn-001" 4 1))
+(define void-command
+  (void-transaction-command "cmd-void" "txn-001" 5))
 
 (define expected-start
   (hasheq 'schema_version 1
@@ -47,6 +51,22 @@
           'command_type "complete_transaction"
           'payload (hasheq)))
 
+(define expected-remove
+  (hasheq 'schema_version 1
+          'command_id "cmd-remove"
+          'transaction_id "txn-001"
+          'expected_version 4
+          'command_type "remove_line_item"
+          'payload (hasheq 'line_index 1)))
+
+(define expected-void
+  (hasheq 'schema_version 1
+          'command_id "cmd-void"
+          'transaction_id "txn-001"
+          'expected_version 5
+          'command_type "void_transaction"
+          'payload (hasheq)))
+
 (define (check-jsexpr-failure value expected-code)
   (define result (jsexpr->transaction-command value))
   (check-pred command-decode-failure? result)
@@ -69,13 +89,19 @@
     (check-equal? (transaction-command->jsexpr scan-command) expected-scan)
     (check-equal? (transaction-command->jsexpr tender-command) expected-tender)
     (check-equal? (transaction-command->jsexpr completion-command)
-                  expected-completion))
+                  expected-completion)
+    (check-equal? (transaction-command->jsexpr remove-command)
+                  expected-remove)
+    (check-equal? (transaction-command->jsexpr void-command)
+                  expected-void))
 
   (test-case "all schema v1 commands round trip through jsexpr, string, and bytes"
     (for ([command (in-list (list start-command
                                   scan-command
                                   tender-command
-                                  completion-command))])
+                                  completion-command
+                                  remove-command
+                                  void-command))])
       (define representation (transaction-command->jsexpr command))
       (define results
         (list (jsexpr->transaction-command representation)
@@ -228,7 +254,24 @@ JSON
 
   (test-case "empty-payload commands reject supplied payload fields"
     (for ([representation (in-list (list expected-start
-                                         expected-completion))])
+                                         expected-completion
+                                         expected-void))])
       (check-jsexpr-failure
        (hash-set representation 'payload (hasheq 'unexpected "field"))
-       'unexpected-field))))
+       'unexpected-field)))
+
+  (test-case "remove payload requires an exact nonnegative line index"
+    (for ([invalid-index (in-list (list -1 1.5 "1"))])
+      (check-jsexpr-failure
+       (hash-set expected-remove
+                 'payload
+                 (hasheq 'line_index invalid-index))
+       'invalid-line-index))
+    (check-jsexpr-failure
+     (hash-set expected-remove 'payload (hasheq))
+     'missing-field)
+    (check-jsexpr-failure
+     (hash-set expected-remove
+               'payload
+               (hasheq 'line_index 1 'unexpected "field"))
+     'unexpected-field)))

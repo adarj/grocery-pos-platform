@@ -279,7 +279,7 @@ resources.
 
 The service provides operations to:
 
-- execute one of the four typed mutating transaction commands;
+- execute one of the six typed mutating transaction commands;
 - load/recover current authoritative transaction state.
 
 ### Duplicate, Recover, Decide, Commit
@@ -339,6 +339,24 @@ domain lifecycle fails at the replay stage. Neither failure path invokes the
 requested domain command or returns partial state as success. Genuine SQLite
 operational exceptions continue to propagate as infrastructure failures.
 
+### Append-only Cashier Corrections
+
+Open-sale corrections use the same command/receipt/unit-of-work boundary as
+the other mutations. `remove_line_item` appends `sale_line_removed`; it never
+deletes the earlier `sale_item_added` fact. The zero-based line index is
+interpreted only after the caller's expected version matches, preventing a
+stale selection from being applied to a newer basket. Replay removes exactly
+that line's already-stored base-price and tax contribution and performs no
+catalog lookup.
+
+`void_transaction` appends `transaction_voided` only from open state. The
+terminal voided projection retains the cancelled basket and its descriptive
+subtotal, tax, and total. It is not completed revenue. Same-ID retries resolve
+the original durable receipt, so a lost removal response cannot remove a
+second line and a lost void response cannot append another void event. These
+decisions are recorded in
+[ADR-0014](../adr/0014-represent-cashier-corrections-as-append-only-transaction-events.md).
+
 ### Catalog Boundary and Restart Recovery
 
 The service does not hard-code a catalog. Composition injects the current
@@ -382,7 +400,7 @@ does not add:
 - outbox or cloud synchronization tables;
 - sale-receipt, tender, inventory, or card-payment tables;
 - partial/split tender or other new transaction behavior;
-- Flutter transaction integration.
+- post-payment refund/reversal behavior.
 
 Persistence code does not hard-code `SQLITE_DB_PATH` and does not hide a global
 mutable database connection. The runtime resolves the configured path once,

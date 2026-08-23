@@ -61,6 +61,7 @@
     [(invalid-expected-version) "invalid_expected_version"]
     [(invalid-barcode) "invalid_barcode"]
     [(invalid-money) "invalid_money"]
+    [(invalid-line-index) "invalid_line_index"]
     [else
      (error
       'decode-failure-code->reason
@@ -192,6 +193,7 @@
     [(open) "open"]
     [(paid) "paid"]
     [(completed) "completed"]
+    [(voided) "voided"]
     [else
      (error
       'transaction-status->string

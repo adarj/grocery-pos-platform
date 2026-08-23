@@ -153,6 +153,7 @@
     [(invalid-transaction-state) "invalid_transaction_state"]
     [(empty-transaction) "empty_transaction"]
     [(insufficient-tender) "insufficient_tender"]
+    [(line-item-not-found) "line_item_not_found"]
     [else
      (error
       'domain-rejection-code->outcome-code
@@ -277,7 +278,32 @@
        version
        'domain-rejected
        (domain-rejection-code->outcome-code
-        (completion-rejected-code result)))))
+       (completion-rejected-code result)))))
+
+(define (remove-command->plan command transaction version)
+  (define result
+    (remove-line-item
+     transaction
+     (remove-line-item-command-line-index command)))
+  (if (removal-accepted? result)
+      (accepted-plan command version (removal-accepted-events result))
+      (receipt-only-plan
+       command
+       version
+       'domain-rejected
+       (domain-rejection-code->outcome-code
+        (removal-rejected-code result)))))
+
+(define (void-command->plan command transaction version)
+  (define result (void-transaction transaction))
+  (if (void-accepted? result)
+      (accepted-plan command version (void-accepted-events result))
+      (receipt-only-plan
+       command
+       version
+       'domain-rejected
+       (domain-rejection-code->outcome-code
+        (void-rejected-code result)))))
 
 (define (fresh-existing-command-plan service command transaction version)
   (cond
@@ -287,6 +313,10 @@
      (tender-command->plan command transaction version)]
     [(complete-transaction-command? command)
      (completion-command->plan command transaction version)]
+    [(remove-line-item-command? command)
+     (remove-command->plan command transaction version)]
+    [(void-transaction-command? command)
+     (void-command->plan command transaction version)]
     [else
      (error
       'fresh-existing-command-plan

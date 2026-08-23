@@ -78,6 +78,54 @@ void main() {
     });
   });
 
+  test('remove line item serializes exact zero-based index', () {
+    final command = RemoveLineItemCommand(
+      commandId: 'cmd-remove',
+      transactionId: 'txn-001',
+      expectedVersion: 4,
+      lineIndex: 1,
+    );
+
+    expect(command.toJson(), {
+      'schema_version': 1,
+      'command_id': 'cmd-remove',
+      'transaction_id': 'txn-001',
+      'expected_version': 4,
+      'command_type': 'remove_line_item',
+      'payload': {'line_index': 1},
+    });
+    expect(command.lineIndex, 1);
+  });
+
+  test('remove line item rejects a negative index', () {
+    expect(
+      () => RemoveLineItemCommand(
+        commandId: 'cmd-remove',
+        transactionId: 'txn-001',
+        expectedVersion: 4,
+        lineIndex: -1,
+      ),
+      throwsArgumentError,
+    );
+  });
+
+  test('void transaction serializes exact empty payload', () {
+    final command = VoidTransactionCommand(
+      commandId: 'cmd-void',
+      transactionId: 'txn-001',
+      expectedVersion: 4,
+    );
+
+    expect(command.toJson(), {
+      'schema_version': 1,
+      'command_id': 'cmd-void',
+      'transaction_id': 'txn-001',
+      'expected_version': 4,
+      'command_type': 'void_transaction',
+      'payload': <String, Object?>{},
+    });
+  });
+
   test('serialization retains caller identity and version unchanged', () {
     final command = ScanBarcodeCommand(
       commandId: 'opaque Command ID',

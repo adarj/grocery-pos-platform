@@ -129,7 +129,8 @@ Verified capabilities currently include:
 * strict, language-independent Transaction Event Schema v1/v2 JSON with
   backward-compatible untaxed history and exact sale-time line-tax snapshots;
 * strict, language-independent Transaction Command Schema v1 with typed logical
-  request identity and caller-supplied expected stream versions;
+  request identity, caller-supplied expected stream versions, and append-only
+  open-sale remove/void corrections;
 * append-only SQLite transaction journal with migration v1, per-stream
   sequencing, atomic batch append, and optimistic stream-version checks;
 * migration v2 durable command receipts with database-global command IDs and
@@ -146,8 +147,9 @@ Verified capabilities currently include:
 * Flutter Linux ARM64 POS terminal;
 * typed Flutter POS Core client models for transaction commands, durable command
   outcomes, authoritative transaction snapshots, and safe failures;
-* Flutter cashier session orchestration and a start/scan/cash-tender/complete
-  interface rendering authoritative subtotal, tax, total, payment, and change;
+* Flutter cashier session orchestration and a
+  start/scan/remove/void/cash-tender/complete interface rendering authoritative
+  basket, subtotal, tax, total, payment, and change;
 * Flutter widget tests;
 * isolated Flutter-to-Racket real-process integration tests covering complete
   cash sales, restart recovery, uncertain transport, and durable same-command
@@ -402,10 +404,12 @@ that retrying the same command cannot duplicate the current cash-sale facts.
 
 This transaction workflow is exposed through the narrow Transaction HTTP API
 v1 command and query routes. Flutter now implements the current cash-sale
-cashier slice through authoritative completion, persists exact pending command
-identity before mutation POSTs for process-restart recovery, and starts the next
-sale only through an explicit completed-session action. Broader production
-checkout capabilities remain separately scoped work.
+cashier slice through authoritative completion or pre-payment void, persists
+exact pending command identity before mutation POSTs for process-restart
+recovery, and starts the next sale only through an explicit terminal-session
+action. Corrections append durable facts; Flutter never deletes a basket row or
+marks a sale voided optimistically. Post-payment refund/reversal and broader
+production checkout capabilities remain separately scoped work.
 
 ## Status
 

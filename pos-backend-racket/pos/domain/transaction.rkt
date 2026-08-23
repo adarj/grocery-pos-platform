@@ -42,6 +42,14 @@
          tender-rejected-code
          tender-rejected-transaction
          tender-rejected-events
+         remove-line-item
+         removal-accepted?
+         removal-accepted-transaction
+         removal-accepted-events
+         removal-rejected?
+         removal-rejected-code
+         removal-rejected-transaction
+         removal-rejected-events
          complete-transaction
          completion-accepted?
          completion-accepted-transaction
@@ -50,6 +58,14 @@
          completion-rejected-code
          completion-rejected-transaction
          completion-rejected-events
+         void-transaction
+         void-accepted?
+         void-accepted-transaction
+         void-accepted-events
+         void-rejected?
+         void-rejected-code
+         void-rejected-transaction
+         void-rejected-events
          apply-transaction-event
          event-applied?
          event-applied-transaction
@@ -125,10 +141,22 @@
 (struct tender-rejected (code transaction events)
   #:transparent)
 
+(struct removal-accepted (transaction events)
+  #:transparent)
+
+(struct removal-rejected (code transaction events)
+  #:transparent)
+
 (struct completion-accepted (transaction events)
   #:transparent)
 
 (struct completion-rejected (code transaction events)
+  #:transparent)
+
+(struct void-accepted (transaction events)
+  #:transparent)
+
+(struct void-rejected (code transaction events)
   #:transparent)
 
 (struct event-applied (transaction)
@@ -173,6 +201,17 @@
 (define (mark-transaction-completed current-transaction)
   (struct-copy transaction current-transaction
                [status 'completed]))
+
+(define (remove-transaction-line current-transaction line-index)
+  (define line-items (transaction-line-items current-transaction))
+  (struct-copy transaction current-transaction
+               [line-items
+                (append (take line-items line-index)
+                        (drop line-items (add1 line-index)))]))
+
+(define (mark-transaction-voided current-transaction)
+  (struct-copy transaction current-transaction
+               [status 'voided]))
 
 (define (transaction-open? current-transaction)
   (eq? (transaction-status current-transaction) 'open))
@@ -294,6 +333,24 @@
                        tender-accepted
                        tender-rejected))
 
+(define (remove-line-item current-transaction line-index)
+  (unless (transaction? current-transaction)
+    (raise-argument-error
+     'remove-line-item
+     "transaction?"
+     current-transaction))
+  (unless (and (exact-integer? line-index)
+               (>= line-index 0))
+    (raise-argument-error
+     'remove-line-item
+     "exact nonnegative integer"
+     line-index))
+
+  (decision-from-event current-transaction
+                       (sale-line-removed line-index)
+                       removal-accepted
+                       removal-rejected))
+
 (define (complete-transaction current-transaction)
   (unless (transaction? current-transaction)
     (raise-argument-error
@@ -305,6 +362,18 @@
                        (transaction-completed)
                        completion-accepted
                        completion-rejected))
+
+(define (void-transaction current-transaction)
+  (unless (transaction? current-transaction)
+    (raise-argument-error
+     'void-transaction
+     "transaction?"
+     current-transaction))
+
+  (decision-from-event current-transaction
+                       (transaction-voided)
+                       void-accepted
+                       void-rejected))
 
 (define (apply-transaction-event current-transaction event)
   (unless (or (not current-transaction)
@@ -358,6 +427,19 @@
          (event-rejected
           'invalid-transaction-state
           current-transaction))]
+    [(sale-line-removed? event)
+     (define line-index (sale-line-removed-line-index event))
+     (cond
+       [(not (transaction-open? current-transaction))
+        (event-rejected
+         'invalid-transaction-state
+         current-transaction)]
+       [(>= line-index
+            (length (transaction-line-items current-transaction)))
+        (event-rejected 'line-item-not-found current-transaction)]
+       [else
+        (event-applied
+         (remove-transaction-line current-transaction line-index))])]
     [(cash-tendered? event)
      (define amount (cash-tendered-amount event))
      (cond
@@ -378,6 +460,13 @@
      (if (eq? (transaction-status current-transaction) 'paid)
          (event-applied
           (mark-transaction-completed current-transaction))
+         (event-rejected
+          'invalid-transaction-state
+          current-transaction))]
+    [(transaction-voided? event)
+     (if (transaction-open? current-transaction)
+         (event-applied
+          (mark-transaction-voided current-transaction))
          (event-rejected
           'invalid-transaction-state
           current-transaction))]))

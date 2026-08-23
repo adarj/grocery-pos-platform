@@ -3,8 +3,9 @@
 ## Status
 
 Transaction Event Schemas v1 and v2 define stable JSON representations for the
-implemented cash-sale transaction domain events. Existing lifecycle events and
-legacy untaxed sale lines remain v1. New taxed sale lines use v2.
+implemented cash-sale transaction domain events. Existing lifecycle and
+correction events and legacy untaxed sale lines use v1. New taxed sale lines
+use v2.
 
 It covers event payload serialization only. It does not define a SQLite
 journal table or persisted journal-record envelope.
@@ -68,7 +69,7 @@ Every Schema v1 event is a JSON object with exactly these fields:
 ```
 
 - `schema_version` is the exact JSON integer `1`.
-- `event_type` is one of the four strings defined below.
+- `event_type` is one of the six Schema v1 strings defined below.
 - `payload` is an object with the exact shape defined for that event type.
 - Persisted names use `snake_case`; Racket domain identifiers use hyphens.
 
@@ -178,6 +179,39 @@ values during replay.
 The payload must be empty. Completion status is derived by applying this event
 to a paid transaction.
 
+### `sale_line_removed`
+
+```json
+{
+  "schema_version": 1,
+  "event_type": "sale_line_removed",
+  "payload": {
+    "line_index": 1
+  }
+}
+```
+
+`line_index` is an exact nonnegative zero-based index into the authoritative
+open transaction state immediately before this event. Replay requires that the
+index exist and removes exactly that one position while preserving remaining
+order. The earlier sale-item event already contains the removed line's exact
+sale-time price and tax facts, so the correction event does not duplicate or
+recalculate them.
+
+### `transaction_voided`
+
+```json
+{
+  "schema_version": 1,
+  "event_type": "transaction_voided",
+  "payload": {}
+}
+```
+
+The payload must be empty. Applying the event changes an open transaction to
+the terminal `voided` state while retaining its cancelled basket and monetary
+projection for inspection.
+
 ## Money representation
 
 All money uses exact integer minor units:
@@ -209,8 +243,9 @@ Persisted event data is untrusted. The version-aware decoder rejects:
 - negative, inexact, fractional, or incorrectly typed money fields;
 - invalid Schema v2 category/rate fields or a tax amount inconsistent with the
   v2 algorithm;
+- a negative, fractional, inexact, or incorrectly typed removal line index;
 - event types not defined for Schema v2;
-- a non-empty `transaction_completed` payload.
+- a non-empty `transaction_completed` or `transaction_voided` payload.
 
 The decoder does not ignore unknown fields or coerce values. Semantic evolution
 must use an explicit schema version instead of changing the meaning of Schema
@@ -229,6 +264,7 @@ unsupported-schema-version
 unknown-event-type
 invalid-field-type
 invalid-money
+invalid-line-index
 invalid-tax-category-id
 invalid-tax-rate
 inconsistent-tax-amount
@@ -249,7 +285,9 @@ explicit decoding or migration strategy. Existing Schema v1 records must remain
 decodable according to the rules in this document.
 
 Mixed streams containing v1 and v2 sale lines are valid. V1 lines contribute
-zero tax; v2 lines contribute their stored tax.
+zero tax; v2 lines contribute their stored tax. Removal events subtract the
+selected line's already-stored base-price and tax contribution without catalog
+lookup. No correction deletes or rewrites an earlier journal event.
 
 ## Deliberately deferred metadata
 
