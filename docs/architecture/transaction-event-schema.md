@@ -1,9 +1,10 @@
-# Transaction Event Schema v1
+# Transaction Event Schemas
 
 ## Status
 
-Transaction Event Schema v1 defines the stable JSON representation of the
-currently implemented cash-sale transaction domain events.
+Transaction Event Schemas v1 and v2 define stable JSON representations for the
+implemented cash-sale transaction domain events. Existing lifecycle events and
+legacy untaxed sale lines remain v1. New taxed sale lines use v2.
 
 It covers event payload serialization only. It does not define a SQLite
 journal table or persisted journal-record envelope.
@@ -19,7 +20,7 @@ The boundary is:
 
 ```text
 Racket transaction domain event
-    -> Transaction Event Schema v1 JSON
+    -> versioned Transaction Event Schema JSON
     -> SQLite persisted journal record
 ```
 
@@ -47,7 +48,7 @@ The implemented envelope contains a SQLite row identifier, transaction stream
 key, per-stream sequence, and duplicated schema-version and event-type fields.
 Event identifiers, recording timestamps, command identifiers, and integrity
 information remain deferred. Envelope values are not domain-event payload
-fields and are not part of Schema v1.
+fields.
 
 The `transaction_started` payload contains `transaction_id` because the domain
 fact needs it to reconstruct transaction identity. The journal envelope also
@@ -111,6 +112,39 @@ Payload fields:
 - `unit_price_minor_units`: exact nonnegative integer sale-time unit price.
 
 The sale-time snapshot makes replay independent of the current catalog.
+For compatibility, a Schema v1 sale line has tax zero.
+
+## Schema v2 taxed sale item
+
+Schema v2 is currently defined only for `sale_item_added`:
+
+```json
+{
+  "schema_version": 2,
+  "event_type": "sale_item_added",
+  "payload": {
+    "barcode": "049000001234",
+    "description": "Test Apples",
+    "unit_price_minor_units": 199,
+    "tax_category_id": "development-standard",
+    "tax_rate_millionths": 100000,
+    "tax_amount_minor_units": 20
+  }
+}
+```
+
+The category ID is opaque non-empty text. The rate is an exact integer from
+`0` through `1,000,000` representing a fraction of one. The tax amount is exact
+nonnegative minor units calculated per line using Schema v2's permanent
+half-up rule:
+
+```text
+quotient(unit_price_minor_units * tax_rate_millionths + 500000, 1000000)
+```
+
+The decoder verifies that the stored amount matches that formula. Replay uses
+the stored amount and never current catalog/tax data. A future different tax
+algorithm requires another schema version.
 
 ### `cash_tendered`
 
@@ -156,12 +190,11 @@ $5.00 -> 500
 Binary floating-point values, decimal major-unit values, negative amounts,
 fractional minor units, numeric strings, and implicit coercions are invalid.
 
-Schema v1 does not introduce currency conversion or multiple-currency
-semantics.
+Neither schema introduces currency conversion or multiple-currency semantics.
 
 ## Strict decoding
 
-Persisted event data is untrusted. The Schema v1 decoder rejects:
+Persisted event data is untrusted. The version-aware decoder rejects:
 
 - malformed or invalid UTF-8 JSON;
 - duplicate object member names at any nesting level, including names with
@@ -174,6 +207,9 @@ Persisted event data is untrusted. The Schema v1 decoder rejects:
 - missing or extra event-specific payload fields;
 - non-string transaction IDs, barcodes, or descriptions;
 - negative, inexact, fractional, or incorrectly typed money fields;
+- invalid Schema v2 category/rate fields or a tax amount inconsistent with the
+  v2 algorithm;
+- event types not defined for Schema v2;
 - a non-empty `transaction_completed` payload.
 
 The decoder does not ignore unknown fields or coerce values. Semantic evolution
@@ -193,6 +229,10 @@ unsupported-schema-version
 unknown-event-type
 invalid-field-type
 invalid-money
+invalid-tax-category-id
+invalid-tax-rate
+inconsistent-tax-amount
+unsupported-schema-event-type
 ```
 
 Low-level JSON parser or hash exceptions are not exposed as persisted-data
@@ -200,13 +240,16 @@ diagnostics.
 
 ## Compatibility and versioning
 
-Schema v1 field names, event-type strings, required fields, and value types are
-durable compatibility commitments.
+Schema v1 and v2 field names, event-type strings, required fields, value types,
+and the v2 line-tax formula are durable compatibility commitments.
 
 A reader that does not support a record's `schema_version` must reject it. A
 future incompatible payload change requires a new schema version and an
 explicit decoding or migration strategy. Existing Schema v1 records must remain
 decodable according to the rules in this document.
+
+Mixed streams containing v1 and v2 sale lines are valid. V1 lines contribute
+zero tax; v2 lines contribute their stored tax.
 
 ## Deliberately deferred metadata
 

@@ -67,6 +67,7 @@ JSON
        (check-regexp-match #rx"active=1" output)
        (check-regexp-match #rx"inactive=0" output)
        (check-regexp-match #rx"barcodes=1" output)
+       (check-regexp-match #rx"tax_categories=1" output)
        (check-equal? error-output "")
        (check-false (file-exists? database-path)))))
 

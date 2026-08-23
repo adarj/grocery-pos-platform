@@ -8,6 +8,7 @@
          "../pos/application/transaction-service.rkt"
          "../pos/domain/catalog-item.rkt"
          "../pos/domain/money.rkt"
+         "../pos/domain/tax.rkt"
          "../pos/domain/transaction-event.rkt"
          "../pos/domain/transaction.rkt"
          "../pos/persistence/catalog-snapshot-codec.rkt"
@@ -17,15 +18,21 @@
 
 (define barcode "049000001234")
 
-(define (catalog-jsexpr description price)
+(define (catalog-jsexpr description price category-id rate)
   (hasheq
-   'schema_version 1
+   'schema_version 2
+   'tax_categories
+   (list
+    (hasheq 'tax_category_id category-id
+            'description (string-append category-id " tax")
+            'rate_millionths rate))
    'items
    (list
     (hasheq 'item_id "item-apples"
             'description description
             'unit_price_minor_units price
-            'active #t))
+            'active #t
+            'tax_category_id category-id))
    'barcodes
    (list (hasheq 'barcode barcode 'item_id "item-apples"))))
 
@@ -35,9 +42,10 @@
   (check-pred catalog-snapshot-decode-success? result)
   (catalog-snapshot-decode-success-snapshot result))
 
-(define snapshot-a (decode-snapshot (catalog-jsexpr "Apples" 199)))
+(define snapshot-a
+  (decode-snapshot (catalog-jsexpr "Apples" 199 "standard" 100000)))
 (define snapshot-b
-  (decode-snapshot (catalog-jsexpr "Premium Apples" 299)))
+  (decode-snapshot (catalog-jsexpr "Premium Apples" 299 "exempt" 0)))
 
 (define (call-with-store procedure)
   (define connection (db:sqlite3-connect #:database 'memory))
@@ -102,7 +110,12 @@
        (check-equal?
         (journal-load-succeeded-events stored-events)
         (list (transaction-started "txn-catalog")
-              (sale-item-added barcode "Apples" (money 199))))
+              (taxed-sale-item-added barcode
+                                     "Apples"
+                                     (money 199)
+                                     "standard"
+                                     (tax-rate 100000)
+                                     (money 20))))
 
        (activate-catalog-snapshot! connection snapshot-b)
        (define current-item
@@ -110,6 +123,7 @@
        (check-equal? (catalog-item-description current-item)
                      "Premium Apples")
        (check-equal? (catalog-item-unit-price current-item) (money 299))
+       (check-equal? (catalog-item-tax-rate current-item) (tax-rate 0))
 
        ;; Receipt recovery precedes transaction replay and current catalog
        ;; lookup, so replacement cannot alter the known command result.
@@ -125,7 +139,12 @@
        (check-equal?
         (journal-load-succeeded-events events-after-retry)
         (list (transaction-started "txn-catalog")
-              (sale-item-added barcode "Apples" (money 199))))
+              (taxed-sale-item-added barcode
+                                     "Apples"
+                                     (money 199)
+                                     "standard"
+                                     (tax-rate 100000)
+                                     (money 20))))
 
        ;; A genuinely new transaction/command observes the replacement.
        (resolved-receipt
@@ -145,8 +164,13 @@
        (check-equal?
         (journal-load-succeeded-events new-events)
         (list (transaction-started "txn-catalog-new")
-              (sale-item-added
-               barcode "Premium Apples" (money 299))))
+              (taxed-sale-item-added
+               barcode
+               "Premium Apples"
+               (money 299)
+               "exempt"
+               (tax-rate 0)
+               (money 0))))
 
        (define replay-catalog-lookups 0)
        (define replay-service
@@ -165,6 +189,8 @@
          (transaction-service-success-transaction recovered-result))
        (check-equal? (transaction-status recovered) 'open)
        (check-equal? (transaction-subtotal recovered) (money 199))
+       (check-equal? (transaction-tax recovered) (money 20))
+       (check-equal? (transaction-total recovered) (money 219))
        (define recovered-items (transaction-line-items recovered))
        (check-equal? (length recovered-items) 1)
        (define recovered-item (car recovered-items))
@@ -172,7 +198,9 @@
        (check-equal? (transaction-line-item-description recovered-item)
                      "Apples")
        (check-equal? (transaction-line-item-unit-price recovered-item)
-                     (money 199)))))
+                     (money 199))
+       (check-equal? (transaction-line-item-tax-amount recovered-item)
+                     (money 20)))))
 
   (test-case
       "unresolved scan uses catalog active when backend first decides it"
@@ -207,5 +235,10 @@
        (check-equal?
         (journal-load-succeeded-events events)
         (list (transaction-started "txn-unresolved")
-              (sale-item-added
-               barcode "Premium Apples" (money 299))))))))
+              (taxed-sale-item-added
+               barcode
+               "Premium Apples"
+               (money 299)
+               "exempt"
+               (tax-rate 0)
+               (money 0))))))))

@@ -7,6 +7,7 @@
          "../pos/application/transaction-service.rkt"
          "../pos/domain/fake-catalog.rkt"
          "../pos/domain/money.rkt"
+         "../pos/domain/tax.rkt"
          "../pos/domain/transaction-event.rkt"
          "../pos/domain/transaction.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt"
@@ -15,6 +16,13 @@
          "../pos/persistence/pos-database-migrations.rkt")
 
 (define test-barcode "049000001234")
+(define test-sale-item-event
+  (taxed-sale-item-added test-barcode
+                         "Test Apples"
+                         (money 199)
+                         "development-zero-tax"
+                         (tax-rate 0)
+                         (money 0)))
 (define unknown-barcode "000000000000")
 
 (define (call-with-store procedure)
@@ -147,7 +155,7 @@
        (check-equal?
         (journal-events connection "txn-scan")
         (list (transaction-started "txn-scan")
-              (sale-item-added test-barcode "Test Apples" (money 199))))
+              test-sale-item-event))
        (define recovered
          (query-transaction service "txn-scan" 2))
        (check-equal? (transaction-subtotal recovered) (money 199))
@@ -169,7 +177,7 @@
        (check-equal?
         (journal-events connection "txn-tender")
         (list (transaction-started "txn-tender")
-              (sale-item-added test-barcode "Test Apples" (money 199))
+              test-sale-item-event
               (cash-tendered (money 500)))))))
 
   (test-case "accepted completion persists exactly one completion event"
@@ -193,7 +201,7 @@
        (check-equal?
         (journal-events connection "txn-complete")
         (list (transaction-started "txn-complete")
-              (sale-item-added test-barcode "Test Apples" (money 199))
+              test-sale-item-event
               (cash-tendered (money 500))
               (transaction-completed))))))
 
@@ -806,13 +814,13 @@ SQL
        (check-equal?
         (journal-events connection "txn-A")
         (list (transaction-started "txn-A")
-              (sale-item-added test-barcode "Test Apples" (money 199))
+              test-sale-item-event
               (cash-tendered (money 500))))
        (check-equal?
         (journal-events connection "txn-B")
         (list (transaction-started "txn-B")
-              (sale-item-added test-barcode "Test Apples" (money 199))
-              (sale-item-added test-barcode "Test Apples" (money 199)))))))
+              test-sale-item-event
+              test-sale-item-event)))))
 
   (test-case "unsafe identity-free mutation functions are no longer exported"
     (for ([name (in-list '(transaction-service-start-transaction

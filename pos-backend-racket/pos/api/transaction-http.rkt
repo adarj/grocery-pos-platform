@@ -221,6 +221,8 @@
      (line-item->jsexpr line-item))
    'subtotal_minor_units
    (money-minor-units (transaction-subtotal transaction))
+   'tax_minor_units
+   (money-minor-units (transaction-tax transaction))
    'total_minor_units
    (money-minor-units (transaction-total transaction))
    'tendered_cash_minor_units

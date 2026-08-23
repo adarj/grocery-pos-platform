@@ -721,6 +721,8 @@ final class _BasketPanel extends StatelessWidget {
               minorUnits: snapshot.subtotalMinorUnits,
             ),
             const SizedBox(height: 10),
+            _MoneyRow(label: 'Tax', minorUnits: snapshot.taxMinorUnits),
+            const SizedBox(height: 10),
             _MoneyRow(
               label: 'Total',
               minorUnits: snapshot.totalMinorUnits,
@@ -942,6 +944,13 @@ final class _PaymentControls extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 24),
+            _MoneyRow(
+              label: 'Subtotal',
+              minorUnits: snapshot.subtotalMinorUnits,
+            ),
+            const SizedBox(height: 12),
+            _MoneyRow(label: 'Tax', minorUnits: snapshot.taxMinorUnits),
+            const SizedBox(height: 12),
             _MoneyRow(label: 'Total', minorUnits: snapshot.totalMinorUnits),
             if (paymentDetailsAvailable) ...[
               const SizedBox(height: 12),

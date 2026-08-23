@@ -10,6 +10,7 @@
 (define migration-1-name "create_transaction_events")
 (define migration-2-name "create_transaction_command_receipts")
 (define migration-3-name "create_catalog")
+(define migration-4-name "create_tax_categories")
 (define stream-sequence-index-name
   "transaction_events_stream_sequence_unique")
 
@@ -150,6 +151,46 @@ CREATE TABLE catalog_barcodes (
 SQL
   )
 
+(define create-tax-categories-table-sql
+  #<<SQL
+CREATE TABLE tax_categories (
+  tax_category_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(tax_category_id) = 'text'
+      AND length(tax_category_id) > 0
+    ),
+  description TEXT NOT NULL
+    CHECK (
+      typeof(description) = 'text'
+      AND length(description) > 0
+    ),
+  rate_millionths INTEGER NOT NULL
+    CHECK (
+      typeof(rate_millionths) = 'integer'
+      AND rate_millionths >= 0
+      AND rate_millionths <= 1000000
+    )
+)
+SQL
+  )
+
+(define create-catalog-item-tax-categories-table-sql
+  #<<SQL
+CREATE TABLE catalog_item_tax_categories (
+  item_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(item_id) = 'text'
+      AND length(item_id) > 0
+    ),
+  tax_category_id TEXT NOT NULL
+    CHECK (
+      typeof(tax_category_id) = 'text'
+      AND length(tax_category_id) > 0
+    )
+)
+SQL
+  )
+
 (define (schema-object-exists? connection type name)
   (= 1
      (db:query-value
@@ -256,6 +297,15 @@ SQL
   (list (vector "barcode" "TEXT" 1 1)
         (vector "item_id" "TEXT" 1 0)))
 
+(define expected-tax-category-columns
+  (list (vector "tax_category_id" "TEXT" 1 1)
+        (vector "description" "TEXT" 1 0)
+        (vector "rate_millionths" "INTEGER" 1 0)))
+
+(define expected-catalog-item-tax-category-columns
+  (list (vector "item_id" "TEXT" 1 1)
+        (vector "tax_category_id" "TEXT" 1 0)))
+
 (define (validate-owned-table-schema connection
                                      migration-version
                                      table-name
@@ -282,9 +332,9 @@ SQL
            table-name
            actual-columns))
 
-  ;; Both catalog tables are wholly owned by migration 3. Comparing their
-  ;; normalized DDL catches CHECK-constraint drift that PRAGMA table_info does
-  ;; not expose without pretending to parse arbitrary SQL.
+  ;; Each table passed here is wholly owned by its creating migration.
+  ;; Comparing normalized DDL catches CHECK-constraint drift that PRAGMA
+  ;; table_info does not expose without pretending to parse arbitrary SQL.
   (define recorded-sql
     (db:query-value
      connection
@@ -312,6 +362,64 @@ SQL
                                expected-catalog-barcode-columns
                                create-catalog-barcodes-table-sql))
 
+(define (validate-tax-reference-integrity connection)
+  (define unmapped-item-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM catalog_items AS item
+LEFT JOIN catalog_item_tax_categories AS mapping
+  ON mapping.item_id = item.item_id
+WHERE mapping.item_id IS NULL
+SQL
+     ))
+  (define orphan-item-mapping-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM catalog_item_tax_categories AS mapping
+LEFT JOIN catalog_items AS item
+  ON item.item_id = mapping.item_id
+WHERE item.item_id IS NULL
+SQL
+     ))
+  (define orphan-category-mapping-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM catalog_item_tax_categories AS mapping
+LEFT JOIN tax_categories AS category
+  ON category.tax_category_id = mapping.tax_category_id
+WHERE category.tax_category_id IS NULL
+SQL
+     ))
+  (unless (zero? unmapped-item-count)
+    (error 'migrate-pos-database!
+           "catalog contains items without a tax category mapping"))
+  (unless (zero? orphan-item-mapping-count)
+    (error 'migrate-pos-database!
+           "catalog tax mappings contain missing items"))
+  (unless (zero? orphan-category-mapping-count)
+    (error 'migrate-pos-database!
+           "catalog tax mappings contain missing tax categories")))
+
+(define (validate-tax-categories-schema connection)
+  (validate-owned-table-schema connection
+                               4
+                               "tax_categories"
+                               expected-tax-category-columns
+                               create-tax-categories-table-sql)
+  (validate-owned-table-schema
+   connection
+   4
+   "catalog_item_tax_categories"
+   expected-catalog-item-tax-category-columns
+   create-catalog-item-tax-categories-table-sql)
+  (validate-tax-reference-integrity connection))
+
 (define (apply-migration-1! connection)
   (db:query-exec connection create-events-table-sql)
   (db:query-exec connection create-stream-sequence-index-sql))
@@ -322,6 +430,26 @@ SQL
 (define (apply-migration-3! connection)
   (db:query-exec connection create-catalog-items-table-sql)
   (db:query-exec connection create-catalog-barcodes-table-sql))
+
+(define (apply-migration-4! connection)
+  (db:query-exec connection create-tax-categories-table-sql)
+  (db:query-exec connection create-catalog-item-tax-categories-table-sql)
+  (db:query-exec
+   connection
+   #<<SQL
+INSERT INTO tax_categories
+  (tax_category_id, description, rate_millionths)
+VALUES ('__legacy_zero_tax__', 'Legacy zero tax', 0)
+SQL
+   )
+  (db:query-exec
+   connection
+   #<<SQL
+INSERT INTO catalog_item_tax_categories (item_id, tax_category_id)
+SELECT item_id, '__legacy_zero_tax__'
+FROM catalog_items
+SQL
+   ))
 
 (define migrations
   (list
@@ -336,7 +464,11 @@ SQL
    (pos-database-migration 3
                            migration-3-name
                            apply-migration-3!
-                           validate-catalog-schema)))
+                           validate-catalog-schema)
+   (pos-database-migration 4
+                           migration-4-name
+                           apply-migration-4!
+                           validate-tax-categories-schema)))
 
 (define (migration-row-matches? row migration)
   (and (= (vector-length row) 2)

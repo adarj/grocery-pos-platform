@@ -130,7 +130,7 @@ create exact typed command
 
 The versioned record contains exactly an active transaction ID and an optional
 Transaction Command Schema v1 command. It never contains a transaction
-snapshot, line items, totals, status, tender/change, command result, event, or
+snapshot, line items, subtotal/tax/total, status, tender/change, command result, event, or
 backend receipt. This store is client intent/session metadata, not transaction
 truth; POS Core remains the only authority for sale state.
 
@@ -210,7 +210,8 @@ The current presentation supports:
 - barcode entry through a labeled field, button submission, or keyboard-wedge
   scanner Enter submission;
 - backend-order line-item rendering and integer-only USD minor-unit formatting;
-- backend-provided subtotal and total rendering without local calculation;
+- backend-provided subtotal, tax, and total rendering without local
+  calculation;
 - exact human cash-entry parsing into integer minor units without floating
   point;
 - cash-tender submission without locally deciding sufficiency;
@@ -298,9 +299,11 @@ current version.
 
 `TransactionSnapshot` mirrors the authoritative transaction query. Status is a
 closed value (`open`, `paid`, or `completed`), line items are backend-provided,
-and all money remains integer minor units. Tender and change are nullable until
-the backend reports them. The client does not derive totals or synthesize an
-empty transaction after a failed read.
+and subtotal, tax, total, tender, and change remain integer minor units. Tax is
+a required field and is never inferred as `total - subtotal`; the cashier
+renders all three summary values independently. Tender and change are nullable
+until the backend reports them. The client does not derive totals or synthesize
+an empty transaction after a failed read.
 
 ## Failures and uncertain mutations
 

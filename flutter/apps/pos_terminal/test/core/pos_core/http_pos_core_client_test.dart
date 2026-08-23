@@ -42,6 +42,7 @@ void main() {
       'status': 'open',
       'line_items': <Object?>[],
       'subtotal_minor_units': 0,
+      'tax_minor_units': 0,
       'total_minor_units': 0,
       'tendered_cash_minor_units': null,
       'change_due_minor_units': null,

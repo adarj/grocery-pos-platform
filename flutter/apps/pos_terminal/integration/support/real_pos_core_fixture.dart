@@ -211,7 +211,7 @@ final class RealPosCoreFixture {
     final backendDirectory = _join(repositoryRoot.path, 'pos-backend-racket');
     final catalogPath = _join(
       repositoryRoot.path,
-      'pos-backend-racket/fixtures/development/catalog-snapshot-v1.json',
+      'pos-backend-racket/fixtures/development/catalog-snapshot-v2.json',
     );
     final process = await Process.start(
       'racket',

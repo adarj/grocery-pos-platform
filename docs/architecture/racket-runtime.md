@@ -139,7 +139,7 @@ future checkout dependency is ready.
 
 Focused file-backed tests establish:
 
-- fresh runtime migration through schema v3;
+- fresh runtime migration through schema v4;
 - an empty persistent catalog rejecting the former development barcode rather
   than falling back to a fake;
 - active/inactive/unknown persistent catalog lookup behavior and exact

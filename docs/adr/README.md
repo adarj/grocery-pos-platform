@@ -18,3 +18,4 @@ ADRs document important architectural decisions, their context, and their conseq
 - [ADR-0010: Use an append-only event journal for transaction truth](0010-use-append-only-event-journal-for-transaction-truth.md)
 - [ADR-0011: Use durable command receipts and expected stream versions for idempotent transaction commands](0011-use-durable-command-receipts-and-expected-stream-versions.md)
 - [ADR-0012: Use an atomic local catalog snapshot for checkout reference data](0012-use-atomic-local-catalog-snapshot-for-checkout-reference-data.md)
+- [ADR-0013: Snapshot exact line tax in transaction events](0013-snapshot-exact-line-tax-in-transaction-events.md)

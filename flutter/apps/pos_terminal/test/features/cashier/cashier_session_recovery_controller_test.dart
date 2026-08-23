@@ -158,6 +158,7 @@ TransactionSnapshot snapshot({
     status: status,
     lineItems: const [],
     subtotalMinorUnits: 0,
+    taxMinorUnits: 0,
     totalMinorUnits: 0,
     tenderedCashMinorUnits: status == TransactionStatus.open ? null : 500,
     changeDueMinorUnits: status == TransactionStatus.open ? null : 0,

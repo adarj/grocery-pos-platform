@@ -112,3 +112,7 @@ This decision covers current local item/barcode reference data and exact
 current prices. It does not decide inventory quantities, tax categories,
 promotions, effective-dated pricing, catalog generations, weighted items,
 cloud synchronization, or catalog administration APIs.
+
+Tax categories and sale-time tax snapshotting were subsequently decided in
+[ADR-0013](0013-snapshot-exact-line-tax-in-transaction-events.md) without
+changing this full-snapshot/reference-data boundary.

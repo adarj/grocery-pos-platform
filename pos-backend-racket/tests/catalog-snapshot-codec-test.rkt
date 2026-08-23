@@ -27,6 +27,33 @@
     (hasheq 'barcode "000012340005" 'item_id "item-apples")
     (hasheq 'barcode "000000000001" 'item_id "item-free"))))
 
+(define valid-v2-snapshot-jsexpr
+  (hasheq
+   'schema_version 2
+   'tax_categories
+   (list
+    (hasheq 'tax_category_id "standard"
+            'description "Development Standard Tax"
+            'rate_millionths 88750)
+    (hasheq 'tax_category_id "exempt"
+            'description "Development Exempt"
+            'rate_millionths 0))
+   'items
+   (list
+    (hasheq 'item_id "item-apples"
+            'description "Test Apples"
+            'unit_price_minor_units 199
+            'active #t
+            'tax_category_id "standard")
+    (hasheq 'item_id "item-free"
+            'description "Free Sample"
+            'unit_price_minor_units 0
+            'active #f
+            'tax_category_id "exempt"))
+   'barcodes
+   (list
+    (hasheq 'barcode "049000001234" 'item_id "item-apples"))))
+
 (define (decode-jsexpr value)
   (json-string->catalog-snapshot (jsexpr->string value)))
 
@@ -84,7 +111,81 @@
     (check-equal? (catalog-snapshot-summary-item-count summary) 3)
     (check-equal? (catalog-snapshot-summary-active-item-count summary) 2)
     (check-equal? (catalog-snapshot-summary-inactive-item-count summary) 1)
-    (check-equal? (catalog-snapshot-summary-barcode-count summary) 3))
+    (check-equal? (catalog-snapshot-summary-barcode-count summary) 3)
+    (check-equal? (catalog-snapshot-summary-tax-category-count summary) 1))
+
+  (test-case "schema v2 decodes exact tax categories and item mappings"
+    (define result (decode-jsexpr valid-v2-snapshot-jsexpr))
+    (check-pred catalog-snapshot-decode-success? result)
+    (define snapshot
+      (catalog-snapshot-decode-success-snapshot result))
+    (check-equal? (catalog-snapshot-schema-version snapshot) 2)
+    (check-equal? (length (catalog-snapshot-tax-categories snapshot)) 2)
+    (define standard (first (catalog-snapshot-tax-categories snapshot)))
+    (check-equal?
+     (catalog-snapshot-tax-category-tax-category-id standard)
+     "standard")
+    (check-equal?
+     (catalog-snapshot-tax-category-description standard)
+     "Development Standard Tax")
+    (check-equal?
+     (catalog-snapshot-tax-category-rate-millionths standard)
+     88750)
+    (check-equal?
+     (catalog-snapshot-item-tax-category-id
+      (first (catalog-snapshot-items snapshot)))
+     "standard")
+    (check-equal?
+     (catalog-snapshot-summary-tax-category-count
+      (summarize-catalog-snapshot snapshot))
+     2))
+
+  (test-case "schema v1 normalizes to one explicit zero-tax category"
+    (define snapshot
+      (catalog-snapshot-decode-success-snapshot
+       (decode-jsexpr valid-snapshot-jsexpr)))
+    (check-equal? (length (catalog-snapshot-tax-categories snapshot)) 1)
+    (define category (first (catalog-snapshot-tax-categories snapshot)))
+    (check-equal?
+     (catalog-snapshot-tax-category-tax-category-id category)
+     legacy-zero-tax-category-id)
+    (check-equal?
+     (catalog-snapshot-tax-category-rate-millionths category)
+     0)
+    (for ([item (in-list (catalog-snapshot-items snapshot))])
+      (check-equal? (catalog-snapshot-item-tax-category-id item)
+                    legacy-zero-tax-category-id)))
+
+  (test-case "schema v2 tax categories and references fail closed"
+    (define category
+      (first (hash-ref valid-v2-snapshot-jsexpr 'tax_categories)))
+    (define item (first (hash-ref valid-v2-snapshot-jsexpr 'items)))
+    (check-failure
+     (hash-set valid-v2-snapshot-jsexpr
+               'tax_categories
+               (list category category))
+     'duplicate-tax-category-id)
+    (check-failure
+     (hash-set valid-v2-snapshot-jsexpr
+               'items
+               (list (hash-set item 'tax_category_id "missing")))
+     'unknown-tax-category-reference)
+    (for ([rate (in-list (list -1 1000001 1.0 "88750"))])
+      (check-failure
+       (hash-set valid-v2-snapshot-jsexpr
+                 'tax_categories
+                 (list (hash-set category 'rate_millionths rate)))
+       'invalid-tax-rate))
+    (check-failure
+     (hash-set valid-v2-snapshot-jsexpr
+               'items
+               (list (hash-remove item 'tax_category_id)))
+     'missing-field)
+    (check-failure
+     (hash-set valid-v2-snapshot-jsexpr
+               'tax_categories
+               (list (hash-set category 'unexpected #t)))
+     'unexpected-field))
 
   (test-case "multiple barcodes, barcode-less items, and zero price are valid"
     (define result (decode-jsexpr valid-snapshot-jsexpr))
@@ -124,14 +225,14 @@ JSON
      (string-append (jsexpr->string valid-snapshot-jsexpr) " trailing")
      'malformed-json))
 
-  (test-case "root must be an exact schema v1 object"
+  (test-case "root must be an exact supported schema object"
     (check-failure '() 'expected-object)
     (for ([field (in-list '(schema_version items barcodes))])
       (check-failure (hash-remove valid-snapshot-jsexpr field)
                      'missing-field))
     (check-failure (hash-set valid-snapshot-jsexpr 'unexpected "field")
                    'unexpected-field)
-    (check-failure (hash-set valid-snapshot-jsexpr 'schema_version 2)
+    (check-failure (hash-set valid-snapshot-jsexpr 'schema_version 3)
                    'unsupported-schema-version)
     (check-failure (hash-set valid-snapshot-jsexpr 'schema_version 1.0)
                    'invalid-field-type)

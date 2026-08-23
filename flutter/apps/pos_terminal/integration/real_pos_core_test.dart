@@ -15,6 +15,8 @@ import 'support/real_pos_core_fixture.dart';
 const _developmentBarcode = '049000001234';
 const _developmentDescription = 'Test Apples';
 const _developmentUnitPrice = 199;
+const _developmentLineTax = 20;
+const _developmentLineTotal = 219;
 
 final class _SequentialIntegrationIds implements CashierIdGenerator {
   _SequentialIntegrationIds(this.namespace);
@@ -111,6 +113,7 @@ void _expectOpenEmpty(TransactionSnapshot snapshot) {
   expect(snapshot.version, 1);
   expect(snapshot.lineItems, isEmpty);
   expect(snapshot.subtotalMinorUnits, 0);
+  expect(snapshot.taxMinorUnits, 0);
   expect(snapshot.totalMinorUnits, 0);
   expect(snapshot.tenderedCashMinorUnits, isNull);
   expect(snapshot.changeDueMinorUnits, isNull);
@@ -133,7 +136,8 @@ Future<void> _scanThreeTimes(CashierSessionController controller) async {
       _expectDevelopmentItem(item);
     }
     expect(snapshot.subtotalMinorUnits, _developmentUnitPrice * count);
-    expect(snapshot.totalMinorUnits, _developmentUnitPrice * count);
+    expect(snapshot.taxMinorUnits, _developmentLineTax * count);
+    expect(snapshot.totalMinorUnits, _developmentLineTotal * count);
   }
 }
 
@@ -170,15 +174,32 @@ void main() {
       expect(scanned.lineItems, hasLength(1));
       _expectDevelopmentItem(scanned.lineItems.single);
       expect(scanned.subtotalMinorUnits, 199);
-      expect(scanned.totalMinorUnits, 199);
+      expect(scanned.taxMinorUnits, 20);
+      expect(scanned.totalMinorUnits, 219);
+
+      // The base subtotal is 199, so 200 would have been sufficient before
+      // tax. The real backend must reject it against the tax-inclusive 219.
+      await cashier.controller.tenderCash(200);
+      final insufficient = _snapshot(cashier.controller);
+      expect(insufficient.status, TransactionStatus.open);
+      expect(insufficient.version, 2);
+      expect(
+        cashier.controller.state.lastCommandResult!.outcomeKind,
+        PosCommandOutcomeKind.domainRejected,
+      );
+      expect(
+        cashier.controller.state.lastCommandResult!.outcomeCode,
+        'insufficient_tender',
+      );
 
       await cashier.controller.tenderCash(500);
       final paid = _snapshot(cashier.controller);
       expect(paid.status, TransactionStatus.paid);
       expect(paid.version, 3);
-      expect(paid.totalMinorUnits, 199);
+      expect(paid.taxMinorUnits, 20);
+      expect(paid.totalMinorUnits, 219);
       expect(paid.tenderedCashMinorUnits, 500);
-      expect(paid.changeDueMinorUnits, 301);
+      expect(paid.changeDueMinorUnits, 281);
 
       await cashier.controller.completeTransaction();
       final completed = _snapshot(cashier.controller);
@@ -208,7 +229,8 @@ void main() {
         _developmentDescription,
         _developmentDescription,
       ]);
-      expect(snapshot.totalMinorUnits, 597);
+      expect(snapshot.taxMinorUnits, 60);
+      expect(snapshot.totalMinorUnits, 657);
     },
   );
 
@@ -228,15 +250,17 @@ void main() {
       final paid = _snapshot(cashier.controller);
       expect(paid.status, TransactionStatus.paid);
       expect(paid.lineItems, hasLength(3));
-      expect(paid.totalMinorUnits, 597);
+      expect(paid.taxMinorUnits, 60);
+      expect(paid.totalMinorUnits, 657);
       expect(paid.tenderedCashMinorUnits, 1000);
-      expect(paid.changeDueMinorUnits, 403);
+      expect(paid.changeDueMinorUnits, 343);
 
       await cashier.controller.completeTransaction();
       final completed = _snapshot(cashier.controller);
       expect(completed.status, TransactionStatus.completed);
       expect(completed.lineItems, hasLength(3));
-      expect(completed.totalMinorUnits, 597);
+      expect(completed.taxMinorUnits, 60);
+      expect(completed.totalMinorUnits, 657);
 
       if (cycle < 9) {
         await cashier.controller.beginNextSale();
@@ -276,7 +300,8 @@ void main() {
       expect(restored.status, TransactionStatus.open);
       expect(restored.version, 2);
       expect(restored.lineItems, hasLength(1));
-      expect(restored.totalMinorUnits, 199);
+      expect(restored.taxMinorUnits, 20);
+      expect(restored.totalMinorUnits, 219);
 
       await restoredCashier.controller.tenderCash(500);
       expect(
@@ -311,9 +336,10 @@ void main() {
     final restored = _snapshot(restoredCashier.controller);
     expect(restored.transactionId, transactionId);
     expect(restored.status, TransactionStatus.paid);
-    expect(restored.totalMinorUnits, 199);
+    expect(restored.taxMinorUnits, 20);
+    expect(restored.totalMinorUnits, 219);
     expect(restored.tenderedCashMinorUnits, 500);
-    expect(restored.changeDueMinorUnits, 301);
+    expect(restored.changeDueMinorUnits, 281);
 
     await restoredCashier.controller.completeTransaction();
     expect(
@@ -416,6 +442,8 @@ void main() {
       expect(resolved.outcomeStreamVersion, 2);
       expect(authoritative.version, 2);
       expect(authoritative.lineItems, hasLength(1));
+      expect(authoritative.taxMinorUnits, 20);
+      expect(authoritative.totalMinorUnits, 219);
       _expectDevelopmentItem(authoritative.lineItems.single);
       expect(restoredCashier.controller.state.pendingCommand, isNull);
       expect(restoredCashier.ids.commandIdCalls, 0);

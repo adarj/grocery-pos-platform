@@ -2,6 +2,7 @@
 
 (require "catalog-item.rkt"
          "money.rkt"
+         "tax.rkt"
          "transaction-event.rkt")
 
 (provide start-transaction
@@ -14,6 +15,7 @@
          transaction-status
          transaction-line-items
          transaction-subtotal
+         transaction-tax
          transaction-total
          transaction-tendered-cash
          transaction-change-due
@@ -21,6 +23,9 @@
          transaction-line-item-barcode
          transaction-line-item-description
          transaction-line-item-unit-price
+         transaction-line-item-tax-category-id
+         transaction-line-item-tax-rate
+         transaction-line-item-tax-amount
          scan-barcode
          scan-accepted?
          scan-accepted-transaction
@@ -62,19 +67,45 @@
 (struct transaction (id status line-items cash-tender)
   #:transparent)
 
-(struct transaction-line-item (barcode description unit-price)
+(struct transaction-line-item
+  (barcode description unit-price tax-category-id tax-rate tax-amount)
   #:transparent
   #:guard
-  (lambda (barcode description unit-price type-name)
+  (lambda (barcode
+           description
+           unit-price
+           tax-category-id
+           tax-rate
+           tax-amount
+           type-name)
     (unless (string? barcode)
       (raise-argument-error type-name "string?" barcode))
     (unless (string? description)
       (raise-argument-error type-name "string?" description))
     (unless (money? unit-price)
       (raise-argument-error type-name "money?" unit-price))
+    (unless (or (not tax-category-id)
+                (and (string? tax-category-id)
+                     (positive? (string-length tax-category-id))))
+      (raise-argument-error
+       type-name "(or/c #f non-empty-string?)" tax-category-id))
+    (unless (or (not tax-rate) (tax-rate? tax-rate))
+      (raise-argument-error type-name "(or/c #f tax-rate?)" tax-rate))
+    (unless (eq? (not tax-category-id) (not tax-rate))
+      (raise-arguments-error
+       type-name
+       "tax category and rate must either both be present or both be absent"
+       "tax category ID" tax-category-id
+       "tax rate" tax-rate))
+    (unless (money? tax-amount)
+      (raise-argument-error type-name "money?" tax-amount))
     (values (string->immutable-string barcode)
             (string->immutable-string description)
-            unit-price)))
+            unit-price
+            (and tax-category-id
+                 (string->immutable-string tax-category-id))
+            tax-rate
+            tax-amount)))
 
 (struct cash-tender (amount)
   #:transparent)
@@ -115,9 +146,20 @@
 (define (make-open-transaction id)
   (transaction (string->immutable-string id) 'open '() #f))
 
-(define (add-sale-line-item current-transaction barcode description unit-price)
+(define (add-sale-line-item current-transaction
+                            barcode
+                            description
+                            unit-price
+                            tax-category-id
+                            tax-rate
+                            tax-amount)
   (define line-item
-    (transaction-line-item barcode description unit-price))
+    (transaction-line-item barcode
+                           description
+                           unit-price
+                           tax-category-id
+                           tax-rate
+                           tax-amount))
   (struct-copy transaction current-transaction
                [line-items
                 (append (transaction-line-items current-transaction)
@@ -176,7 +218,20 @@
       (transaction-line-item-unit-price line-item)))))
 
 (define (transaction-total current-transaction)
-  (transaction-subtotal current-transaction))
+  (unless (transaction? current-transaction)
+    (raise-argument-error 'transaction-total "transaction?" current-transaction))
+  (money
+   (+ (money-minor-units (transaction-subtotal current-transaction))
+      (money-minor-units (transaction-tax current-transaction)))))
+
+(define (transaction-tax current-transaction)
+  (unless (transaction? current-transaction)
+    (raise-argument-error 'transaction-tax "transaction?" current-transaction))
+  (money
+   (for/sum ([line-item
+              (in-list (transaction-line-items current-transaction))])
+     (money-minor-units
+      (transaction-line-item-tax-amount line-item)))))
 
 (define (transaction-tendered-cash current-transaction)
   (unless (transaction? current-transaction)
@@ -215,10 +270,14 @@
         (scan-rejected 'unknown-barcode current-transaction '())]
        [else
         (define event
-          (sale-item-added
+          (taxed-sale-item-added
            (catalog-item-barcode item)
            (catalog-item-description item)
-           (catalog-item-unit-price item)))
+           (catalog-item-unit-price item)
+           (catalog-item-tax-category-id item)
+           (catalog-item-tax-rate item)
+           (calculate-line-tax (catalog-item-unit-price item)
+                               (catalog-item-tax-rate item))))
         (decision-from-event current-transaction
                              event
                              scan-accepted
@@ -278,7 +337,24 @@
            current-transaction
            (sale-item-added-barcode event)
            (sale-item-added-description event)
-           (sale-item-added-unit-price event)))
+           (sale-item-added-unit-price event)
+           #f
+           #f
+           (money 0)))
+         (event-rejected
+          'invalid-transaction-state
+          current-transaction))]
+    [(taxed-sale-item-added? event)
+     (if (transaction-open? current-transaction)
+         (event-applied
+          (add-sale-line-item
+           current-transaction
+           (taxed-sale-item-added-barcode event)
+           (taxed-sale-item-added-description event)
+           (taxed-sale-item-added-unit-price event)
+           (taxed-sale-item-added-tax-category-id event)
+           (taxed-sale-item-added-tax-rate event)
+           (taxed-sale-item-added-tax-amount event)))
          (event-rejected
           'invalid-transaction-state
           current-transaction))]

@@ -26,7 +26,7 @@ Each test fixture:
   Racket entry point;
 - allocates an available loopback TCP port;
 - creates an isolated temporary directory;
-- activates the versioned development Catalog Snapshot v1 into that fixture's
+- activates the versioned development Catalog Snapshot v2 into that fixture's
   SQLite database through the production catalog CLI before first startup;
 - starts `pos-backend-racket/main.rkt` with an absolute temporary
   `SQLITE_DB_PATH`;
@@ -53,9 +53,15 @@ Flutter controller
   -> sale-time transaction event
 ```
 
+The suite verifies the configured development line tax, tax-inclusive tender
+sufficiency and change, repeated per-line rounding, restart replay, and
+same-command recovery without duplicate merchandise or tax facts.
+
 If catalog activation fails, the fixture fails before starting the server and
-reports bounded CLI output. Test Apples exists only in the version-controlled
-development snapshot; production runtime contains no implicit fixture lookup.
+reports bounded CLI output. The fixture activates Catalog Snapshot Schema v2,
+including deterministic development-only tax categories. Test Apples exists
+only in that version-controlled snapshot; production runtime contains no
+implicit fixture lookup, and the fixture rate is not legal tax configuration.
 
 ## Environment
 

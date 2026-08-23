@@ -6,6 +6,7 @@ void main() {
   Map<String, Object?> snapshotJson({
     String status = 'open',
     Object? subtotal = 199,
+    Object? tax = 20,
     Object? tenderedCash,
     Object? changeDue,
   }) => {
@@ -20,7 +21,8 @@ void main() {
       },
     ],
     'subtotal_minor_units': subtotal,
-    'total_minor_units': 199,
+    'tax_minor_units': tax,
+    'total_minor_units': 219,
     'tendered_cash_minor_units': tenderedCash,
     'change_due_minor_units': changeDue,
   };
@@ -36,7 +38,8 @@ void main() {
     expect(snapshot.lineItems.single.description, 'Test Apples');
     expect(snapshot.lineItems.single.unitPriceMinorUnits, 199);
     expect(snapshot.subtotalMinorUnits, 199);
-    expect(snapshot.totalMinorUnits, 199);
+    expect(snapshot.taxMinorUnits, 20);
+    expect(snapshot.totalMinorUnits, 219);
     expect(snapshot.tenderedCashMinorUnits, isNull);
     expect(snapshot.changeDueMinorUnits, isNull);
   });
@@ -71,8 +74,27 @@ void main() {
     }
   });
 
+  test('tax accepts zero and rejects floating, negative, or wrong types', () {
+    expect(TransactionSnapshot.fromJson(snapshotJson(tax: 0)).taxMinorUnits, 0);
+    for (final value in [20.0, '20', -1]) {
+      expect(
+        () => TransactionSnapshot.fromJson(snapshotJson(tax: value)),
+        throwsA(isA<PosCoreInvalidResponseFailure>()),
+      );
+    }
+  });
+
   test('missing authoritative fields fail closed', () {
     final missing = snapshotJson()..remove('total_minor_units');
+
+    expect(
+      () => TransactionSnapshot.fromJson(missing),
+      throwsA(isA<PosCoreInvalidResponseFailure>()),
+    );
+  });
+
+  test('missing authoritative tax fails closed', () {
+    final missing = snapshotJson()..remove('tax_minor_units');
 
     expect(
       () => TransactionSnapshot.fromJson(missing),

@@ -126,16 +126,17 @@ Verified capabilities currently include:
 * RackUnit backend tests;
 * exact-money, immutable cash-sale transaction domain behavior;
 * transaction domain events and deterministic replay;
-* strict, language-independent Transaction Event Schema v1 JSON;
+* strict, language-independent Transaction Event Schema v1/v2 JSON with
+  backward-compatible untaxed history and exact sale-time line-tax snapshots;
 * strict, language-independent Transaction Command Schema v1 with typed logical
   request identity and caller-supplied expected stream versions;
 * append-only SQLite transaction journal with migration v1, per-stream
   sequencing, atomic batch append, and optimistic stream-version checks;
 * migration v2 durable command receipts with database-global command IDs and
   atomic accepted-event/command-outcome persistence;
-* migration v3 persistent local catalog with strict Catalog Snapshot v1
-  validation, atomic full replacement, SQLite runtime checkout lookup, and
-  sale-time transaction snapshot isolation;
+* migration v3/v4 persistent local catalog and tax-reference tables with strict
+  Catalog Snapshot v1/v2 validation, atomic full replacement, SQLite runtime
+  checkout lookup, and sale-time price/tax snapshot isolation;
 * idempotent persistent transaction application service with deterministic
   two-connection concurrency and file-backed restart/retry coverage;
 * Racket runtime composition with startup migration, a bounded SQLite pool,
@@ -146,7 +147,7 @@ Verified capabilities currently include:
 * typed Flutter POS Core client models for transaction commands, durable command
   outcomes, authoritative transaction snapshots, and safe failures;
 * Flutter cashier session orchestration and a start/scan/cash-tender/complete
-  interface driven by authoritative transaction reads;
+  interface rendering authoritative subtotal, tax, total, payment, and change;
 * Flutter widget tests;
 * isolated Flutter-to-Racket real-process integration tests covering complete
   cash sales, restart recovery, uncertain transport, and durable same-command
@@ -208,8 +209,8 @@ For a fresh development database, validate and atomically activate the small
 version-controlled catalog fixture first:
 
 ```bash
-just catalog-validate pos-backend-racket/fixtures/development/catalog-snapshot-v1.json
-just catalog-activate pos-backend-racket/fixtures/development/catalog-snapshot-v1.json .local/sqlite/pos-dev.db
+just catalog-validate pos-backend-racket/fixtures/development/catalog-snapshot-v2.json
+just catalog-activate pos-backend-racket/fixtures/development/catalog-snapshot-v2.json .local/sqlite/pos-dev.db
 ```
 
 Activation replaces the complete current catalog in the explicitly selected

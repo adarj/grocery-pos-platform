@@ -11,6 +11,7 @@
          "../pos/application/transaction-service.rkt"
          "../pos/domain/fake-catalog.rkt"
          "../pos/domain/money.rkt"
+         "../pos/domain/tax.rkt"
          "../pos/domain/transaction-event.rkt"
          "../pos/persistence/catalog-snapshot-codec.rkt"
          "../pos/persistence/sqlite-catalog.rkt"
@@ -130,7 +131,8 @@
             (migration-history database-path)
             (list (vector 1 "create_transaction_events")
                   (vector 2 "create_transaction_command_receipts")
-                  (vector 3 "create_catalog")))
+                  (vector 3 "create_catalog")
+                  (vector 4 "create_tax_categories")))
            (with-connection
             database-path
             (lambda (connection)
@@ -264,8 +266,13 @@ SQL
            (check-pred journal-load-succeeded? events)
            (check-equal?
             (second (journal-load-succeeded-events events))
-            (sale-item-added
-             "049000001234" "Persistent Test Apples" (money 199))))
+            (taxed-sale-item-added
+             "049000001234"
+             "Persistent Test Apples"
+             (money 199)
+             "__legacy_zero_tax__"
+             (tax-rate 0)
+             (money 0))))
          (lambda () (stop-pos-runtime! runtime-persisted))))))
 
   (test-case "runtime separates startup/request connections and owns shutdown"
@@ -338,7 +345,8 @@ SQL
             (migration-history database-path)
             (list (vector 1 "create_transaction_events")
                   (vector 2 "create_transaction_command_receipts")
-                  (vector 3 "create_catalog")))
+                  (vector 3 "create_catalog")
+                  (vector 4 "create_tax_categories")))
            (define service
              (pos-runtime-transaction-service runtime-B))
            (define retry-receipt
@@ -480,7 +488,7 @@ SQL
                (length (journal-load-succeeded-events loaded))
                2)
               (check-true
-               (sale-item-added?
+               (taxed-sale-item-added?
                 (second (journal-load-succeeded-events loaded))))
               (check-equal?
                (db:query-value

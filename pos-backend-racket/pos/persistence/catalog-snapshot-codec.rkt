@@ -12,13 +12,19 @@
          catalog-snapshot-decode-failure-detail
          catalog-snapshot?
          catalog-snapshot-schema-version
+         catalog-snapshot-tax-categories
          catalog-snapshot-items
          catalog-snapshot-barcodes
+         catalog-snapshot-tax-category?
+         catalog-snapshot-tax-category-tax-category-id
+         catalog-snapshot-tax-category-description
+         catalog-snapshot-tax-category-rate-millionths
          catalog-snapshot-item?
          catalog-snapshot-item-item-id
          catalog-snapshot-item-description
          catalog-snapshot-item-unit-price-minor-units
          catalog-snapshot-item-active?
+         catalog-snapshot-item-tax-category-id
          catalog-snapshot-barcode?
          catalog-snapshot-barcode-barcode
          catalog-snapshot-barcode-item-id
@@ -27,7 +33,9 @@
          catalog-snapshot-summary-item-count
          catalog-snapshot-summary-active-item-count
          catalog-snapshot-summary-inactive-item-count
-         catalog-snapshot-summary-barcode-count)
+         catalog-snapshot-summary-barcode-count
+         catalog-snapshot-summary-tax-category-count
+         legacy-zero-tax-category-id)
 
 (struct catalog-snapshot-decode-success (snapshot)
   #:transparent)
@@ -35,23 +43,33 @@
   #:transparent)
 
 ;; Constructors stay private. A catalog-snapshot value therefore represents a
-;; complete Schema v1 document that has passed primitive, duplicate, and
-;; cross-reference validation.
-(struct catalog-snapshot (schema-version items barcodes)
+;; complete Schema v1/v2 document that has passed primitive, duplicate, and
+;; cross-reference validation. Schema v1 is normalized to explicit zero tax.
+(struct catalog-snapshot (schema-version tax-categories items barcodes)
+  #:transparent)
+(struct catalog-snapshot-tax-category
+  (tax-category-id description rate-millionths)
   #:transparent)
 (struct catalog-snapshot-item
-  (item-id description unit-price-minor-units active?)
+  (item-id description unit-price-minor-units active? tax-category-id)
   #:transparent)
 (struct catalog-snapshot-barcode (barcode item-id)
   #:transparent)
 (struct catalog-snapshot-summary
-  (item-count active-item-count inactive-item-count barcode-count)
+  (item-count active-item-count inactive-item-count barcode-count
+              tax-category-count)
   #:transparent)
 
-(define schema-version 1)
-(define root-fields '(schema_version items barcodes))
-(define item-fields
+(define legacy-zero-tax-category-id "__legacy_zero_tax__")
+(define legacy-zero-tax-category-description "Legacy zero tax")
+(define v1-root-fields '(schema_version items barcodes))
+(define v2-root-fields '(schema_version tax_categories items barcodes))
+(define v1-item-fields
   '(item_id description unit_price_minor_units active))
+(define v2-item-fields
+  '(item_id description unit_price_minor_units active tax_category_id))
+(define tax-category-fields
+  '(tax_category_id description rate_millionths))
 (define barcode-fields '(barcode item_id))
 
 (define (decode-failure code detail-format . arguments)
@@ -107,7 +125,45 @@
       field)]
     [else (string->immutable-string value)]))
 
-(define (decode-item value index)
+(define (decode-tax-category value index)
+  (define context (format "catalog tax category at index ~a" index))
+  (cond
+    [(not (hash? value))
+     (decode-failure 'expected-object "~a must be a JSON object" context)]
+    [else
+     (define shape-failure
+       (validate-exact-fields value tax-category-fields context))
+     (cond
+       [shape-failure shape-failure]
+       [else
+        (define tax-category-id
+          (decode-non-empty-string
+           (hash-ref value 'tax_category_id)
+           'tax_category_id
+           'invalid-tax-category-id
+           context))
+        (define description
+          (decode-non-empty-string
+           (hash-ref value 'description)
+           'description
+           'invalid-description
+           context))
+        (define rate (hash-ref value 'rate_millionths))
+        (cond
+          [(catalog-snapshot-decode-failure? tax-category-id)
+           tax-category-id]
+          [(catalog-snapshot-decode-failure? description) description]
+          [(not (and (exact-integer? rate)
+                     (<= 0 rate 1000000)))
+           (decode-failure
+            'invalid-tax-rate
+            "~a field 'rate_millionths must contain an exact integer from 0 through 1000000"
+            context)]
+          [else
+           (catalog-snapshot-tax-category
+            tax-category-id description rate)])])]))
+
+(define (decode-item value index item-fields tax-category-required?)
   (define context (format "catalog item at index ~a" index))
   (cond
     [(not (hash? value))
@@ -146,7 +202,18 @@
             "~a field 'active must contain a JSON boolean"
             context)]
           [else
-           (catalog-snapshot-item item-id description price active)])])]))
+           (define tax-category-id
+             (if tax-category-required?
+                 (decode-non-empty-string
+                  (hash-ref value 'tax_category_id)
+                  'tax_category_id
+                  'invalid-tax-category-id
+                  context)
+                 legacy-zero-tax-category-id))
+           (if (catalog-snapshot-decode-failure? tax-category-id)
+               tax-category-id
+               (catalog-snapshot-item
+                item-id description price active tax-category-id))])])]))
 
 (define (decode-barcode value index)
   (define context (format "catalog barcode at index ~a" index))
@@ -198,12 +265,21 @@
            key
            (loop (rest remaining) (hash-set seen key #t)))])))
 
-(define (validate-cross-record-invariants items barcodes)
+(define (validate-cross-record-invariants tax-categories items barcodes)
+  (define duplicate-tax-category-id
+    (find-duplicate
+     tax-categories
+     catalog-snapshot-tax-category-tax-category-id))
   (define duplicate-item-id
     (find-duplicate items catalog-snapshot-item-item-id))
   (define duplicate-barcode
     (find-duplicate barcodes catalog-snapshot-barcode-barcode))
   (cond
+    [duplicate-tax-category-id
+     (decode-failure
+      'duplicate-tax-category-id
+      "catalog snapshot contains duplicate tax_category_id ~s"
+      duplicate-tax-category-id)]
     [duplicate-item-id
      (decode-failure
       'duplicate-item-id
@@ -215,6 +291,18 @@
       "catalog snapshot contains duplicate barcode ~s"
       duplicate-barcode)]
     [else
+     (define tax-category-ids
+       (for/hash ([category (in-list tax-categories)])
+         (values
+          (catalog-snapshot-tax-category-tax-category-id category)
+          #t)))
+     (define missing-tax-reference
+       (for/first ([item (in-list items)]
+                   #:unless
+                   (hash-has-key?
+                    tax-category-ids
+                    (catalog-snapshot-item-tax-category-id item)))
+         item))
      (define item-ids
        (for/hash ([item (in-list items)])
          (values (catalog-snapshot-item-item-id item) #t)))
@@ -225,13 +313,20 @@
                     item-ids
                     (catalog-snapshot-barcode-item-id assignment)))
          assignment))
-     (if missing-reference
-         (decode-failure
-          'unknown-item-reference
-          "barcode ~s references missing item_id ~s"
-          (catalog-snapshot-barcode-barcode missing-reference)
-          (catalog-snapshot-barcode-item-id missing-reference))
-         #f)]))
+     (cond
+       [missing-tax-reference
+        (decode-failure
+         'unknown-tax-category-reference
+         "item_id ~s references missing tax_category_id ~s"
+         (catalog-snapshot-item-item-id missing-tax-reference)
+         (catalog-snapshot-item-tax-category-id missing-tax-reference))]
+       [missing-reference
+        (decode-failure
+         'unknown-item-reference
+         "barcode ~s references missing item_id ~s"
+         (catalog-snapshot-barcode-barcode missing-reference)
+         (catalog-snapshot-barcode-item-id missing-reference))]
+       [else #f])]))
 
 (define (jsexpr->catalog-snapshot value)
   (let/ec return
@@ -240,23 +335,37 @@
        (decode-failure
         'expected-object
         "catalog snapshot must be a JSON object")))
-    (define shape-failure
-      (validate-exact-fields value root-fields "catalog snapshot"))
-    (when shape-failure (return shape-failure))
-
+    (unless (hash-has-key? value 'schema_version)
+      (return
+       (decode-failure
+        'missing-field
+        "catalog snapshot is missing required field 'schema_version")))
     (define version (hash-ref value 'schema_version))
-    (define raw-items (hash-ref value 'items))
-    (define raw-barcodes (hash-ref value 'barcodes))
     (unless (exact-integer? version)
       (return
        (invalid-field-type
         'schema_version "an exact integer" "catalog snapshot")))
-    (unless (= version schema-version)
+    (unless (or (= version 1) (= version 2))
       (return
        (decode-failure
         'unsupported-schema-version
         "unsupported catalog snapshot schema version ~a"
         version)))
+    (define shape-failure
+      (validate-exact-fields
+       value
+       (if (= version 1) v1-root-fields v2-root-fields)
+       "catalog snapshot"))
+    (when shape-failure (return shape-failure))
+
+    (define raw-tax-categories
+      (if (= version 1) '() (hash-ref value 'tax_categories)))
+    (define raw-items (hash-ref value 'items))
+    (define raw-barcodes (hash-ref value 'barcodes))
+    (unless (list? raw-tax-categories)
+      (return
+       (invalid-field-type
+        'tax_categories "a JSON array" "catalog snapshot")))
     (unless (list? raw-items)
       (return
        (invalid-field-type 'items "a JSON array" "catalog snapshot")))
@@ -264,17 +373,34 @@
       (return
        (invalid-field-type 'barcodes "a JSON array" "catalog snapshot")))
 
-    (define items (decode-list-elements raw-items decode-item))
+    (define tax-categories
+      (if (= version 1)
+          (list
+           (catalog-snapshot-tax-category
+            legacy-zero-tax-category-id
+            legacy-zero-tax-category-description
+            0))
+          (decode-list-elements raw-tax-categories decode-tax-category)))
+    (when (catalog-snapshot-decode-failure? tax-categories)
+      (return tax-categories))
+    (define items
+      (decode-list-elements
+       raw-items
+       (lambda (value index)
+         (decode-item value
+                      index
+                      (if (= version 1) v1-item-fields v2-item-fields)
+                      (= version 2)))))
     (when (catalog-snapshot-decode-failure? items) (return items))
     (define barcodes
       (decode-list-elements raw-barcodes decode-barcode))
     (when (catalog-snapshot-decode-failure? barcodes) (return barcodes))
     (define invariant-failure
-      (validate-cross-record-invariants items barcodes))
+      (validate-cross-record-invariants tax-categories items barcodes))
     (when invariant-failure (return invariant-failure))
 
     (catalog-snapshot-decode-success
-     (catalog-snapshot version items barcodes))))
+     (catalog-snapshot version tax-categories items barcodes))))
 
 (define (strict-json-result->catalog-snapshot result malformed-detail)
   (cond
@@ -313,4 +439,5 @@
    (length items)
    active-count
    (- (length items) active-count)
-   (length (catalog-snapshot-barcodes snapshot))))
+   (length (catalog-snapshot-barcodes snapshot))
+   (length (catalog-snapshot-tax-categories snapshot))))

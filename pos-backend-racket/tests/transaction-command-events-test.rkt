@@ -63,10 +63,13 @@
     (define events (scan-accepted-events result))
     (define event (only-event events))
 
-    (check-pred sale-item-added? event)
-    (check-equal? (sale-item-added-barcode event) test-barcode)
-    (check-equal? (sale-item-added-description event) "Test Apples")
-    (check-equal? (sale-item-added-unit-price event) (money 199))
+    (check-pred taxed-sale-item-added? event)
+    (check-equal? (taxed-sale-item-added-barcode event) test-barcode)
+    (check-equal? (taxed-sale-item-added-description event) "Test Apples")
+    (check-equal? (taxed-sale-item-added-unit-price event) (money 199))
+    (check-equal? (taxed-sale-item-added-tax-category-id event)
+                  "development-zero-tax")
+    (check-equal? (taxed-sale-item-added-tax-amount event) (money 0))
 
     (define applied (apply-transaction-event open event))
     (check-pred event-applied? applied)

@@ -8,6 +8,7 @@
          "../pos/application/transaction-service.rkt"
          "../pos/domain/fake-catalog.rkt"
          "../pos/domain/money.rkt"
+         "../pos/domain/tax.rkt"
          "../pos/domain/transaction-event.rkt"
          "../pos/domain/transaction.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt"
@@ -16,6 +17,13 @@
          "../pos/persistence/pos-database-migrations.rkt")
 
 (define test-barcode "049000001234")
+(define test-sale-item-event
+  (taxed-sale-item-added test-barcode
+                         "Test Apples"
+                         (money 199)
+                         "development-zero-tax"
+                         (tax-rate 0)
+                         (money 0)))
 (define unknown-barcode "000000000000")
 
 (define (call-with-connection database-path mode procedure)
@@ -176,8 +184,7 @@ SQL
            (check-equal?
             (journal-load-succeeded-events loaded)
             (list (transaction-started "txn-001")
-                  (sale-item-added
-                   test-barcode "Test Apples" (money 199))
+                  test-sale-item-event
                   (cash-tendered (money 500))
                   (transaction-completed)))
            (define loaded-receipt
@@ -239,8 +246,7 @@ SQL
            (check-equal?
             (journal-events connection "txn-post-commit")
             (list (transaction-started "txn-post-commit")
-                  (sale-item-added
-                   test-barcode "Test Apples" (money 199))))
+                  test-sale-item-event))
            (check-equal? (receipt-count connection "cmd-post-commit") 1)
            (define stored
              (load-transaction-command-receipt
@@ -343,8 +349,7 @@ SQL
            (check-equal?
             (journal-events connection-B "txn-lost-response")
             (list (transaction-started "txn-lost-response")
-                  (sale-item-added
-                   test-barcode "Test Apples" (money 199)))))))
+                  test-sale-item-event)))))
       (lambda ()
         (when (file-exists? database-path)
           (delete-file database-path)))))
@@ -414,8 +419,7 @@ SQL
            (check-equal?
             (journal-events connection "txn-pre-commit")
             (list (transaction-started "txn-pre-commit")
-                  (sale-item-added
-                   test-barcode "Test Apples" (money 199)))))))
+                  test-sale-item-event)))))
       (lambda ()
         (when (file-exists? database-path)
           (delete-file database-path)))))

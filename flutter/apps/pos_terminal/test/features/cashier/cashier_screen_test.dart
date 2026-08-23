@@ -155,6 +155,7 @@ TransactionSnapshot snapshot({
   TransactionStatus status = TransactionStatus.open,
   List<TransactionLineItem> lineItems = const [],
   int subtotal = 0,
+  int tax = 0,
   int total = 0,
   int? tenderedCash,
   int? changeDue,
@@ -165,6 +166,7 @@ TransactionSnapshot snapshot({
     status: status,
     lineItems: lineItems,
     subtotalMinorUnits: subtotal,
+    taxMinorUnits: tax,
     totalMinorUnits: total,
     tenderedCashMinorUnits: tenderedCash,
     changeDueMinorUnits: changeDue,
@@ -330,6 +332,7 @@ void main() {
           ),
         ],
         subtotal: 999,
+        tax: 777,
         total: 1234,
       ),
     );
@@ -342,6 +345,8 @@ void main() {
     expect(find.text('Barcode: second-code'), findsOneWidget);
     expect(find.text(r'$5.00'), findsOneWidget);
     expect(find.text(r'$9.99'), findsOneWidget);
+    expect(find.text('Tax'), findsOneWidget);
+    expect(find.text(r'$7.77'), findsOneWidget);
     expect(find.text(r'$12.34'), findsOneWidget);
     expect(
       tester.getTopLeft(find.text('First item')).dy,
@@ -861,13 +866,8 @@ void main() {
       await pumpCashier(tester, testFixture.controller);
 
       expect(find.text('Payment details unavailable'), findsOneWidget);
-      expect(
-        find.descendant(
-          of: find.byKey(const Key('cashier-payment-controls')),
-          matching: find.text(r'$0.00'),
-        ),
-        findsNothing,
-      );
+      expect(find.text('Cash received'), findsNothing);
+      expect(find.text('Change due'), findsNothing);
       expect(find.text('Complete Sale'), findsOneWidget);
     },
   );
@@ -1364,6 +1364,7 @@ void main() {
         status: TransactionStatus.open,
         lineItems: const [],
         subtotalMinorUnits: 0,
+        taxMinorUnits: 0,
         totalMinorUnits: 0,
         tenderedCashMinorUnits: null,
         changeDueMinorUnits: null,

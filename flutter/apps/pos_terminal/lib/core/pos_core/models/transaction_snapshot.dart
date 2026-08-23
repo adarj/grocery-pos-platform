@@ -54,6 +54,7 @@ final class TransactionSnapshot {
     required this.status,
     required List<TransactionLineItem> lineItems,
     required this.subtotalMinorUnits,
+    required this.taxMinorUnits,
     required this.totalMinorUnits,
     required this.tenderedCashMinorUnits,
     required this.changeDueMinorUnits,
@@ -64,6 +65,7 @@ final class TransactionSnapshot {
   final TransactionStatus status;
   final List<TransactionLineItem> lineItems;
   final int subtotalMinorUnits;
+  final int taxMinorUnits;
   final int totalMinorUnits;
   final int? tenderedCashMinorUnits;
   final int? changeDueMinorUnits;
@@ -93,6 +95,11 @@ final class TransactionSnapshot {
       subtotalMinorUnits: requireJsonNonnegativeInt(
         json,
         'subtotal_minor_units',
+        context,
+      ),
+      taxMinorUnits: requireJsonNonnegativeInt(
+        json,
+        'tax_minor_units',
         context,
       ),
       totalMinorUnits: requireJsonNonnegativeInt(

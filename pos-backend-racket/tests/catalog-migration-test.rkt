@@ -158,13 +158,77 @@ VALUES
 SQL
    ))
 
+(define frozen-catalog-items-table-sql
+  #<<SQL
+CREATE TABLE catalog_items (
+  item_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(item_id) = 'text'
+      AND length(item_id) > 0
+    ),
+  description TEXT NOT NULL
+    CHECK (
+      typeof(description) = 'text'
+      AND length(description) > 0
+    ),
+  unit_price_minor_units INTEGER NOT NULL
+    CHECK (
+      typeof(unit_price_minor_units) = 'integer'
+      AND unit_price_minor_units >= 0
+    ),
+  active INTEGER NOT NULL
+    CHECK (
+      typeof(active) = 'integer'
+      AND active IN (0, 1)
+    )
+)
+SQL
+  )
+
+(define frozen-catalog-barcodes-table-sql
+  #<<SQL
+CREATE TABLE catalog_barcodes (
+  barcode TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(barcode) = 'text'
+      AND length(barcode) > 0
+    ),
+  item_id TEXT NOT NULL
+    CHECK (
+      typeof(item_id) = 'text'
+      AND length(item_id) > 0
+    )
+)
+SQL
+  )
+
+(define (install-frozen-v3! connection)
+  (install-frozen-v2! connection)
+  (db:query-exec connection frozen-catalog-items-table-sql)
+  (db:query-exec connection frozen-catalog-barcodes-table-sql)
+  (db:query-exec
+   connection
+   "INSERT INTO pos_schema_migrations (version, name) VALUES (3, 'create_catalog')")
+  (db:query-exec
+   connection
+   #<<SQL
+INSERT INTO catalog_items
+  (item_id, description, unit_price_minor_units, active)
+VALUES ('item-v3', 'Existing V3 Item', 199, 1)
+SQL
+   )
+  (db:query-exec
+   connection
+   "INSERT INTO catalog_barcodes (barcode, item_id) VALUES ('049000001234', 'item-v3')"))
+
 (define expected-history
   (list #(1 "create_transaction_events")
         #(2 "create_transaction_command_receipts")
-        #(3 "create_catalog")))
+        #(3 "create_catalog")
+        #(4 "create_tax_categories")))
 
 (module+ test
-  (test-case "fresh database creates catalog schema as migration 3"
+  (test-case "fresh database creates catalog and tax schema through migration 4"
     (call-with-database
      (lambda (connection)
        (migrate-pos-database! connection)
@@ -181,11 +245,56 @@ SQL
 SELECT name
 FROM sqlite_schema
 WHERE type = 'table'
-  AND name IN ('catalog_items', 'catalog_barcodes')
+  AND name IN (
+    'catalog_items',
+    'catalog_barcodes',
+    'tax_categories',
+    'catalog_item_tax_categories'
+  )
 ORDER BY name
 SQL
          )
-        '("catalog_barcodes" "catalog_items")))))
+        '("catalog_barcodes"
+          "catalog_item_tax_categories"
+          "catalog_items"
+          "tax_categories")))))
+
+  (test-case "real frozen v3 database upgrades existing items to zero tax"
+    (call-with-database
+     (lambda (connection)
+       (install-frozen-v3! connection)
+       (define events-before
+         (db:query-rows connection "SELECT * FROM transaction_events"))
+       (define receipts-before
+         (db:query-rows connection "SELECT * FROM transaction_command_receipts"))
+
+       (migrate-pos-database! connection)
+
+       (check-equal?
+        (db:query-rows
+         connection
+         "SELECT version, name FROM pos_schema_migrations ORDER BY version")
+        expected-history)
+       (check-equal?
+        (db:query-rows
+         connection
+         "SELECT item_id, description, unit_price_minor_units, active FROM catalog_items")
+        (list #("item-v3" "Existing V3 Item" 199 1)))
+       (check-equal?
+        (db:query-rows
+         connection
+         "SELECT tax_category_id, rate_millionths FROM tax_categories")
+        (list #("__legacy_zero_tax__" 0)))
+       (check-equal?
+        (db:query-rows
+         connection
+         "SELECT item_id, tax_category_id FROM catalog_item_tax_categories")
+        (list #("item-v3" "__legacy_zero_tax__")))
+       (check-equal? (db:query-rows connection "SELECT * FROM transaction_events")
+                     events-before)
+       (check-equal?
+        (db:query-rows connection "SELECT * FROM transaction_command_receipts")
+        receipts-before))))
 
   (test-case "real frozen v2 database upgrades without changing prior rows"
     (call-with-database
@@ -212,7 +321,7 @@ SQL
          connection "SELECT * FROM transaction_command_receipts")
         receipts-before))))
 
-  (test-case "valid migration 3 is idempotent"
+  (test-case "valid migration 4 is idempotent"
     (call-with-database
      (lambda (connection)
        (migrate-pos-database! connection)
@@ -231,6 +340,66 @@ SQL
          (db:query-exec connection (format "DROP TABLE ~a" table))
          (check-exn exn:fail?
                     (lambda () (migrate-pos-database! connection)))))))
+
+  (test-case "recorded migration 4 requires both tax tables"
+    (for ([table (in-list '("tax_categories" "catalog_item_tax_categories"))])
+      (call-with-database
+       (lambda (connection)
+         (migrate-pos-database! connection)
+         (db:query-exec connection (format "DROP TABLE ~a" table))
+         (check-exn exn:fail?
+                    (lambda () (migrate-pos-database! connection)))))))
+
+  (test-case "migration 4 validates tax references and exact item coverage"
+    (call-with-database
+     (lambda (connection)
+       (migrate-pos-database! connection)
+       (db:query-exec
+        connection
+        "INSERT INTO catalog_items VALUES ('unmapped', 'Unmapped', 1, 1)")
+       (check-exn exn:fail?
+                  (lambda () (migrate-pos-database! connection)))))
+    (call-with-database
+     (lambda (connection)
+       (migrate-pos-database! connection)
+       (db:query-exec
+        connection
+        "INSERT INTO catalog_item_tax_categories VALUES ('missing', '__legacy_zero_tax__')")
+       (check-exn exn:fail?
+                  (lambda () (migrate-pos-database! connection))))))
+
+  (test-case "migration 4 rejects tax table definition drift"
+    (call-with-database
+     (lambda (connection)
+       (migrate-pos-database! connection)
+       (db:query-exec connection "DROP TABLE tax_categories")
+       (db:query-exec
+        connection
+        #<<SQL
+CREATE TABLE tax_categories (
+  tax_category_id TEXT PRIMARY KEY NOT NULL,
+  description TEXT NOT NULL,
+  rate_millionths INTEGER NOT NULL
+)
+SQL
+        )
+       (check-exn exn:fail?
+                  (lambda () (migrate-pos-database! connection)))))
+    (call-with-database
+     (lambda (connection)
+       (migrate-pos-database! connection)
+       (db:query-exec connection "DROP TABLE catalog_item_tax_categories")
+       (db:query-exec
+        connection
+        #<<SQL
+CREATE TABLE catalog_item_tax_categories (
+  item_id TEXT PRIMARY KEY NOT NULL,
+  wrong_tax_category_id TEXT NOT NULL
+)
+SQL
+        )
+       (check-exn exn:fail?
+                  (lambda () (migrate-pos-database! connection))))))
 
   (test-case "migration rejects catalog item column and constraint drift"
     (call-with-database

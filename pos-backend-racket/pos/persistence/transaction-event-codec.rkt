@@ -2,6 +2,7 @@
 
 (require json
          "../domain/money.rkt"
+         "../domain/tax.rkt"
          "../domain/transaction-event.rkt"
          "strict-json.rkt")
 
@@ -23,7 +24,6 @@
 (struct event-decode-failure (code message)
   #:transparent)
 
-(define schema-version 1)
 (define envelope-fields
   '(schema_version event_type payload))
 
@@ -34,16 +34,18 @@
      "transaction-event?"
      event))
 
-  (define-values (event-type payload)
+  (define-values (schema-version event-type payload)
     (cond
       [(transaction-started? event)
        (values
+        1
         "transaction_started"
         (hasheq
          'transaction_id
          (transaction-started-transaction-id event)))]
       [(sale-item-added? event)
        (values
+        1
         "sale_item_added"
         (hasheq
          'barcode (sale-item-added-barcode event)
@@ -51,14 +53,33 @@
          'unit_price_minor_units
          (money-minor-units
           (sale-item-added-unit-price event))))]
+      [(taxed-sale-item-added? event)
+       (values
+        2
+        "sale_item_added"
+        (hasheq
+         'barcode (taxed-sale-item-added-barcode event)
+         'description (taxed-sale-item-added-description event)
+         'unit_price_minor_units
+         (money-minor-units
+          (taxed-sale-item-added-unit-price event))
+         'tax_category_id
+         (taxed-sale-item-added-tax-category-id event)
+         'tax_rate_millionths
+         (tax-rate-millionths
+          (taxed-sale-item-added-tax-rate event))
+         'tax_amount_minor_units
+         (money-minor-units
+          (taxed-sale-item-added-tax-amount event))))]
       [(cash-tendered? event)
        (values
+        1
         "cash_tendered"
         (hasheq
          'amount_minor_units
          (money-minor-units (cash-tendered-amount event))))]
       [(transaction-completed? event)
-       (values "transaction_completed" (hasheq))]))
+       (values 1 "transaction_completed" (hasheq))]))
 
   (hasheq 'schema_version schema-version
           'event_type event-type
@@ -147,6 +168,68 @@
         (event-decode-success
          (sale-item-added barcode description price))])]))
 
+(define (decode-tax-rate value field)
+  (if (and (exact-integer? value)
+           (<= 0 value 1000000))
+      (tax-rate value)
+      (event-decode-failure
+       'invalid-tax-rate
+       (format
+        "field ~s must contain an exact integer from 0 through 1000000"
+        field))))
+
+(define (decode-taxed-sale-item-added payload)
+  (define shape-failure
+    (validate-exact-fields
+     payload
+     '(barcode
+       description
+       unit_price_minor_units
+       tax_category_id
+       tax_rate_millionths
+       tax_amount_minor_units)
+     "schema v2 sale_item_added payload"))
+  (cond
+    [shape-failure shape-failure]
+    [else
+     (define barcode (hash-ref payload 'barcode))
+     (define description (hash-ref payload 'description))
+     (define tax-category-id (hash-ref payload 'tax_category_id))
+     (define price
+       (decode-money (hash-ref payload 'unit_price_minor_units)
+                     'unit_price_minor_units))
+     (define rate
+       (decode-tax-rate (hash-ref payload 'tax_rate_millionths)
+                        'tax_rate_millionths))
+     (define tax-amount
+       (decode-money (hash-ref payload 'tax_amount_minor_units)
+                     'tax_amount_minor_units))
+     (cond
+       [(not (string? barcode))
+        (invalid-field-type 'barcode "a string")]
+       [(not (string? description))
+        (invalid-field-type 'description "a string")]
+       [(not (and (string? tax-category-id)
+                  (positive? (string-length tax-category-id))))
+        (event-decode-failure
+         'invalid-tax-category-id
+         "field 'tax_category_id must contain a non-empty string")]
+       [(event-decode-failure? price) price]
+       [(event-decode-failure? rate) rate]
+       [(event-decode-failure? tax-amount) tax-amount]
+       [(not (equal? tax-amount (calculate-line-tax price rate)))
+        (event-decode-failure
+         'inconsistent-tax-amount
+         "tax amount does not match the Schema v2 line-tax calculation")]
+       [else
+        (event-decode-success
+         (taxed-sale-item-added barcode
+                                description
+                                price
+                                tax-category-id
+                                rate
+                                tax-amount))])]))
+
 (define (decode-cash-tendered payload)
   (define shape-failure
     (validate-exact-fields payload
@@ -189,7 +272,7 @@
         (cond
           [(not (exact-integer? version))
            (invalid-field-type 'schema_version "an exact integer")]
-          [(not (= version schema-version))
+          [(not (or (= version 1) (= version 2)))
            (event-decode-failure
             'unsupported-schema-version
             (format "unsupported transaction event schema version ~a"
@@ -200,6 +283,14 @@
            (invalid-field-type 'payload "a JSON object")]
           [else
            (cond
+             [(= version 2)
+              (if (string=? event-type "sale_item_added")
+                  (decode-taxed-sale-item-added payload)
+                  (event-decode-failure
+                   'unsupported-schema-event-type
+                   (format
+                    "transaction event schema version 2 does not support event type ~s"
+                    event-type)))]
              [(string=? event-type "transaction_started")
               (decode-transaction-started payload)]
              [(string=? event-type "sale_item_added")

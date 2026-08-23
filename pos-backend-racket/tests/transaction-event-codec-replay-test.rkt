@@ -2,6 +2,7 @@
 
 (require rackunit
          "../pos/domain/money.rkt"
+         "../pos/domain/tax.rkt"
          "../pos/domain/transaction-event.rkt"
          "../pos/domain/transaction.rkt"
          "../pos/persistence/transaction-event-codec.rkt")
@@ -39,6 +40,33 @@
     (check-equal? (transaction-line-item-description line-item)
                   "Test Apples")
     (check-equal? (transaction-subtotal recovered) (money 199))
+    (check-equal? (transaction-tax recovered) (money 0))
     (check-equal? (transaction-total recovered) (money 199))
     (check-equal? (transaction-tendered-cash recovered) (money 500))
-    (check-equal? (transaction-change-due recovered) (money 301))))
+    (check-equal? (transaction-change-due recovered) (money 301)))
+
+  (test-case "mixed schema v1 and v2 sale lines replay exact stored tax"
+    (define encoded-events
+      (map
+       transaction-event->json-bytes
+       (list
+        (transaction-started "txn-mixed")
+        (sale-item-added "legacy" "Legacy Item" (money 199))
+        (taxed-sale-item-added "taxed"
+                               "Taxed Item"
+                               (money 200)
+                               "standard"
+                               (tax-rate 100000)
+                               (money 20)))))
+    (define decoded-events
+      (for/list ([encoded (in-list encoded-events)])
+        (define result (json-bytes->transaction-event encoded))
+        (check-pred event-decode-success? result)
+        (event-decode-success-event result)))
+    (define replay-result (replay-transaction decoded-events))
+
+    (check-pred replay-succeeded? replay-result)
+    (define recovered (replay-succeeded-transaction replay-result))
+    (check-equal? (transaction-subtotal recovered) (money 399))
+    (check-equal? (transaction-tax recovered) (money 20))
+    (check-equal? (transaction-total recovered) (money 419))))

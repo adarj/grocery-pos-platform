@@ -4,6 +4,7 @@
          rackunit
          "../pos/domain/catalog-item.rkt"
          "../pos/domain/money.rkt"
+         "../pos/domain/tax.rkt"
          "../pos/persistence/pos-database-migrations.rkt"
          "../pos/persistence/sqlite-catalog.rkt")
 
@@ -25,7 +26,33 @@ INSERT INTO catalog_items
   (item_id, description, unit_price_minor_units, active)
 VALUES (?, ?, ?, ?)
 SQL
-   item-id description price active))
+   item-id description price active)
+  (db:query-exec
+   connection
+   #<<SQL
+INSERT INTO catalog_item_tax_categories (item_id, tax_category_id)
+VALUES (?, '__legacy_zero_tax__')
+SQL
+   item-id))
+
+(define (insert-tax-category! connection category-id description rate)
+  (db:query-exec
+   connection
+   #<<SQL
+INSERT INTO tax_categories (tax_category_id, description, rate_millionths)
+VALUES (?, ?, ?)
+SQL
+   category-id description rate))
+
+(define (set-item-tax-category! connection item-id category-id)
+  (db:query-exec
+   connection
+   #<<SQL
+UPDATE catalog_item_tax_categories
+SET tax_category_id = ?
+WHERE item_id = ?
+SQL
+   category-id item-id))
 
 (define (insert-barcode! connection barcode item-id)
   (db:query-exec
@@ -72,10 +99,30 @@ SQL
         (lambda ()
           (insert-barcode! connection "049000001234" "item-apples"))))))
 
+  (test-case "tax schema rejects invalid categories and rates"
+    (call-with-catalog
+     (lambda (connection)
+       (check-exn
+        db:exn:fail:sql?
+        (lambda () (insert-tax-category! connection "" "Tax" 100000)))
+       (check-exn
+        db:exn:fail:sql?
+        (lambda () (insert-tax-category! connection "empty-description" "" 0)))
+       ;; Values that SQLite INTEGER affinity cannot losslessly coerce must
+       ;; still violate the stored-type/range constraints.
+       (for ([rate (in-list (list -1 1000001 1.5 "not-a-rate"))])
+         (check-exn
+          db:exn:fail:sql?
+          (lambda ()
+            (insert-tax-category!
+             connection (format "invalid-~a" rate) "Invalid" rate)))))))
+
   (test-case "known active barcode returns exact immutable catalog facts"
     (call-with-catalog
      (lambda (connection)
        (insert-item! connection "item-apples" "Test Apples" 199 1)
+       (insert-tax-category! connection "standard" "Standard" 88750)
+       (set-item-tax-category! connection "item-apples" "standard")
        (insert-barcode! connection "049000001234" "item-apples")
 
        (define item
@@ -85,6 +132,8 @@ SQL
        (check-equal? (catalog-item-barcode item) "049000001234")
        (check-equal? (catalog-item-description item) "Test Apples")
        (check-equal? (catalog-item-unit-price item) (money 199))
+       (check-equal? (catalog-item-tax-category-id item) "standard")
+       (check-equal? (catalog-item-tax-rate item) (tax-rate 88750))
        (check-true (immutable? (catalog-item-barcode item)))
        (check-true (immutable? (catalog-item-description item))))))
 
@@ -155,4 +204,30 @@ SQL
        (check-exn
         exn:fail?
         (lambda ()
-          (lookup-catalog-item-by-barcode connection "049000008888")))))))
+          (lookup-catalog-item-by-barcode connection "049000008888"))))))
+
+  (test-case "missing item tax mapping is catalog corruption"
+    (call-with-catalog
+     (lambda (connection)
+       (insert-item! connection "item-apples" "Test Apples" 199 1)
+       (insert-barcode! connection "049000001234" "item-apples")
+       (db:query-exec
+        connection
+        "DELETE FROM catalog_item_tax_categories WHERE item_id = 'item-apples'")
+
+       (check-exn
+        exn:fail?
+        (lambda ()
+          (lookup-catalog-item-by-barcode connection "049000001234"))))))
+
+  (test-case "missing referenced tax category is catalog corruption"
+    (call-with-catalog
+     (lambda (connection)
+       (insert-item! connection "item-apples" "Test Apples" 199 1)
+       (insert-barcode! connection "049000001234" "item-apples")
+       (set-item-tax-category! connection "item-apples" "missing-category")
+
+       (check-exn
+        exn:fail?
+        (lambda ()
+          (lookup-catalog-item-by-barcode connection "049000001234")))))))

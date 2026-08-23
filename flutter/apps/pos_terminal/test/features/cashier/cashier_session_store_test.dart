@@ -112,6 +112,7 @@ void main() {
     for (final forbidden in <String>[
       'line_items',
       'subtotal_minor_units',
+      'tax_minor_units',
       'total_minor_units',
       'tendered_cash_minor_units',
       'change_due_minor_units',

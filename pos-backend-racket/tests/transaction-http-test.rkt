@@ -9,8 +9,11 @@
          "../pos/api/server.rkt"
          "../pos/application/transaction-command.rkt"
          "../pos/application/transaction-service.rkt"
+         "../pos/domain/catalog-item.rkt"
          "../pos/domain/fake-catalog.rkt"
          "../pos/domain/money.rkt"
+         "../pos/domain/tax.rkt"
+         "../pos/domain/transaction-event.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt"
          "../pos/persistence/transaction-command-codec.rkt"
          "../pos/persistence/transaction-command-unit-of-work.rkt"
@@ -438,6 +441,7 @@ SQL
          'status "open"
          'line_items '()
          'subtotal_minor_units 0
+         'tax_minor_units 0
          'total_minor_units 0
          'tendered_cash_minor_units 'null
          'change_due_minor_units 'null))
@@ -449,6 +453,7 @@ SQL
        (check-equal? (hash-ref scanned 'version) 2)
        (check-equal? (hash-ref scanned 'status) "open")
        (check-equal? (hash-ref scanned 'subtotal_minor_units) 199)
+       (check-equal? (hash-ref scanned 'tax_minor_units) 0)
        (check-equal? (hash-ref scanned 'total_minor_units) 199)
        (check-equal?
         (hash-ref scanned 'line_items)
@@ -458,6 +463,71 @@ SQL
                  'unit_price_minor_units 199)))
        (check-false (hash-has-key? scanned 'events))
        (check-false (hash-has-key? scanned 'command_receipts)))))
+
+  (test-case "query exposes exact authoritative tax through all sale states"
+    (define taxed-item
+      (catalog-item test-barcode
+                    "Taxed Apples"
+                    (money 199)
+                    "standard"
+                    (tax-rate 100000)))
+    (call-with-http-app
+     #:catalog-lookup (lambda (_barcode) taxed-item)
+     (lambda (_connection _service app)
+       (accepted-start app "txn-tax-query")
+       (accepted-scan app "txn-tax-query" 1 "cmd-tax-query-scan")
+       (define open
+         (hash-ref (response-json (get-transaction app "txn-tax-query"))
+                   'transaction))
+       (check-equal? (hash-ref open 'subtotal_minor_units) 199)
+       (check-equal? (hash-ref open 'tax_minor_units) 20)
+       (check-equal? (hash-ref open 'total_minor_units) 219)
+
+       (check-equal?
+        (response-code
+         (post-command
+          app
+          (tender-cash-command
+           "cmd-tax-query-tender" "txn-tax-query" 2 (money 500))))
+        200)
+       (define paid
+         (hash-ref (response-json (get-transaction app "txn-tax-query"))
+                   'transaction))
+       (check-equal? (hash-ref paid 'tax_minor_units) 20)
+       (check-equal? (hash-ref paid 'change_due_minor_units) 281)
+
+       (check-equal?
+        (response-code
+         (post-command
+          app
+          (complete-transaction-command
+           "cmd-tax-query-complete" "txn-tax-query" 3)))
+        200)
+       (define completed
+         (hash-ref (response-json (get-transaction app "txn-tax-query"))
+                   'transaction))
+       (check-equal? (hash-ref completed 'tax_minor_units) 20)
+       (check-equal? (hash-ref completed 'total_minor_units) 219))))
+
+  (test-case "query treats historical schema v1 sale items as zero tax"
+    (call-with-http-app
+     (lambda (connection _service app)
+       (define appended
+         (append-transaction-events!
+          connection
+          "txn-legacy-tax-query"
+          0
+          (list
+           (transaction-started "txn-legacy-tax-query")
+           (sale-item-added test-barcode "Legacy Apples" (money 199)))))
+       (check-pred journal-append-succeeded? appended)
+       (define transaction
+         (hash-ref
+          (response-json (get-transaction app "txn-legacy-tax-query"))
+          'transaction))
+       (check-equal? (hash-ref transaction 'subtotal_minor_units) 199)
+       (check-equal? (hash-ref transaction 'tax_minor_units) 0)
+       (check-equal? (hash-ref transaction 'total_minor_units) 199))))
 
   (test-case "query serializes paid and completed tender state"
     (call-with-http-app

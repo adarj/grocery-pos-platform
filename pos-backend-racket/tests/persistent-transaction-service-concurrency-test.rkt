@@ -8,6 +8,7 @@
          "../pos/application/transaction-service.rkt"
          "../pos/domain/fake-catalog.rkt"
          "../pos/domain/money.rkt"
+         "../pos/domain/tax.rkt"
          "../pos/domain/transaction-event.rkt"
          "../pos/domain/transaction.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt"
@@ -16,6 +17,13 @@
          "../pos/persistence/pos-database-migrations.rkt")
 
 (define test-barcode "049000001234")
+(define test-sale-item-event
+  (taxed-sale-item-added test-barcode
+                         "Test Apples"
+                         (money 199)
+                         "development-zero-tax"
+                         (tax-rate 0)
+                         (money 0)))
 
 (define (call-with-connection database-path mode procedure)
   (define connection
@@ -228,8 +236,7 @@ SQL
           (check-equal?
            (loaded-events connection-A "txn-same")
            (list (transaction-started "txn-same")
-                 (sale-item-added
-                  test-barcode "Test Apples" (money 199))))
+                 test-sale-item-event))
           (define recovered
             (transaction-service-load-transaction
              service-A "txn-same"))
@@ -351,8 +358,7 @@ SQL
           (check-equal?
            (loaded-events connection-A "txn-version-race")
            (list (transaction-started "txn-version-race")
-                 (sale-item-added
-                  test-barcode "Test Apples" (money 199))))
+                 test-sale-item-event))
 
           (define lookups-before-retry lookup-count)
           (check-equal?
@@ -374,8 +380,7 @@ SQL
           (check-equal?
            (loaded-events verification-connection "txn-version-race")
            (list (transaction-started "txn-version-race")
-                 (sale-item-added
-                  test-barcode "Test Apples" (money 199))))
+                 test-sale-item-event))
           (define retry-service
             (make-service verification-connection quiet-catalog))
           (check-equal?
@@ -432,8 +437,7 @@ SQL
           (check-equal?
            (loaded-events connection-A "txn-rejection-race")
            (list (transaction-started "txn-rejection-race")
-                 (sale-item-added
-                  test-barcode "Test Apples" (money 199))))
+                 test-sale-item-event))
           (check-equal? (receipt-count connection-A "cmd-reject-loser") 1))))))
 
   (test-case "SQLite writer contention cannot produce false durable success"

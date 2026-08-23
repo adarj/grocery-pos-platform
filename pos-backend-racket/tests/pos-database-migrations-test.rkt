@@ -72,10 +72,11 @@ SQL
 (define expected-migration-history
   (list #(1 "create_transaction_events")
         #(2 "create_transaction_command_receipts")
-        #(3 "create_catalog")))
+        #(3 "create_catalog")
+        #(4 "create_tax_categories")))
 
 (module+ test
-  (test-case "fresh database migrates through versions 1, 2, and 3"
+  (test-case "fresh database migrates through versions 1, 2, 3, and 4"
     (call-with-test-database
      (lambda (connection)
        (migrate-pos-database! connection)
@@ -92,14 +93,18 @@ WHERE type = 'table'
     'transaction_events',
     'transaction_command_receipts',
     'catalog_items',
-    'catalog_barcodes'
+    'catalog_barcodes',
+    'tax_categories',
+    'catalog_item_tax_categories'
   )
 ORDER BY name
 SQL
          )
         '("catalog_barcodes"
+          "catalog_item_tax_categories"
           "catalog_items"
           "pos_schema_migrations"
+          "tax_categories"
           "transaction_command_receipts"
           "transaction_events"))
        (check-equal?
@@ -171,7 +176,7 @@ SQL
        (check-equal? (transaction-status recovered) 'open)
        (check-equal? (transaction-subtotal recovered) (money 199)))))
 
-  (test-case "valid v3 migration is safe to run again"
+  (test-case "valid v4 migration is safe to run again"
     (call-with-test-database
      (lambda (connection)
        (migrate-pos-database! connection)
@@ -199,7 +204,7 @@ SQL
        (migrate-pos-database! connection)
        (query-exec
         connection
-        "INSERT INTO pos_schema_migrations (version, name) VALUES (4, 'unknown')")
+        "INSERT INTO pos_schema_migrations (version, name) VALUES (5, 'unknown')")
        (check-exn exn:fail?
                   (lambda () (migrate-pos-database! connection)))))
 

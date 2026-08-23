@@ -17,12 +17,13 @@
 (define (print-summary output-port action summary)
   (fprintf
    output-port
-   "Catalog ~a: items=~a active=~a inactive=~a barcodes=~a\n"
+   "Catalog ~a: items=~a active=~a inactive=~a barcodes=~a tax_categories=~a\n"
    action
    (catalog-snapshot-summary-item-count summary)
    (catalog-snapshot-summary-active-item-count summary)
    (catalog-snapshot-summary-inactive-item-count summary)
-   (catalog-snapshot-summary-barcode-count summary)))
+   (catalog-snapshot-summary-barcode-count summary)
+   (catalog-snapshot-summary-tax-category-count summary)))
 
 (define (load-snapshot catalog-file error-port)
   (define raw-bytes

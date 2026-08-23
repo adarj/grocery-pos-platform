@@ -6,6 +6,7 @@
          rackunit
          "../pos/domain/catalog-item.rkt"
          "../pos/domain/money.rkt"
+         "../pos/domain/tax.rkt"
          "../pos/persistence/catalog-snapshot-codec.rkt"
          "../pos/persistence/pos-database-migrations.rkt"
          "../pos/persistence/sqlite-catalog.rkt"
@@ -13,17 +14,27 @@
 
 (define catalog-a
   (hasheq
-   'schema_version 1
+   'schema_version 2
+   'tax_categories
+   (list
+    (hasheq 'tax_category_id "standard"
+            'description "Standard"
+            'rate_millionths 100000)
+    (hasheq 'tax_category_id "exempt"
+            'description "Exempt"
+            'rate_millionths 0))
    'items
    (list
     (hasheq 'item_id "item-apples"
             'description "Apples"
             'unit_price_minor_units 199
-            'active #t)
+            'active #t
+            'tax_category_id "standard")
     (hasheq 'item_id "item-inactive"
             'description "Inactive Item"
             'unit_price_minor_units 250
-            'active #f))
+            'active #f
+            'tax_category_id "exempt"))
    'barcodes
    (list
     (hasheq 'barcode "049000001234" 'item_id "item-apples")
@@ -32,17 +43,24 @@
 
 (define catalog-b
   (hasheq
-   'schema_version 1
+   'schema_version 2
+   'tax_categories
+   (list
+    (hasheq 'tax_category_id "new-standard"
+            'description "New Standard"
+            'rate_millionths 88750))
    'items
    (list
     (hasheq 'item_id "item-apples"
             'description "Premium Apples"
             'unit_price_minor_units 299
-            'active #t)
+            'active #t
+            'tax_category_id "new-standard")
     (hasheq 'item_id "item-free"
             'description "Free Sample"
             'unit_price_minor_units 0
-            'active #t))
+            'active #t
+            'tax_category_id "new-standard"))
    'barcodes
    (list
     (hasheq 'barcode "049000001234" 'item_id "item-apples")
@@ -50,16 +68,35 @@
 
 (define catalog-that-triggers-failure
   (hasheq
-   'schema_version 1
+   'schema_version 2
+   'tax_categories
+   (list
+    (hasheq 'tax_category_id "replacement"
+            'description "Replacement"
+            'rate_millionths 50000))
    'items
    (list
     (hasheq 'item_id "item-new"
             'description "New Item"
             'unit_price_minor_units 500
-            'active #t))
+            'active #t
+            'tax_category_id "replacement"))
    'barcodes
    (list
     (hasheq 'barcode "trigger-failure" 'item_id "item-new"))))
+
+(define legacy-v1-catalog
+  (hasheq
+   'schema_version 1
+   'items
+   (list
+    (hasheq 'item_id "item-legacy"
+            'description "Legacy Item"
+            'unit_price_minor_units 125
+            'active #t))
+   'barcodes
+   (list
+    (hasheq 'barcode "000000000125" 'item_id "item-legacy"))))
 
 (define (decode-snapshot value)
   (define result
@@ -70,6 +107,7 @@
 (define snapshot-a (decode-snapshot catalog-a))
 (define snapshot-b (decode-snapshot catalog-b))
 (define failing-snapshot (decode-snapshot catalog-that-triggers-failure))
+(define legacy-v1-snapshot (decode-snapshot legacy-v1-catalog))
 
 (define (call-with-database procedure)
   (define connection (db:sqlite3-connect #:database 'memory))
@@ -97,6 +135,7 @@
 
        (check-equal? (catalog-snapshot-summary-item-count summary) 2)
        (check-equal? (catalog-snapshot-summary-barcode-count summary) 3)
+       (check-equal? (catalog-snapshot-summary-tax-category-count summary) 2)
        (check-equal?
         (catalog-rows connection
                       "catalog_items"
@@ -113,9 +152,23 @@
               #("049000001234" "item-apples")
               #("049000001235" "item-apples")))
        (check-equal?
-        (catalog-item-description
+        (catalog-rows connection
+                      "tax_categories"
+                      "tax_category_id, description, rate_millionths"
+                      "tax_category_id")
+        (list #("exempt" "Exempt" 0)
+              #("standard" "Standard" 100000)))
+       (check-equal?
+        (catalog-rows connection
+                      "catalog_item_tax_categories"
+                      "item_id, tax_category_id"
+                      "item_id")
+        (list #("item-apples" "standard")
+              #("item-inactive" "exempt")))
+       (check-equal?
+        (catalog-item-tax-rate
          (lookup-catalog-item-by-barcode connection "049000001234"))
-        "Apples")
+        (tax-rate 100000))
        (check-false
         (lookup-catalog-item-by-barcode connection "000000000099")))))
 
@@ -139,10 +192,35 @@
                       "barcode")
         (list #("000000000001" "item-free")
               #("049000001234" "item-apples")))
+       (check-equal?
+        (catalog-rows connection
+                      "tax_categories"
+                      "tax_category_id, rate_millionths"
+                      "tax_category_id")
+        (list #("new-standard" 88750)))
        (check-false
         (lookup-catalog-item-by-barcode connection "049000001235"))
        (check-false
         (lookup-catalog-item-by-barcode connection "000000000099")))))
+
+  (test-case "schema v1 activation is complete explicit zero-tax catalog"
+    (call-with-database
+     (lambda (connection)
+       (activate-catalog-snapshot! connection snapshot-a)
+       (activate-catalog-snapshot! connection legacy-v1-snapshot)
+       (define item
+         (lookup-catalog-item-by-barcode connection "000000000125"))
+       (check-equal? (catalog-item-tax-category-id item)
+                     legacy-zero-tax-category-id)
+       (check-equal? (catalog-item-tax-rate item) (tax-rate 0))
+       (check-false
+        (lookup-catalog-item-by-barcode connection "049000001234"))
+       (check-equal?
+        (catalog-rows connection
+                      "tax_categories"
+                      "tax_category_id, rate_millionths"
+                      "tax_category_id")
+        (list #( "__legacy_zero_tax__" 0))))))
 
   (test-case "activation never changes transaction facts or command receipts"
     (call-with-database
@@ -229,12 +307,16 @@ SQL
        (check-equal?
         (catalog-item-unit-price original)
         (money 199))
+       (check-equal? (catalog-item-tax-rate original) (tax-rate 100000))
        (check-equal?
         (db:query-value connection "SELECT COUNT(*) FROM catalog_items")
         2)
        (check-equal?
         (db:query-value connection "SELECT COUNT(*) FROM catalog_barcodes")
-        3))))
+        3)
+       (check-equal?
+        (db:query-value connection "SELECT COUNT(*) FROM tax_categories")
+        2))))
 
   (test-case "successful activation contains no orphan barcode assignments"
     (call-with-database
@@ -287,6 +369,8 @@ SQL
           (lookup-catalog-item-by-barcode reader "049000001234"))
         (check-equal? (catalog-item-description before-commit) "Apples")
         (check-equal? (catalog-item-unit-price before-commit) (money 199))
+        (check-equal? (catalog-item-tax-rate before-commit)
+                      (tax-rate 100000))
 
         (semaphore-post continue)
         (define activation-result (channel-get result-channel))
@@ -298,7 +382,8 @@ SQL
           (lookup-catalog-item-by-barcode reader "049000001234"))
         (check-equal? (catalog-item-description after-commit)
                       "Premium Apples")
-        (check-equal? (catalog-item-unit-price after-commit) (money 299)))
+        (check-equal? (catalog-item-unit-price after-commit) (money 299))
+        (check-equal? (catalog-item-tax-rate after-commit) (tax-rate 88750)))
       (lambda ()
         (when (db:connected? reader) (db:disconnect reader))
         (when (db:connected? writer) (db:disconnect writer))

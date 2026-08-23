@@ -182,7 +182,8 @@ A successful response is:
       }
     ],
     "subtotal_minor_units": 199,
-    "total_minor_units": 199,
+    "tax_minor_units": 20,
+    "total_minor_units": 219,
     "tendered_cash_minor_units": null,
     "change_due_minor_units": null
   }
@@ -190,9 +191,12 @@ A successful response is:
 ```
 
 Current status values are exactly `open`, `paid`, and `completed`. All currency
-values are exact JSON integer minor units. Tender and change fields remain
-present as JSON null before tender. The response contains no command receipts,
-event history, database row IDs, or journal metadata.
+values are exact JSON integer minor units. `subtotal_minor_units` is the sum of
+stored base line prices, `tax_minor_units` is the sum of stored rounded line
+tax, and `total_minor_units` is their authoritative Racket-calculated sum.
+Tender sufficiency and change use that tax-inclusive total. Tender and change
+fields remain present as JSON null before tender. The response contains no
+command receipts, event history, database row IDs, or journal metadata.
 
 A missing transaction returns `404 Not Found` with code
 `transaction_not_found`. A journal or replay recovery failure returns
@@ -238,6 +242,7 @@ The server is loopback-bound by default but is still an application trust
 boundary. Transaction HTTP API v1 does not add authentication, actor/session
 authorization, or production security claims. It also does not add a request
 streaming/body-size guarantee, readiness endpoint, automatic SQLite busy
-retry, persistent catalog, payment behavior, or external-effect exactly-once
+retry, payment behavior, or external-effect exactly-once
 semantics. Flutter now has a typed client and the current start, scan, cash
-tender, authoritative change, and completion cashier slice.
+tender, authoritative tax/change, and completion cashier slice. The current
+single-category line-tax model is not a claim of universal tax compliance.

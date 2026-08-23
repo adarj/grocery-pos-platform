@@ -32,12 +32,12 @@ The implementation deliberately separates three related representations:
 
 1. A **domain event** is an immutable Racket business fact such as
    `sale-item-added`.
-2. **Transaction Event Schema v1 JSON** is the stable, language-independent
-   encoding of that domain event. Its exact schema is documented in
-   [Transaction Event Schema v1](transaction-event-schema.md).
+2. A versioned **Transaction Event Schema JSON** value is the stable,
+   language-independent encoding. Its exact schemas are documented in
+   [Transaction Event Schemas](transaction-event-schema.md).
 3. A **journal record** is a SQLite persistence envelope. It adds database row
-   identity, transaction stream identity, and per-stream sequence to the Schema
-   v1 JSON.
+   identity, transaction stream identity, and per-stream sequence to the event
+   JSON.
 
 `schema_version` and `event_type` appear both in the journal envelope and the
 encoded JSON. This deliberate duplication supports database diagnostics and
@@ -88,11 +88,16 @@ questions; it is not transaction truth and is never consulted during replay.
 Its schema and read contract are documented in
 [Local Catalog](catalog.md).
 
+Migration version 4, `create_tax_categories`, adds current tax categories and
+exactly one item-category mapping per catalog item. Existing v3 items receive
+an explicit zero-tax compatibility mapping. Migration-3-owned table definitions
+and existing event/receipt rows remain unchanged.
+
 The migration runner treats recorded history as an exact prefix of the known
-ordered migration list. A fresh database applies versions 1, 2, and 3. A real
-v1 database validates and preserves its event schema and rows before applying
-versions 2 and 3; a real v2 database applies only version 3. A correct v3
-database is validated without schema mutation. Unknown, skipped, reordered,
+ordered migration list. A fresh database applies versions 1 through 4. Real
+v1/v2 databases upgrade through the remaining sequence, while a real v3
+database preserves its merchandise rows and receives zero-tax mappings. A
+correct v4 database is validated without schema mutation. Unknown, skipped, reordered,
 renamed, or drifted migration state fails rather than being silently repaired.
 
 Table creation is not hidden inside append or load. Application composition is
@@ -149,7 +154,9 @@ If the versions differ, append returns a stable `stream-version-conflict`
 result with the actual version and writes nothing. The caller must reload and
 make a new domain decision; it must not blindly overwrite or infer a merge.
 
-All events are encoded with Transaction Event Schema v1 before writes begin.
+All events are encoded with their declared Transaction Event Schema before
+writes begin. Existing lifecycle events and legacy sale lines remain v1; new
+taxed sale lines use v2.
 The batch is then inserted at consecutive sequence numbers in one SQLite
 transaction. If any insert fails, SQLite rolls back every insert from that
 batch and preserves the earlier stream unchanged.
@@ -225,8 +232,8 @@ higher service layer may later translate an empty stream into a not-found API
 response.
 
 A successful non-empty load contains only the requested stream's ordered domain
-events and its final stream version. Each row is decoded through the existing
-strict Schema v1 codec. Load validates:
+events and its final stream version. Each row is decoded through the strict
+version-aware event codec. Load validates:
 
 - consecutive sequences beginning at 1;
 - envelope `schema_version` agreement with `event_json`;
@@ -336,10 +343,17 @@ operational exceptions continue to propagate as infrastructure failures.
 
 The service does not hard-code a catalog. Composition injects the current
 catalog lookup when constructing the service. A fresh, version-matched scan
-uses it through the live domain decision; an accepted `sale-item-added` event
-persists the sale-time barcode, description, and exact unit price snapshot.
+uses it through the live domain decision; an accepted Schema v2
+`sale-item-added` event persists the sale-time barcode, description, exact unit
+price, tax category, rate millionths, and calculated line-tax snapshot.
 Known retries, command-ID reuse, missing transactions, stale commands, and
 historical replay do not consult the catalog.
+
+Schema v1 sale lines replay with zero tax. Schema v2 replay uses the stored tax
+amount and never current tax reference data. Mixed v1/v2 streams are valid:
+subtotal sums base prices, tax sums stored line tax, and total is their exact
+sum. See
+[ADR-0013](../adr/0013-snapshot-exact-line-tax-in-transaction-events.md).
 
 Process restart recovery opens the same SQLite database using a new connection,
 loads and decodes the stream, and replays it from the first event. No mutable

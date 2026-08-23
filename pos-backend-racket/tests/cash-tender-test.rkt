@@ -1,8 +1,10 @@
 #lang racket
 
 (require rackunit
+         "../pos/domain/catalog-item.rkt"
          "../pos/domain/fake-catalog.rkt"
          "../pos/domain/money.rkt"
+         "../pos/domain/tax.rkt"
          "../pos/domain/transaction.rkt")
 
 (define (open-sale id)
@@ -46,6 +48,30 @@
     (check-equal? (transaction-status original) 'open)
     (check-false (transaction-tendered-cash original))
     (check-false (transaction-change-due original)))
+
+  (test-case "tender sufficiency and change use the tax-inclusive total"
+    (define taxed-item
+      (catalog-item "taxed"
+                    "Taxed Item"
+                    (money 199)
+                    "standard"
+                    (tax-rate 100000)))
+    (define open
+      (scan-accepted-transaction
+       (scan-barcode (make-transaction "txn-tax-tender")
+                     "taxed"
+                     (lambda (_barcode) taxed-item))))
+
+    (define insufficient (tender-cash open (money 218)))
+    (check-pred tender-rejected? insufficient)
+    (check-equal? (tender-rejected-code insufficient) 'insufficient-tender)
+
+    (define paid
+      (tender-accepted-transaction (tender-cash open (money 500))))
+    (check-equal? (transaction-subtotal paid) (money 199))
+    (check-equal? (transaction-tax paid) (money 20))
+    (check-equal? (transaction-total paid) (money 219))
+    (check-equal? (transaction-change-due paid) (money 281)))
 
   (test-case "zero cash against a positive total is rejected"
     (define original (open-sale "txn-cash-004"))
