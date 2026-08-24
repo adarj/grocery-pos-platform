@@ -441,4 +441,106 @@ void main() {
       throwsA(isA<PosCoreInvalidResponseFailure>()),
     );
   });
+
+  Map<String, Object?> shiftJson({int? closedAt}) => {
+    'shift_id': 'shift/opaque',
+    'register_id': 'register-one',
+    'register_display_name': 'Front Register',
+    'cashier_id': 'cashier-one',
+    'cashier_display_name': 'Alice',
+    'opened_at_epoch_ms': 1000,
+    'closed_at_epoch_ms': closedAt,
+    'active_transaction_id': null,
+  };
+
+  test('register context and active cashier queries use typed GET routes', () async {
+    var requestNumber = 0;
+    final client = HttpPosCoreClient(
+      baseUri: baseUri,
+      httpClient: MockClient((request) async {
+        requestNumber += 1;
+        expect(request.method, 'GET');
+        if (requestNumber == 1) {
+          expect(request.url.path, '/register-context');
+          return http.Response(
+            jsonBody({
+              'ok': true,
+              'register_context': {
+                'configured': true,
+                'register': {
+                  'register_id': 'register-one',
+                  'display_name': 'Front Register',
+                },
+                'active_shift': null,
+              },
+            }),
+            200,
+          );
+        }
+        expect(request.url.path, '/cashiers');
+        return http.Response(
+          jsonBody({
+            'ok': true,
+            'cashiers': [
+              {'cashier_id': 'cashier-one', 'display_name': 'Alice'},
+            ],
+          }),
+          200,
+        );
+      }),
+    );
+    final context = await client.fetchRegisterContext();
+    final cashiers = await client.fetchActiveCashiers();
+    expect(context.register!.displayName, 'Front Register');
+    expect(cashiers.single.cashierId, 'cashier-one');
+  });
+
+  test('open and close shift send exact operational payloads without command IDs', () async {
+    var requestNumber = 0;
+    final client = HttpPosCoreClient(
+      baseUri: baseUri,
+      httpClient: MockClient((request) async {
+        requestNumber += 1;
+        expect(request.method, 'POST');
+        expect(request.headers['content-type'], 'application/json');
+        if (requestNumber == 1) {
+          expect(request.url.path, '/shifts/open');
+          expect(jsonDecode(request.body), {'cashier_id': 'cashier-one'});
+          return http.Response(
+            jsonBody({'ok': true, 'shift': shiftJson()}),
+            200,
+          );
+        }
+        expect(request.url.path, '/shifts/shift%2Fopaque/close');
+        expect(jsonDecode(request.body), <String, Object?>{});
+        return http.Response(
+          jsonBody({'ok': true, 'shift': shiftJson(closedAt: 2000)}),
+          200,
+        );
+      }),
+    );
+    final opened = await client.openShift('cashier-one');
+    final closed = await client.closeShift(opened.shiftId);
+    expect(opened.closedAtEpochMs, isNull);
+    expect(closed.closedAtEpochMs, 2000);
+  });
+
+  test('operational write transport failure has no command retry identity', () async {
+    final client = HttpPosCoreClient(
+      baseUri: baseUri,
+      httpClient: MockClient(
+        (_) async => throw http.ClientException('connection lost'),
+      ),
+    );
+    await expectLater(
+      client.openShift('cashier-one'),
+      throwsA(
+        isA<PosCoreTransportFailure>().having(
+          (failure) => failure.retrySameCommandId,
+          'retrySameCommandId',
+          isFalse,
+        ),
+      ),
+    );
+  });
 }

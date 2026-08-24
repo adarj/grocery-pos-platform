@@ -8,6 +8,7 @@
          web-server/http
          "../pos/api/server.rkt"
          "../pos/application/transaction-command.rkt"
+         "../pos/application/register-operations-service.rkt"
          "../pos/application/transaction-service.rkt"
          "../pos/domain/catalog-item.rkt"
          "../pos/domain/fake-catalog.rkt"
@@ -15,6 +16,8 @@
          "../pos/domain/tax.rkt"
          "../pos/domain/transaction-event.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt"
+         "../pos/persistence/operational-configuration-snapshot-codec.rkt"
+         "../pos/persistence/sqlite-register-operations.rkt"
          "../pos/persistence/transaction-command-codec.rkt"
          "../pos/persistence/transaction-command-unit-of-work.rkt"
          "../pos/persistence/pos-database-migrations.rkt"
@@ -827,6 +830,26 @@ SQL
     (dynamic-wind
       void
       (lambda ()
+        (initialize-sqlite-database! database-path)
+        (define seed-connection
+          (db:sqlite3-connect
+           #:database database-path #:mode 'read/write))
+        (dynamic-wind
+          void
+          (lambda ()
+            (define decoded
+              (json-string->operational-configuration-snapshot
+               "{\"schema_version\":1,\"register\":{\"register_id\":\"http-register\",\"display_name\":\"HTTP Register\"},\"cashiers\":[{\"cashier_id\":\"http-cashier\",\"display_name\":\"HTTP Cashier\",\"active\":true}]}"))
+            (activate-operational-configuration!
+             seed-connection
+             (operational-configuration-decode-success-snapshot decoded))
+            (register-operations-open-shift
+             (make-register-operations-service
+              seed-connection
+              #:current-epoch-ms (lambda () 1000)
+              #:generate-shift-id (lambda () "shift-http"))
+             "http-cashier"))
+          (lambda () (db:disconnect seed-connection)))
         (define runtime-A
           (start-pos-runtime
            config

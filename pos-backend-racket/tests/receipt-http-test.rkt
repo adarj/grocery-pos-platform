@@ -10,6 +10,7 @@
          "../pos/domain/money.rkt"
          "../pos/domain/tax.rkt"
          "../pos/domain/transaction-event.rkt"
+         (prefix-in op: "../pos/domain/transaction-operational-context.rkt")
          "../pos/persistence/pos-database-migrations.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt")
 
@@ -145,6 +146,46 @@
        (check-equal? (hash-ref line 'tax_category_id) 'null)
        (check-equal? (hash-ref line 'tax_rate_millionths) 'null)
        (check-equal? (hash-ref line 'tax_amount_minor_units) 0))))
+
+  (test-case "operational completed transaction returns Receipt Schema v2"
+    (with-app
+     (lambda (connection app)
+       (append-transaction-events!
+        connection
+        "txn-operational-receipt"
+        0
+        (list
+         (operational-transaction-started
+          "txn-operational-receipt"
+          (op:transaction-operational-context
+           "register-one" "Front Register"
+           "cashier-one" "Alice"
+           "shift-one" 1000))
+         taxed-A
+         (cash-tendered (money 500))
+         (timestamped-transaction-completed 2000)))
+
+       (define response (get-receipt app "txn-operational-receipt"))
+       (check-equal? (response-code response) 200)
+       (define receipt
+         (hash-ref (response-jsexpr response) 'receipt))
+       (check-equal? (hash-ref receipt 'schema_version) 2)
+       (check-equal?
+        (hash-ref (hash-ref receipt 'register) 'register_id)
+        "register-one")
+       (check-equal?
+        (hash-ref (hash-ref receipt 'register) 'display_name)
+        "Front Register")
+       (check-equal?
+        (hash-ref (hash-ref receipt 'cashier) 'cashier_id)
+        "cashier-one")
+       (check-equal?
+        (hash-ref (hash-ref receipt 'cashier) 'display_name)
+        "Alice")
+       (check-equal? (hash-ref receipt 'shift_id) "shift-one")
+       (check-equal? (hash-ref receipt 'started_at_epoch_ms) 1000)
+       (check-equal? (hash-ref receipt 'completed_at_epoch_ms) 2000)
+       (check-equal? (hash-ref receipt 'total_minor_units) 219))))
 
   (test-case "unknown and non-completed receipt queries are distinct"
     (with-app

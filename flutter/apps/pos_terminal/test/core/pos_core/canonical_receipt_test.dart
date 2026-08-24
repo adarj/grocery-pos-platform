@@ -71,7 +71,7 @@ void main() {
 
   test('unsupported schema and invalid identity/version fail closed', () {
     for (final json in [
-      receiptJson(schemaVersion: 2),
+      receiptJson(schemaVersion: 3),
       receiptJson(transactionId: ''),
       receiptJson(transactionVersion: -1),
       receiptJson(transactionVersion: 6.0),
@@ -81,6 +81,49 @@ void main() {
         throwsA(isA<PosCoreInvalidResponseFailure>()),
       );
     }
+  });
+
+  test('Receipt Schema v2 parses exact operational context and epoch times', () {
+    final json = receiptJson(schemaVersion: 2)
+      ..addAll({
+        'register': {
+          'register_id': 'register-one',
+          'display_name': 'Front Register',
+        },
+        'cashier': {
+          'cashier_id': 'cashier-one',
+          'display_name': 'Alice',
+        },
+        'shift_id': 'shift-one',
+        'started_at_epoch_ms': 1000,
+        'completed_at_epoch_ms': 2000,
+      });
+    final receipt = CanonicalReceipt.fromJson(json);
+    expect(receipt.schemaVersion, 2);
+    expect(receipt.register!.registerId, 'register-one');
+    expect(receipt.register!.displayName, 'Front Register');
+    expect(receipt.cashier!.cashierId, 'cashier-one');
+    expect(receipt.cashier!.displayName, 'Alice');
+    expect(receipt.shiftId, 'shift-one');
+    expect(receipt.startedAtEpochMs, 1000);
+    expect(receipt.completedAtEpochMs, 2000);
+  });
+
+  test('Receipt Schema v1 invents no operational context or time', () {
+    final receipt = CanonicalReceipt.fromJson(receiptJson());
+    expect(receipt.register, isNull);
+    expect(receipt.cashier, isNull);
+    expect(receipt.shiftId, isNull);
+    expect(receipt.startedAtEpochMs, isNull);
+    expect(receipt.completedAtEpochMs, isNull);
+  });
+
+  test('Receipt Schema v1 rejects v2-only operational fields', () {
+    final json = receiptJson()..['shift_id'] = 'shift-smuggled';
+    expect(
+      () => CanonicalReceipt.fromJson(json),
+      throwsA(isA<PosCoreInvalidResponseFailure>()),
+    );
   });
 
   test('missing and invalid line fields fail closed', () {

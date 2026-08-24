@@ -4,7 +4,10 @@
          "transaction-command-receipt.rkt"
          "transaction-command.rkt"
          "../domain/canonical-receipt.rkt"
+         "../domain/register-operations.rkt"
          "../domain/transaction.rkt"
+         (prefix-in op: "../domain/transaction-operational-context.rkt")
+         "../persistence/sqlite-register-operations.rkt"
          "../persistence/sqlite-transaction-event-store.rkt"
          "../persistence/transaction-command-receipt-store.rkt"
          "../persistence/transaction-command-unit-of-work.rkt")
@@ -44,7 +47,12 @@
          transaction-service-command-persistence-failed-message)
 
 (struct transaction-service
-  (connection catalog-lookup load-events load-receipt commit-command!))
+  (connection
+   catalog-lookup
+   load-events
+   load-receipt
+   commit-command!
+   current-epoch-ms))
 
 ;; Query results expose authoritative reconstructed transaction state.
 (struct transaction-service-success (transaction version)
@@ -97,7 +105,8 @@
          #:load-receipt
          [load-receipt load-transaction-command-receipt]
          #:commit-command!
-         [commit-command! commit-transaction-command-outcome!])
+         [commit-command! commit-transaction-command-outcome!]
+         #:current-epoch-ms [current-epoch-ms #f])
   (define who 'make-transaction-service)
   (unless (db:connection? connection)
     (raise-argument-error who "connection?" connection))
@@ -105,8 +114,15 @@
   (check-procedure who load-events "load-events")
   (check-procedure who load-receipt "load-receipt")
   (check-procedure who commit-command! "commit-command!")
+  (when current-epoch-ms
+    (check-procedure who current-epoch-ms "current-epoch-ms"))
   (transaction-service
-   connection catalog-lookup load-events load-receipt commit-command!))
+   connection
+   catalog-lookup
+   load-events
+   load-receipt
+   commit-command!
+   current-epoch-ms))
 
 (define (check-service who service)
   (unless (transaction-service? service)
@@ -216,6 +232,12 @@
   (transaction-command-commit-plan
    command decision-version 'accepted "accepted" events))
 
+(define (accepted-plan-with-effect
+         command decision-version events operational-effect)
+  (transaction-command-commit-plan-with-operational-effect
+   (accepted-plan command decision-version events)
+   operational-effect))
+
 (define (receipt-only-plan command decision-version kind code)
   (transaction-command-commit-plan
    command decision-version kind code '()))
@@ -249,6 +271,54 @@
     (transaction-service-connection service)
     plan)))
 
+(define (current-epoch-ms service)
+  (define clock (transaction-service-current-epoch-ms service))
+  (unless clock
+    (error 'current-epoch-ms
+           "operational transaction planning requires an injected clock"))
+  (define value (clock))
+  (unless (and (exact-integer? value) (>= value 0))
+    (error 'current-epoch-ms
+           "clock returned an invalid epoch millisecond value"))
+  value)
+
+(define (slot-result->operational-effect result)
+  (cond
+    [(or (shift-transaction-slot-claimed? result)
+         (shift-transaction-slot-released? result))
+     (transaction-command-operational-effect-succeeded)]
+    [(shift-transaction-slot-rejected? result)
+     (transaction-command-operational-effect-rejected
+      'domain-rejected
+      (case (shift-transaction-slot-rejected-code result)
+        [(shift-required) "shift_required"]
+        [(shift-has-active-transaction) "shift_has_active_transaction"]
+        [else
+         (error 'slot-result->operational-effect
+                "unsupported shift-slot rejection: ~e"
+                result)]))]
+    [(shift-transaction-slot-failed? result)
+     (transaction-command-operational-effect-failed
+      (shift-transaction-slot-failed-code result)
+      #f
+      (shift-transaction-slot-failed-message result))]
+    [else
+     (error 'slot-result->operational-effect
+            "unsupported shift-slot result: ~e"
+            result)]))
+
+(define (claim-slot-effect context transaction-id)
+  (lambda (connection)
+    (slot-result->operational-effect
+     (claim-shift-transaction-slot/in-transaction!
+      connection context transaction-id))))
+
+(define (release-slot-effect context transaction-id)
+  (lambda (connection)
+    (slot-result->operational-effect
+     (release-shift-transaction-slot/in-transaction!
+      connection context transaction-id))))
+
 (define (dispatch-start-command service command)
   ;; Even a structurally valid start command with a nonzero expected version
   ;; must observe the real stream before its deterministic receipt is frozen.
@@ -281,12 +351,63 @@
           'already-exists
           "transaction_already_exists"))]
        [(transaction-service-not-found? current)
-        (define result
-          (start-transaction
-           (transaction-command-transaction-id command)))
-        (commit-plan
-         service
-         (accepted-plan command 0 (start-accepted-events result)))]
+        (cond
+          [(not (transaction-service-current-epoch-ms service))
+           ;; Focused legacy/domain tests can retain the historical composition.
+           ;; Production runtime always injects the POS-Core clock and therefore
+           ;; always takes the operationally bound branch below.
+           (define result
+             (start-transaction
+              (transaction-command-transaction-id command)))
+           (commit-plan
+            service
+            (accepted-plan command 0 (start-accepted-events result)))]
+          [else
+           (define register-context
+             (load-register-context
+              (transaction-service-connection service)))
+           (cond
+             [(not (register-context-configured? register-context))
+              (commit-plan
+               service
+               (receipt-only-plan
+                command 0 'domain-rejected "register_not_configured"))]
+             [(not (register-context-active-shift register-context))
+              (commit-plan
+               service
+               (receipt-only-plan
+                command 0 'domain-rejected "shift_required"))]
+             [(register-shift-active-transaction-id
+               (register-context-active-shift register-context))
+              (commit-plan
+               service
+               (receipt-only-plan
+                command 0 'domain-rejected
+                "shift_has_active_transaction"))]
+             [else
+              (define shift
+                (register-context-active-shift register-context))
+              (define context
+                (op:transaction-operational-context
+                 (register-shift-register-id shift)
+                 (register-shift-register-display-name shift)
+                 (register-shift-cashier-id shift)
+                 (register-shift-cashier-display-name shift)
+                 (register-shift-shift-id shift)
+                 (current-epoch-ms service)))
+              (define result
+                (start-transaction-with-operational-context
+                 (transaction-command-transaction-id command)
+                 context))
+              (commit-plan
+               service
+               (accepted-plan-with-effect
+                command
+                0
+                (start-accepted-events result)
+                (claim-slot-effect
+                 context
+                 (transaction-command-transaction-id command))))])])]
        [else
         (error
          'dispatch-start-command
@@ -320,11 +441,22 @@
        (domain-rejection-code->outcome-code
         (tender-rejected-code result)))))
 
-(define (completion-command->plan command transaction version)
+(define (completion-command->plan service command transaction version)
   (define result
-    (complete-transaction transaction))
+    (complete-transaction
+     transaction
+     (and (transaction-operational-context transaction)
+          (current-epoch-ms service))))
   (if (completion-accepted? result)
-      (accepted-plan command version (completion-accepted-events result))
+      (if (transaction-operational-context transaction)
+          (accepted-plan-with-effect
+           command
+           version
+           (completion-accepted-events result)
+           (release-slot-effect
+            (transaction-operational-context transaction)
+            (transaction-id transaction)))
+          (accepted-plan command version (completion-accepted-events result)))
       (receipt-only-plan
        command
        version
@@ -346,10 +478,22 @@
        (domain-rejection-code->outcome-code
         (removal-rejected-code result)))))
 
-(define (void-command->plan command transaction version)
-  (define result (void-transaction transaction))
+(define (void-command->plan service command transaction version)
+  (define result
+    (void-transaction
+     transaction
+     (and (transaction-operational-context transaction)
+          (current-epoch-ms service))))
   (if (void-accepted? result)
-      (accepted-plan command version (void-accepted-events result))
+      (if (transaction-operational-context transaction)
+          (accepted-plan-with-effect
+           command
+           version
+           (void-accepted-events result)
+           (release-slot-effect
+            (transaction-operational-context transaction)
+            (transaction-id transaction)))
+          (accepted-plan command version (void-accepted-events result)))
       (receipt-only-plan
        command
        version
@@ -364,11 +508,11 @@
     [(tender-cash-command? command)
      (tender-command->plan command transaction version)]
     [(complete-transaction-command? command)
-     (completion-command->plan command transaction version)]
+     (completion-command->plan service command transaction version)]
     [(remove-line-item-command? command)
      (remove-command->plan command transaction version)]
     [(void-transaction-command? command)
-     (void-command->plan command transaction version)]
+     (void-command->plan service command transaction version)]
     [else
      (error
       'fresh-existing-command-plan

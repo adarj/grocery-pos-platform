@@ -3,9 +3,11 @@
 (require "catalog-item.rkt"
          "money.rkt"
          "tax.rkt"
-         "transaction-event.rkt")
+         "transaction-event.rkt"
+         "transaction-operational-context.rkt")
 
 (provide start-transaction
+         start-transaction-with-operational-context
          start-accepted?
          start-accepted-transaction
          start-accepted-events
@@ -19,6 +21,9 @@
          transaction-total
          transaction-tendered-cash
          transaction-change-due
+         transaction-operational-context
+         transaction-completed-at-epoch-ms
+         transaction-voided-at-epoch-ms
          transaction-line-item?
          transaction-line-item-barcode
          transaction-line-item-description
@@ -80,7 +85,14 @@
          replay-failed-code
          replay-failed-transaction)
 
-(struct transaction (id status line-items cash-tender)
+(struct transaction
+  (id
+   status
+   line-items
+   cash-tender
+   operational-context
+   completed-at-epoch-ms
+   voided-at-epoch-ms)
   #:transparent)
 
 (struct transaction-line-item
@@ -171,8 +183,15 @@
 (struct replay-failed (event-index code transaction)
   #:transparent)
 
-(define (make-open-transaction id)
-  (transaction (string->immutable-string id) 'open '() #f))
+(define (make-open-transaction id [operational-context #f])
+  (transaction
+   (string->immutable-string id)
+   'open
+   '()
+   #f
+   operational-context
+   #f
+   #f))
 
 (define (add-sale-line-item current-transaction
                             barcode
@@ -198,9 +217,10 @@
                [status 'paid]
                [cash-tender (cash-tender amount)]))
 
-(define (mark-transaction-completed current-transaction)
+(define (mark-transaction-completed current-transaction completed-at-epoch-ms)
   (struct-copy transaction current-transaction
-               [status 'completed]))
+               [status 'completed]
+               [completed-at-epoch-ms completed-at-epoch-ms]))
 
 (define (remove-transaction-line current-transaction line-index)
   (define line-items (transaction-line-items current-transaction))
@@ -209,9 +229,10 @@
                 (append (take line-items line-index)
                         (drop line-items (add1 line-index)))]))
 
-(define (mark-transaction-voided current-transaction)
+(define (mark-transaction-voided current-transaction voided-at-epoch-ms)
   (struct-copy transaction current-transaction
-               [status 'voided]))
+               [status 'voided]
+               [voided-at-epoch-ms voided-at-epoch-ms]))
 
 (define (transaction-open? current-transaction)
   (eq? (transaction-status current-transaction) 'open))
@@ -235,6 +256,20 @@
   (unless (string? id)
     (raise-argument-error 'start-transaction "string?" id))
   (define event (transaction-started id))
+  (define application (apply-transaction-event #f event))
+  (start-accepted (event-applied-transaction application)
+                  (list event)))
+
+(define (start-transaction-with-operational-context id context)
+  (unless (string? id)
+    (raise-argument-error
+     'start-transaction-with-operational-context "string?" id))
+  (unless (transaction-operational-context? context)
+    (raise-argument-error
+     'start-transaction-with-operational-context
+     "transaction-operational-context?"
+     context))
+  (define event (operational-transaction-started id context))
   (define application (apply-transaction-event #f event))
   (start-accepted (event-applied-transaction application)
                   (list event)))
@@ -351,27 +386,46 @@
                        removal-accepted
                        removal-rejected))
 
-(define (complete-transaction current-transaction)
+(define (complete-transaction current-transaction [completed-at-epoch-ms #f])
   (unless (transaction? current-transaction)
     (raise-argument-error
      'complete-transaction
      "transaction?"
      current-transaction))
 
+  (when (and completed-at-epoch-ms
+             (not (and (exact-integer? completed-at-epoch-ms)
+                       (>= completed-at-epoch-ms 0))))
+    (raise-argument-error
+     'complete-transaction
+     "(or/c #f exact-nonnegative-integer?)"
+     completed-at-epoch-ms))
   (decision-from-event current-transaction
-                       (transaction-completed)
+                       (if completed-at-epoch-ms
+                           (timestamped-transaction-completed
+                            completed-at-epoch-ms)
+                           (transaction-completed))
                        completion-accepted
                        completion-rejected))
 
-(define (void-transaction current-transaction)
+(define (void-transaction current-transaction [voided-at-epoch-ms #f])
   (unless (transaction? current-transaction)
     (raise-argument-error
      'void-transaction
      "transaction?"
      current-transaction))
 
+  (when (and voided-at-epoch-ms
+             (not (and (exact-integer? voided-at-epoch-ms)
+                       (>= voided-at-epoch-ms 0))))
+    (raise-argument-error
+     'void-transaction
+     "(or/c #f exact-nonnegative-integer?)"
+     voided-at-epoch-ms))
   (decision-from-event current-transaction
-                       (transaction-voided)
+                       (if voided-at-epoch-ms
+                           (timestamped-transaction-voided voided-at-epoch-ms)
+                           (transaction-voided))
                        void-accepted
                        void-rejected))
 
@@ -397,6 +451,15 @@
          (event-applied
           (make-open-transaction
            (transaction-started-transaction-id event))))]
+    [(operational-transaction-started? event)
+     (if current-transaction
+         (event-rejected
+          'duplicate-transaction-started
+          current-transaction)
+         (event-applied
+          (make-open-transaction
+           (operational-transaction-started-transaction-id event)
+           (operational-transaction-started-context event))))]
     [(not current-transaction)
      (event-rejected 'transaction-not-started #f)]
     [(sale-item-added? event)
@@ -459,17 +522,45 @@
     [(transaction-completed? event)
      (if (eq? (transaction-status current-transaction) 'paid)
          (event-applied
-          (mark-transaction-completed current-transaction))
+          (mark-transaction-completed current-transaction #f))
          (event-rejected
           'invalid-transaction-state
           current-transaction))]
+    [(timestamped-transaction-completed? event)
+     (cond
+       [(not (eq? (transaction-status current-transaction) 'paid))
+        (event-rejected 'invalid-transaction-state current-transaction)]
+       [(and (transaction-operational-context current-transaction)
+             (< (timestamped-transaction-completed-completed-at-epoch-ms event)
+                (transaction-operational-context-started-at-epoch-ms
+                 (transaction-operational-context current-transaction))))
+        (event-rejected 'invalid-operational-timestamp current-transaction)]
+       [else
+        (event-applied
+         (mark-transaction-completed
+          current-transaction
+          (timestamped-transaction-completed-completed-at-epoch-ms event)))])]
     [(transaction-voided? event)
      (if (transaction-open? current-transaction)
          (event-applied
-          (mark-transaction-voided current-transaction))
+          (mark-transaction-voided current-transaction #f))
          (event-rejected
           'invalid-transaction-state
-          current-transaction))]))
+          current-transaction))]
+    [(timestamped-transaction-voided? event)
+     (cond
+       [(not (transaction-open? current-transaction))
+        (event-rejected 'invalid-transaction-state current-transaction)]
+       [(and (transaction-operational-context current-transaction)
+             (< (timestamped-transaction-voided-voided-at-epoch-ms event)
+                (transaction-operational-context-started-at-epoch-ms
+                 (transaction-operational-context current-transaction))))
+        (event-rejected 'invalid-operational-timestamp current-transaction)]
+       [else
+        (event-applied
+         (mark-transaction-voided
+          current-transaction
+          (timestamped-transaction-voided-voided-at-epoch-ms event)))])]))
 
 (define (replay-transaction events)
   (unless (list? events)

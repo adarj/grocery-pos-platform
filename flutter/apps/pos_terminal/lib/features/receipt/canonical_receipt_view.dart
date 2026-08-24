@@ -28,6 +28,24 @@ class CanonicalReceiptView extends StatelessWidget {
                 'Transaction: ${receipt.transactionId}',
                 style: theme.textTheme.bodyMedium,
               ),
+              if (receipt.schemaVersion == 2) ...[
+                const SizedBox(height: 12),
+                Text(
+                  'Register: ${receipt.register!.displayName} '
+                  '(${receipt.register!.registerId})',
+                ),
+                Text(
+                  'Cashier: ${receipt.cashier!.displayName} '
+                  '(${receipt.cashier!.cashierId})',
+                ),
+                Text('Shift: ${receipt.shiftId}'),
+                Text(
+                  'Started: ${_formatUtcEpochMs(receipt.startedAtEpochMs!)}',
+                ),
+                Text(
+                  'Completed: ${_formatUtcEpochMs(receipt.completedAtEpochMs!)}',
+                ),
+              ],
               const SizedBox(height: 24),
               for (final line in receipt.lineItems) ...[
                 _ReceiptLine(line: line),
@@ -59,6 +77,14 @@ class CanonicalReceiptView extends StatelessWidget {
       ),
     );
   }
+}
+
+String _formatUtcEpochMs(int epochMs) {
+  final value = DateTime.fromMillisecondsSinceEpoch(epochMs, isUtc: true);
+  String two(int number) => number.toString().padLeft(2, '0');
+  return '${value.year.toString().padLeft(4, '0')}-'
+      '${two(value.month)}-${two(value.day)} '
+      '${two(value.hour)}:${two(value.minute)}:${two(value.second)} UTC';
 }
 
 class _ReceiptLine extends StatelessWidget {

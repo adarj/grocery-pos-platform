@@ -1,5 +1,6 @@
 import 'json_fields.dart';
 import 'pos_core_failure.dart';
+import 'register_operations.dart';
 
 final class CanonicalReceiptLine {
   const CanonicalReceiptLine({
@@ -78,6 +79,11 @@ final class CanonicalReceipt {
     required this.totalMinorUnits,
     required this.tenderedCashMinorUnits,
     required this.changeDueMinorUnits,
+    this.register,
+    this.cashier,
+    this.shiftId,
+    this.startedAtEpochMs,
+    this.completedAtEpochMs,
   }) : lineItems = List.unmodifiable(lineItems);
 
   factory CanonicalReceipt.fromJson(Map<String, Object?> json) {
@@ -87,7 +93,7 @@ final class CanonicalReceipt {
       'schema_version',
       context,
     );
-    if (schemaVersion != 1) {
+    if (schemaVersion != 1 && schemaVersion != 2) {
       throw PosCoreInvalidResponseFailure(
         'Canonical receipt schema version $schemaVersion is unsupported.',
       );
@@ -100,6 +106,60 @@ final class CanonicalReceipt {
           ),
         )
         .toList(growable: false);
+
+    RegisterIdentity? register;
+    CashierIdentity? cashier;
+    String? shiftId;
+    int? startedAtEpochMs;
+    int? completedAtEpochMs;
+    if (schemaVersion == 2) {
+      register = RegisterIdentity.fromJson(
+        expectJsonObject(
+          requireJsonField(json, 'register', context),
+          'canonical receipt register',
+        ),
+      );
+      cashier = CashierIdentity.fromJson(
+        expectJsonObject(
+          requireJsonField(json, 'cashier', context),
+          'canonical receipt cashier',
+        ),
+      );
+      shiftId = requireJsonString(
+        json,
+        'shift_id',
+        context,
+        nonEmpty: true,
+      );
+      startedAtEpochMs = requireJsonNonnegativeInt(
+        json,
+        'started_at_epoch_ms',
+        context,
+      );
+      completedAtEpochMs = requireJsonNonnegativeInt(
+        json,
+        'completed_at_epoch_ms',
+        context,
+      );
+      if (completedAtEpochMs < startedAtEpochMs) {
+        throw const PosCoreInvalidResponseFailure(
+          'Canonical receipt completion time cannot precede its start time.',
+        );
+      }
+    } else {
+      const v2OnlyFields = <String>{
+        'register',
+        'cashier',
+        'shift_id',
+        'started_at_epoch_ms',
+        'completed_at_epoch_ms',
+      };
+      if (v2OnlyFields.any(json.containsKey)) {
+        throw const PosCoreInvalidResponseFailure(
+          'Canonical receipt Schema v1 cannot contain operational context.',
+        );
+      }
+    }
 
     return CanonicalReceipt(
       schemaVersion: schemaVersion,
@@ -140,6 +200,11 @@ final class CanonicalReceipt {
         'change_due_minor_units',
         context,
       ),
+      register: register,
+      cashier: cashier,
+      shiftId: shiftId,
+      startedAtEpochMs: startedAtEpochMs,
+      completedAtEpochMs: completedAtEpochMs,
     );
   }
 
@@ -152,4 +217,9 @@ final class CanonicalReceipt {
   final int totalMinorUnits;
   final int tenderedCashMinorUnits;
   final int changeDueMinorUnits;
+  final RegisterIdentity? register;
+  final CashierIdentity? cashier;
+  final String? shiftId;
+  final int? startedAtEpochMs;
+  final int? completedAtEpochMs;
 }

@@ -221,11 +221,66 @@ SQL
    connection
    "INSERT INTO catalog_barcodes (barcode, item_id) VALUES ('049000001234', 'item-v3')"))
 
+(define frozen-tax-categories-table-sql
+  #<<SQL
+CREATE TABLE tax_categories (
+  tax_category_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(tax_category_id) = 'text'
+      AND length(tax_category_id) > 0
+    ),
+  description TEXT NOT NULL
+    CHECK (
+      typeof(description) = 'text'
+      AND length(description) > 0
+    ),
+  rate_millionths INTEGER NOT NULL
+    CHECK (
+      typeof(rate_millionths) = 'integer'
+      AND rate_millionths >= 0
+      AND rate_millionths <= 1000000
+    )
+)
+SQL
+  )
+
+(define frozen-item-tax-mapping-table-sql
+  #<<SQL
+CREATE TABLE catalog_item_tax_categories (
+  item_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(item_id) = 'text'
+      AND length(item_id) > 0
+    ),
+  tax_category_id TEXT NOT NULL
+    CHECK (
+      typeof(tax_category_id) = 'text'
+      AND length(tax_category_id) > 0
+    )
+)
+SQL
+  )
+
+(define (install-frozen-v4! connection)
+  (install-frozen-v3! connection)
+  (db:query-exec connection frozen-tax-categories-table-sql)
+  (db:query-exec connection frozen-item-tax-mapping-table-sql)
+  (db:query-exec
+   connection
+   "INSERT INTO tax_categories VALUES ('legacy', 'Legacy tax', 100000)")
+  (db:query-exec
+   connection
+   "INSERT INTO catalog_item_tax_categories VALUES ('item-v3', 'legacy')")
+  (db:query-exec
+   connection
+   "INSERT INTO pos_schema_migrations (version, name) VALUES (4, 'create_tax_categories')"))
+
 (define expected-history
   (list #(1 "create_transaction_events")
         #(2 "create_transaction_command_receipts")
         #(3 "create_catalog")
-        #(4 "create_tax_categories")))
+        #(4 "create_tax_categories")
+        #(5 "create_register_operations")))
 
 (module+ test
   (test-case "fresh database creates catalog and tax schema through migration 4"
@@ -258,6 +313,91 @@ SQL
           "catalog_item_tax_categories"
           "catalog_items"
           "tax_categories")))))
+
+  (test-case "real frozen v4 database upgrades without defaults or prior-data changes"
+    (call-with-database
+     (lambda (connection)
+       (install-frozen-v4! connection)
+       (define events-before
+         (db:query-rows connection "SELECT * FROM transaction_events"))
+       (define receipts-before
+         (db:query-rows connection "SELECT * FROM transaction_command_receipts"))
+       (define catalog-before
+         (db:query-rows connection "SELECT * FROM catalog_items"))
+       (define tax-before
+         (db:query-rows connection "SELECT * FROM tax_categories"))
+       (migrate-pos-database! connection)
+       (check-equal?
+        (db:query-rows
+         connection
+         "SELECT version, name FROM pos_schema_migrations ORDER BY version")
+        expected-history)
+       (check-equal? (db:query-rows connection "SELECT * FROM transaction_events")
+                     events-before)
+       (check-equal?
+        (db:query-rows connection "SELECT * FROM transaction_command_receipts")
+        receipts-before)
+       (check-equal? (db:query-rows connection "SELECT * FROM catalog_items")
+                     catalog-before)
+       (check-equal? (db:query-rows connection "SELECT * FROM tax_categories")
+                     tax-before)
+       (check-equal? (db:query-value connection
+                                     "SELECT COUNT(*) FROM register_configuration")
+                     0)
+       (check-equal? (db:query-value connection "SELECT COUNT(*) FROM cashiers")
+                     0))))
+
+  (test-case "migration 5 validates owned tables and partial indexes"
+    (for ([table
+           (in-list
+            '("register_configuration" "cashiers" "register_shifts"))])
+      (call-with-database
+       (lambda (connection)
+         (migrate-pos-database! connection)
+         (db:query-exec connection (format "DROP TABLE ~a" table))
+         (check-exn exn:fail?
+                    (lambda () (migrate-pos-database! connection))))))
+    (for ([index
+           (in-list
+            '("register_configuration_register_id_unique"
+              "register_shifts_one_open_per_register"
+              "register_shifts_active_transaction_unique"))])
+      (call-with-database
+       (lambda (connection)
+         (migrate-pos-database! connection)
+         (db:query-exec connection (format "DROP INDEX ~a" index))
+         (check-exn exn:fail?
+                    (lambda () (migrate-pos-database! connection)))))))
+
+  (test-case "migration 5 enforces one open shift and timestamp primitives"
+    (call-with-database
+     (lambda (connection)
+       (migrate-pos-database! connection)
+       (define insert
+         #<<SQL
+INSERT INTO register_shifts
+  (shift_id, register_id, register_display_name,
+   cashier_id, cashier_display_name, opened_at_epoch_ms,
+   closed_at_epoch_ms, active_transaction_id)
+VALUES (?, 'register', 'Register', 'cashier', 'Cashier', ?, ?, ?)
+SQL
+         )
+       (db:query-exec connection insert "shift-one" 1000 db:sql-null db:sql-null)
+       (check-exn
+        db:exn:fail:sql?
+        (lambda ()
+          (db:query-exec
+           connection insert "shift-two" 1001 db:sql-null db:sql-null)))
+       (check-exn
+        db:exn:fail:sql?
+        (lambda ()
+          (db:query-exec
+           connection insert "shift-bad-time" 1.5 2.0 db:sql-null)))
+       (check-exn
+        db:exn:fail:sql?
+        (lambda ()
+          (db:query-exec
+           connection insert "shift-bad-active" 1000 1001 7))))))
 
   (test-case "real frozen v3 database upgrades existing items to zero tax"
     (call-with-database

@@ -1,6 +1,7 @@
 import 'models/command_result.dart';
 import 'models/canonical_receipt.dart';
 import 'models/pos_core_health.dart';
+import 'models/register_operations.dart';
 import 'models/transaction_command.dart';
 import 'models/transaction_snapshot.dart';
 
@@ -12,4 +13,12 @@ abstract interface class PosCoreClient {
   Future<TransactionSnapshot> fetchTransaction(String transactionId);
 
   Future<CanonicalReceipt> fetchReceipt(String transactionId);
+
+  Future<RegisterContext> fetchRegisterContext();
+
+  Future<List<CashierIdentity>> fetchActiveCashiers();
+
+  Future<RegisterShift> openShift(String cashierId);
+
+  Future<RegisterShift> closeShift(String shiftId);
 }

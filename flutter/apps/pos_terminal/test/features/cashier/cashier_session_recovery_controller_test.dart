@@ -14,12 +14,16 @@ import 'package:pos_terminal/features/cashier/cashier_local_recovery_failure.dar
 import 'package:pos_terminal/features/cashier/cashier_session_controller.dart';
 import 'package:pos_terminal/features/cashier/cashier_session_store.dart';
 
+import '../../support/unimplemented_register_operations_client.dart';
+
 typedef CommandHandler =
     Future<PosCommandResult> Function(TransactionCommand command);
 typedef TransactionHandler =
     Future<TransactionSnapshot> Function(String transactionId);
 
-final class RecordingClient implements PosCoreClient {
+final class RecordingClient
+    with UnimplementedRegisterOperationsClient
+    implements PosCoreClient {
   RecordingClient(this.log);
 
   final List<String> log;

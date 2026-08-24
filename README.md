@@ -139,24 +139,28 @@ Verified capabilities currently include:
 * migration v3/v4 persistent local catalog and tax-reference tables with strict
   Catalog Snapshot v1/v2 validation, atomic full replacement, SQLite runtime
   checkout lookup, and sale-time price/tax snapshot isolation;
+* migration v5 current register/cashier configuration and durable shifts with
+  one active-transaction slot, POS-Core-recorded epoch-millisecond times, and
+  historical identity snapshotting;
 * idempotent persistent transaction application service with deterministic
   two-connection concurrency and file-backed restart/retry coverage;
 * Racket runtime composition with startup migration, a bounded SQLite pool,
   thread-mapped virtual request connections, and explicit shutdown ownership;
 * Transaction HTTP API v1 with one strict idempotent command route,
   authoritative transaction-state reads, and exact completed-sale canonical
-  receipt lookup derived from journal replay;
+  receipt lookup derived from journal replay, plus narrow register/shift
+  operations;
 * Flutter Linux ARM64 POS terminal;
 * typed Flutter POS Core client models for transaction commands, durable command
-  outcomes, authoritative transaction snapshots, canonical receipts, and safe
-  failures;
+  outcomes, authoritative transaction snapshots, Receipt Schemas v1/v2,
+  register/shift context, and safe failures;
 * Flutter cashier session orchestration and a
   start/scan/remove/void/cash-tender/complete interface rendering authoritative
   basket, subtotal, tax, total, payment, and change;
 * Flutter widget tests;
 * isolated Flutter-to-Racket real-process integration tests covering complete
   cash sales, restart recovery, uncertain transport, and durable same-command
-  receipt resolution;
+  receipt resolution under a real persistent shift;
 * Flutter-to-Racket local health connection;
 * nixGL-based Flutter GUI launch in the current VM environment;
 * GitHub Actions workflow definitions for scaffold/Nix validation, Racket
@@ -208,7 +212,7 @@ just doctor
 
 Use two terminals.
 
-### Prepare the development catalog
+### Prepare development reference data
 
 For a fresh development database, validate and atomically activate the small
 version-controlled catalog fixture first:
@@ -222,6 +226,18 @@ Activation replaces the complete current catalog in the explicitly selected
 database. The development shell provisions `.local/sqlite`; other database
 parents must already exist. POS Core startup never seeds or rewrites catalog
 data automatically.
+
+Also validate and activate the development register/cashier attribution
+fixture into the same explicit database:
+
+```bash
+just register-config-validate fixtures/development/register-configuration-v1.json
+just register-config-activate fixtures/development/register-configuration-v1.json .local/sqlite/pos-dev.db
+```
+
+POS Core does not auto-seed identities. After startup, Flutter selects the
+development cashier and opens a shift. This is identity attribution, not
+PIN/password authentication.
 
 ### Terminal 1 — POS Core
 

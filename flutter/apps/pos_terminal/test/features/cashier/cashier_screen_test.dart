@@ -16,6 +16,8 @@ import 'package:pos_terminal/features/cashier/cashier_screen.dart';
 import 'package:pos_terminal/features/cashier/cashier_session_controller.dart';
 import 'package:pos_terminal/features/cashier/cashier_session_store.dart';
 
+import '../../support/unimplemented_register_operations_client.dart';
+
 typedef CommandHandler =
     Future<PosCommandResult> Function(TransactionCommand command);
 typedef TransactionHandler =
@@ -23,7 +25,9 @@ typedef TransactionHandler =
 typedef ReceiptHandler =
     Future<CanonicalReceipt> Function(String transactionId);
 
-final class FakeCashierClient implements PosCoreClient {
+final class FakeCashierClient
+    with UnimplementedRegisterOperationsClient
+    implements PosCoreClient {
   final Queue<CommandHandler> commandHandlers = Queue();
   final Queue<TransactionHandler> transactionHandlers = Queue();
   final Queue<ReceiptHandler> receiptHandlers = Queue();
@@ -352,6 +356,29 @@ void main() {
       expect(testFixture.client.commands, hasLength(2));
     },
   );
+
+  testWidgets('Start Sale without a shift shows safe operational guidance', (
+    tester,
+  ) async {
+    final testFixture = fixture();
+    testFixture.client.enqueueResult(
+      PosCommandOutcomeKind.domainRejected,
+      code: 'shift_required',
+      version: 0,
+    );
+
+    await pumpCashier(tester, testFixture.controller);
+    await tester.tap(find.text('Start Sale'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('Open a cashier shift before starting a sale.'),
+      findsOneWidget,
+    );
+    expect(find.text('Start Sale'), findsOneWidget);
+    expect(testFixture.client.commands, hasLength(1));
+    expect(testFixture.client.reads, isEmpty);
+  });
 
   testWidgets('basket preserves backend order and backend totals exactly', (
     tester,

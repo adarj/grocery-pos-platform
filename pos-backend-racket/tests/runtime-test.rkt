@@ -8,13 +8,16 @@
          "../pos/runtime.rkt"
          "../pos/application/transaction-command-receipt.rkt"
          "../pos/application/transaction-command.rkt"
+         "../pos/application/register-operations-service.rkt"
          "../pos/application/transaction-service.rkt"
          "../pos/domain/fake-catalog.rkt"
          "../pos/domain/money.rkt"
          "../pos/domain/tax.rkt"
          "../pos/domain/transaction-event.rkt"
          "../pos/persistence/catalog-snapshot-codec.rkt"
+         "../pos/persistence/operational-configuration-snapshot-codec.rkt"
          "../pos/persistence/sqlite-catalog.rkt"
+         "../pos/persistence/sqlite-register-operations.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt")
 
 (define (call-with-temporary-database proc)
@@ -81,7 +84,28 @@
    (lambda (connection)
      (activate-catalog-snapshot!
       connection
-      (catalog-snapshot-decode-success-snapshot decoded)))))
+     (catalog-snapshot-decode-success-snapshot decoded)))))
+
+(define runtime-configuration-json
+  "{\"schema_version\":1,\"register\":{\"register_id\":\"runtime-register\",\"display_name\":\"Runtime Register\"},\"cashiers\":[{\"cashier_id\":\"runtime-cashier\",\"display_name\":\"Runtime Cashier\",\"active\":true}]}")
+
+(define (prepare-runtime-operations! database-path)
+  (initialize-sqlite-database! database-path)
+  (define decoded
+    (json-string->operational-configuration-snapshot
+     runtime-configuration-json))
+  (with-connection
+   database-path
+   (lambda (connection)
+     (activate-operational-configuration!
+      connection
+      (operational-configuration-decode-success-snapshot decoded))
+     (register-operations-open-shift
+      (make-register-operations-service
+       connection
+       #:current-epoch-ms (lambda () 1000)
+       #:generate-shift-id (lambda () "shift-runtime"))
+      "runtime-cashier"))))
 
 (define (check-command-outcome result kind code)
   (define receipt (resolved-receipt result))
@@ -132,7 +156,8 @@
             (list (vector 1 "create_transaction_events")
                   (vector 2 "create_transaction_command_receipts")
                   (vector 3 "create_catalog")
-                  (vector 4 "create_tax_categories")))
+                  (vector 4 "create_tax_categories")
+                  (vector 5 "create_register_operations")))
            (with-connection
             database-path
             (lambda (connection)
@@ -164,16 +189,20 @@ SQL
                (start-transaction-command "cmd-start" "txn-001" 0))))
            (check-equal?
             (transaction-command-receipt-outcome-kind receipt)
-            'accepted)
+            'domain-rejected)
+           (check-equal?
+            (transaction-command-receipt-outcome-code receipt)
+            "register_not_configured")
            (check-equal?
             (transaction-command-receipt-outcome-stream-version receipt)
-            1))
+            0))
          (lambda ()
            (stop-pos-runtime! runtime))))))
 
   (test-case "default runtime uses only persisted active catalog rows"
     (call-with-temporary-database
      (lambda (database-path _directory)
+       (prepare-runtime-operations! database-path)
        (define runtime-empty
          (start-pos-runtime (runtime-config database-path)))
        (dynamic-wind
@@ -196,7 +225,13 @@ SQL
                       1
                       "049000001234"))
             'domain-rejected
-            "unknown_barcode"))
+            "unknown_barcode")
+           (check-command-outcome
+            (execute service
+                     (void-transaction-command
+                      "cmd-empty-void" "txn-empty" 1))
+            'accepted
+            "accepted"))
          (lambda () (stop-pos-runtime! runtime-empty)))
 
        (activate-runtime-catalog! database-path persistent-runtime-catalog)
@@ -225,6 +260,13 @@ SQL
 
            (check-command-outcome
             (execute service
+                     (void-transaction-command
+                      "cmd-persisted-void" "txn-persisted" 2))
+            'accepted
+            "accepted")
+
+           (check-command-outcome
+            (execute service
                      (start-transaction-command
                       "cmd-inactive-start" "txn-inactive" 0))
             'accepted
@@ -238,6 +280,12 @@ SQL
                       "000000000099"))
             'domain-rejected
             "unknown_barcode")
+           (check-command-outcome
+            (execute service
+                     (void-transaction-command
+                      "cmd-inactive-void" "txn-inactive" 1))
+            'accepted
+            "accepted")
 
            (check-command-outcome
             (execute service
@@ -254,6 +302,12 @@ SQL
                       "does-not-exist"))
             'domain-rejected
             "unknown_barcode")
+           (check-command-outcome
+            (execute service
+                     (void-transaction-command
+                      "cmd-unknown-void" "txn-unknown" 1))
+            'accepted
+            "accepted")
 
            (define recovered
              (transaction-service-load-transaction service "txn-persisted"))
@@ -278,6 +332,7 @@ SQL
   (test-case "runtime separates startup/request connections and owns shutdown"
     (call-with-temporary-database
      (lambda (database-path _directory)
+       (prepare-runtime-operations! database-path)
        (define opened '())
        (define (recording-connect path mode)
          (define connection
@@ -308,6 +363,7 @@ SQL
   (test-case "existing database startup preserves history and same-ID retry"
     (call-with-temporary-database
      (lambda (database-path _directory)
+       (prepare-runtime-operations! database-path)
        (define catalog-lookups 0)
        (define (counted-catalog barcode)
          (set! catalog-lookups (add1 catalog-lookups))
@@ -346,7 +402,8 @@ SQL
             (list (vector 1 "create_transaction_events")
                   (vector 2 "create_transaction_command_receipts")
                   (vector 3 "create_catalog")
-                  (vector 4 "create_tax_categories")))
+                  (vector 4 "create_tax_categories")
+                  (vector 5 "create_register_operations")))
            (define service
              (pos-runtime-transaction-service runtime-B))
            (define retry-receipt
@@ -411,6 +468,7 @@ SQL
   (test-case "shared runtime service remains correct across request threads"
     (call-with-temporary-database
      (lambda (database-path _directory)
+       (prepare-runtime-operations! database-path)
        (define runtime
          (start-pos-runtime
           (runtime-config database-path)

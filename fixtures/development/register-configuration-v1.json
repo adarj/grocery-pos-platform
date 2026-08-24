@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "register": {
+    "register_id": "register-development-01",
+    "display_name": "Development Register 1"
+  },
+  "cashiers": [
+    {
+      "cashier_id": "cashier-development-01",
+      "display_name": "Development Cashier",
+      "active": true
+    }
+  ]
+}

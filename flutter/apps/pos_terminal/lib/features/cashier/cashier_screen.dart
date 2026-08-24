@@ -540,6 +540,10 @@ String? _resultFeedback(PosCommandResult? result) {
     'stale_expected_version' ||
     'stream_version_conflict' => 'Transaction changed. Latest state loaded.',
     'transaction_already_exists' => 'Could not start sale. Please try again.',
+    'register_not_configured' => 'Register configuration is required.',
+    'shift_required' => 'Open a cashier shift before starting a sale.',
+    'shift_has_active_transaction' =>
+      'Another transaction is already active on this shift.',
     'transaction_not_found' => 'Transaction not found.',
     _ => 'Action could not be completed.',
   };

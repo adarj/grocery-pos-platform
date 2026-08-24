@@ -1,0 +1,195 @@
+#lang racket
+
+(require (prefix-in db: db)
+         json
+         net/url
+         rackunit
+         web-server/http
+         "../pos/api/server.rkt"
+         "../pos/application/register-operations-service.rkt"
+         "../pos/application/transaction-service.rkt"
+         "../pos/domain/fake-catalog.rkt"
+         "../pos/persistence/operational-configuration-snapshot-codec.rkt"
+         "../pos/persistence/pos-database-migrations.rkt"
+         "../pos/persistence/sqlite-register-operations.rkt")
+
+(define config-json
+  "{\"schema_version\":1,\"register\":{\"register_id\":\"register-one\",\"display_name\":\"Register One\"},\"cashiers\":[{\"cashier_id\":\"active\",\"display_name\":\"Alice\",\"active\":true},{\"cashier_id\":\"inactive\",\"display_name\":\"Inactive\",\"active\":false}]}")
+
+(define (request* method path [body #f])
+  (request method
+           (string->url path)
+           (if body (list (header #"Content-Type" #"application/json")) '())
+           (delay '())
+           body
+           "127.0.0.1" 7340 "127.0.0.1"))
+
+(define (body response)
+  (define out (open-output-bytes))
+  ((response-output response) out)
+  (bytes->jsexpr (get-output-bytes out)))
+
+(define (post app path value)
+  (app (request* #"POST" path (jsexpr->bytes value))))
+
+(define (error-code response)
+  (hash-ref (hash-ref (body response) 'error) 'code))
+
+(module+ test
+  (define connection (db:sqlite3-connect #:database 'memory))
+  (migrate-pos-database! connection)
+  (define clock-values (box '(1000 2000)))
+  (define register-service
+    (make-register-operations-service
+     connection
+     #:current-epoch-ms
+     (lambda ()
+       (define value (first (unbox clock-values)))
+       (set-box! clock-values (rest (unbox clock-values)))
+       value)
+     #:generate-shift-id (lambda () "shift-one")))
+  (define app
+    (make-app
+     (make-transaction-service
+      connection
+      #:catalog-lookup fake-catalog-lookup
+      #:current-epoch-ms (lambda () 1500))
+     register-service))
+
+  (test-case "register context reports legitimate unconfigured state"
+    (define response (app (request* #"GET" "/register-context")))
+    (check-equal? (response-code response) 200)
+    (check-equal?
+     (hash-ref (body response) 'register_context)
+     (hasheq 'configured #f
+             'register (json-null)
+             'active_shift (json-null))))
+
+  (test-case "transaction start is durably blocked while unconfigured"
+    (define response
+      (post
+       app
+       "/transaction-commands"
+       (hasheq
+        'schema_version 1
+        'command_id "cmd-unconfigured"
+        'transaction_id "txn-unconfigured"
+        'expected_version 0
+        'command_type "start_transaction"
+        'payload (hasheq))))
+    (check-equal? (response-code response) 409)
+    (define result (hash-ref (body response) 'command_result))
+    (check-equal? (hash-ref result 'outcome_kind) "domain_rejected")
+    (check-equal? (hash-ref result 'outcome_code)
+                  "register_not_configured"))
+
+  (define decoded
+    (json-string->operational-configuration-snapshot config-json))
+  (void
+   (activate-operational-configuration!
+    connection
+    (operational-configuration-decode-success-snapshot decoded)))
+
+  (test-case "transaction start is durably blocked until a shift opens"
+    (define response
+      (post
+       app
+       "/transaction-commands"
+       (hasheq
+        'schema_version 1
+        'command_id "cmd-no-shift"
+        'transaction_id "txn-no-shift"
+        'expected_version 0
+        'command_type "start_transaction"
+        'payload (hasheq))))
+    (check-equal? (response-code response) 409)
+    (define result (hash-ref (body response) 'command_result))
+    (check-equal? (hash-ref result 'outcome_kind) "domain_rejected")
+    (check-equal? (hash-ref result 'outcome_code) "shift_required"))
+
+  (test-case "cashier listing excludes inactive references"
+    (define response (app (request* #"GET" "/cashiers")))
+    (check-equal? (response-code response) 200)
+    (check-equal?
+     (hash-ref (body response) 'cashiers)
+     (list (hasheq 'cashier_id "active" 'display_name "Alice"))))
+
+  (test-case "open validates strictly and safely repeats same cashier"
+    (define malformed
+      (post app "/shifts/open" (hasheq 'cashier_id "active" 'extra #t)))
+    (check-equal? (response-code malformed) 400)
+    (define inactive
+      (post app "/shifts/open" (hasheq 'cashier_id "inactive")))
+    (check-equal? (response-code inactive) 409)
+    (check-equal? (error-code inactive) "cashier_inactive")
+    (define opened (post app "/shifts/open" (hasheq 'cashier_id "active")))
+    (check-equal? (response-code opened) 200)
+    (check-equal? (hash-ref (hash-ref (body opened) 'shift) 'shift_id)
+                  "shift-one")
+    (define repeated (post app "/shifts/open" (hasheq 'cashier_id "active")))
+    (check-equal? (response-code repeated) 200)
+    (check-equal? (body repeated) (body opened)))
+
+  (test-case "transaction start under the open shift claims and releases its slot"
+    (define start-response
+      (post
+       app
+       "/transaction-commands"
+       (hasheq
+        'schema_version 1
+        'command_id "cmd-under-shift"
+        'transaction_id "txn-under-shift"
+        'expected_version 0
+        'command_type "start_transaction"
+        'payload (hasheq))))
+    (check-equal? (response-code start-response) 200)
+    (check-equal?
+     (db:query-value
+      connection
+      "SELECT active_transaction_id FROM register_shifts WHERE shift_id = 'shift-one'")
+     "txn-under-shift")
+    (define void-response
+      (post
+       app
+       "/transaction-commands"
+       (hasheq
+        'schema_version 1
+        'command_id "cmd-under-shift-void"
+        'transaction_id "txn-under-shift"
+        'expected_version 1
+        'command_type "void_transaction"
+        'payload (hasheq))))
+    (check-equal? (response-code void-response) 200)
+    (check-true
+     (db:sql-null?
+      (db:query-value
+       connection
+       "SELECT active_transaction_id FROM register_shifts WHERE shift_id = 'shift-one'"))))
+
+  (test-case "close blocks active transaction then is repeatably safe"
+    (db:query-exec
+     connection
+     "UPDATE register_shifts SET active_transaction_id = 'txn-one' WHERE shift_id = 'shift-one'")
+    (define blocked (post app "/shifts/shift-one/close" (hasheq)))
+    (check-equal? (response-code blocked) 409)
+    (check-equal? (error-code blocked) "shift_has_active_transaction")
+    (db:query-exec
+     connection
+     "UPDATE register_shifts SET active_transaction_id = NULL WHERE shift_id = 'shift-one'")
+    (define closed (post app "/shifts/shift-one/close" (hasheq)))
+    (check-equal? (response-code closed) 200)
+    (check-equal? (hash-ref (hash-ref (body closed) 'shift)
+                            'closed_at_epoch_ms)
+                  2000)
+    (define repeated (post app "/shifts/shift-one/close" (hasheq)))
+    (check-equal? (response-code repeated) 200)
+    (check-equal? (body repeated) (body closed)))
+
+  (test-case "operational routes enforce methods"
+    (for ([path (in-list '("/register-context" "/cashiers"))])
+      (check-equal? (response-code (app (request* #"POST" path #"{}"))) 405))
+    (check-equal? (response-code (app (request* #"GET" "/shifts/open"))) 405)
+    (check-equal?
+     (response-code (app (request* #"GET" "/shifts/shift-one/close"))) 405))
+
+  (db:disconnect connection))

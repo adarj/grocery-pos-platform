@@ -11,6 +11,7 @@
 (define migration-2-name "create_transaction_command_receipts")
 (define migration-3-name "create_catalog")
 (define migration-4-name "create_tax_categories")
+(define migration-5-name "create_register_operations")
 (define stream-sequence-index-name
   "transaction_events_stream_sequence_unique")
 
@@ -191,6 +192,130 @@ CREATE TABLE catalog_item_tax_categories (
 SQL
   )
 
+(define create-register-configuration-table-sql
+  #<<SQL
+CREATE TABLE register_configuration (
+  singleton_id INTEGER PRIMARY KEY
+    CHECK (
+      typeof(singleton_id) = 'integer'
+      AND singleton_id = 1
+    ),
+  register_id TEXT NOT NULL
+    CHECK (
+      typeof(register_id) = 'text'
+      AND length(register_id) > 0
+    ),
+  display_name TEXT NOT NULL
+    CHECK (
+      typeof(display_name) = 'text'
+      AND length(display_name) > 0
+    )
+)
+SQL
+  )
+
+(define create-register-id-index-sql
+  #<<SQL
+CREATE UNIQUE INDEX register_configuration_register_id_unique
+ON register_configuration (register_id)
+SQL
+  )
+
+(define create-cashiers-table-sql
+  #<<SQL
+CREATE TABLE cashiers (
+  cashier_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(cashier_id) = 'text'
+      AND length(cashier_id) > 0
+    ),
+  display_name TEXT NOT NULL
+    CHECK (
+      typeof(display_name) = 'text'
+      AND length(display_name) > 0
+    ),
+  active INTEGER NOT NULL
+    CHECK (
+      typeof(active) = 'integer'
+      AND active IN (0, 1)
+    )
+)
+SQL
+  )
+
+(define create-register-shifts-table-sql
+  #<<SQL
+CREATE TABLE register_shifts (
+  shift_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(shift_id) = 'text'
+      AND length(shift_id) > 0
+    ),
+  register_id TEXT NOT NULL
+    CHECK (
+      typeof(register_id) = 'text'
+      AND length(register_id) > 0
+    ),
+  register_display_name TEXT NOT NULL
+    CHECK (
+      typeof(register_display_name) = 'text'
+      AND length(register_display_name) > 0
+    ),
+  cashier_id TEXT NOT NULL
+    CHECK (
+      typeof(cashier_id) = 'text'
+      AND length(cashier_id) > 0
+    ),
+  cashier_display_name TEXT NOT NULL
+    CHECK (
+      typeof(cashier_display_name) = 'text'
+      AND length(cashier_display_name) > 0
+    ),
+  opened_at_epoch_ms INTEGER NOT NULL
+    CHECK (
+      typeof(opened_at_epoch_ms) = 'integer'
+      AND opened_at_epoch_ms >= 0
+    ),
+  closed_at_epoch_ms INTEGER
+    CHECK (
+      closed_at_epoch_ms IS NULL
+      OR (
+        typeof(closed_at_epoch_ms) = 'integer'
+        AND closed_at_epoch_ms >= opened_at_epoch_ms
+      )
+    ),
+  active_transaction_id TEXT
+    CHECK (
+      active_transaction_id IS NULL
+      OR (
+        typeof(active_transaction_id) = 'text'
+        AND length(active_transaction_id) > 0
+      )
+    ),
+  CHECK (
+    closed_at_epoch_ms IS NULL
+    OR active_transaction_id IS NULL
+  )
+)
+SQL
+  )
+
+(define create-open-shift-index-sql
+  #<<SQL
+CREATE UNIQUE INDEX register_shifts_one_open_per_register
+ON register_shifts (register_id)
+WHERE closed_at_epoch_ms IS NULL
+SQL
+  )
+
+(define create-active-transaction-index-sql
+  #<<SQL
+CREATE UNIQUE INDEX register_shifts_active_transaction_unique
+ON register_shifts (active_transaction_id)
+WHERE active_transaction_id IS NOT NULL
+SQL
+  )
+
 (define (schema-object-exists? connection type name)
   (= 1
      (db:query-value
@@ -306,6 +431,26 @@ SQL
   (list (vector "item_id" "TEXT" 1 1)
         (vector "tax_category_id" "TEXT" 1 0)))
 
+(define expected-register-configuration-columns
+  (list (vector "singleton_id" "INTEGER" 0 1)
+        (vector "register_id" "TEXT" 1 0)
+        (vector "display_name" "TEXT" 1 0)))
+
+(define expected-cashier-columns
+  (list (vector "cashier_id" "TEXT" 1 1)
+        (vector "display_name" "TEXT" 1 0)
+        (vector "active" "INTEGER" 1 0)))
+
+(define expected-register-shift-columns
+  (list (vector "shift_id" "TEXT" 1 1)
+        (vector "register_id" "TEXT" 1 0)
+        (vector "register_display_name" "TEXT" 1 0)
+        (vector "cashier_id" "TEXT" 1 0)
+        (vector "cashier_display_name" "TEXT" 1 0)
+        (vector "opened_at_epoch_ms" "INTEGER" 1 0)
+        (vector "closed_at_epoch_ms" "INTEGER" 0 0)
+        (vector "active_transaction_id" "TEXT" 0 0)))
+
 (define (validate-owned-table-schema connection
                                      migration-version
                                      table-name
@@ -420,6 +565,62 @@ SQL
    create-catalog-item-tax-categories-table-sql)
   (validate-tax-reference-integrity connection))
 
+(define (validate-owned-index-schema connection
+                                     migration-version
+                                     index-name
+                                     expected-sql)
+  (unless (schema-object-exists? connection "index" index-name)
+    (error 'migrate-pos-database!
+           "migration ~a is recorded but index ~a is missing"
+           migration-version
+           index-name))
+  (define recorded-sql
+    (db:query-value
+     connection
+     "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = ?"
+     index-name))
+  (unless (and recorded-sql
+               (string=? (normalize-schema-sql recorded-sql)
+                         (normalize-schema-sql expected-sql)))
+    (error 'migrate-pos-database!
+           "~a definition has drifted"
+           index-name)))
+
+(define (validate-register-operations-schema connection)
+  (validate-owned-table-schema
+   connection
+   5
+   "register_configuration"
+   expected-register-configuration-columns
+   create-register-configuration-table-sql)
+  (validate-owned-table-schema
+   connection
+   5
+   "cashiers"
+   expected-cashier-columns
+   create-cashiers-table-sql)
+  (validate-owned-table-schema
+   connection
+   5
+   "register_shifts"
+   expected-register-shift-columns
+   create-register-shifts-table-sql)
+  (validate-owned-index-schema
+   connection
+   5
+   "register_configuration_register_id_unique"
+   create-register-id-index-sql)
+  (validate-owned-index-schema
+   connection
+   5
+   "register_shifts_one_open_per_register"
+   create-open-shift-index-sql)
+  (validate-owned-index-schema
+   connection
+   5
+   "register_shifts_active_transaction_unique"
+   create-active-transaction-index-sql))
+
 (define (apply-migration-1! connection)
   (db:query-exec connection create-events-table-sql)
   (db:query-exec connection create-stream-sequence-index-sql))
@@ -451,6 +652,14 @@ FROM catalog_items
 SQL
    ))
 
+(define (apply-migration-5! connection)
+  (db:query-exec connection create-register-configuration-table-sql)
+  (db:query-exec connection create-register-id-index-sql)
+  (db:query-exec connection create-cashiers-table-sql)
+  (db:query-exec connection create-register-shifts-table-sql)
+  (db:query-exec connection create-open-shift-index-sql)
+  (db:query-exec connection create-active-transaction-index-sql))
+
 (define migrations
   (list
    (pos-database-migration 1
@@ -468,7 +677,11 @@ SQL
    (pos-database-migration 4
                            migration-4-name
                            apply-migration-4!
-                           validate-tax-categories-schema)))
+                           validate-tax-categories-schema)
+   (pos-database-migration 5
+                           migration-5-name
+                           apply-migration-5!
+                           validate-register-operations-schema)))
 
 (define (migration-row-matches? row migration)
   (and (= (vector-length row) 2)

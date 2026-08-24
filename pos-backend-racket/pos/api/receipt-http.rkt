@@ -6,6 +6,7 @@
          "../application/transaction-service.rkt"
          "../domain/canonical-receipt.rkt"
          "../domain/money.rkt"
+         "../domain/register-operations.rkt"
          "../domain/tax.rkt")
 
 (provide handle-receipt-query-request)
@@ -48,8 +49,8 @@
    (money-minor-units (canonical-receipt-line-tax-amount line))))
 
 (define (canonical-receipt->jsexpr receipt)
-  (hasheq
-   'schema_version 1
+  (define common
+    (hasheq
    'transaction_id (canonical-receipt-transaction-id receipt)
    'transaction_version
    (canonical-receipt-transaction-version receipt)
@@ -67,6 +68,32 @@
    (money-minor-units (canonical-receipt-tendered-cash receipt))
    'change_due_minor_units
    (money-minor-units (canonical-receipt-change-due receipt))))
+  (if (operational-canonical-receipt? receipt)
+      (hash-set*
+       common
+       'schema_version 2
+       'register
+       (hasheq
+        'register_id
+        (register-identity-register-id
+         (operational-canonical-receipt-register receipt))
+        'display_name
+        (register-identity-display-name
+         (operational-canonical-receipt-register receipt)))
+       'cashier
+       (hasheq
+        'cashier_id
+        (cashier-identity-cashier-id
+         (operational-canonical-receipt-cashier receipt))
+        'display_name
+        (cashier-identity-display-name
+         (operational-canonical-receipt-cashier receipt)))
+       'shift_id (operational-canonical-receipt-shift-id receipt)
+       'started_at_epoch_ms
+       (operational-canonical-receipt-started-at-epoch-ms receipt)
+       'completed_at_epoch_ms
+       (operational-canonical-receipt-completed-at-epoch-ms receipt))
+      (hash-set common 'schema_version 1)))
 
 (define (receipt-result-response result)
   (cond

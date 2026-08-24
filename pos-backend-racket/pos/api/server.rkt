@@ -4,8 +4,10 @@
          web-server/http
          "http-response.rkt"
          "receipt-http.rkt"
+         "register-operations-http.rkt"
          "transaction-http.rkt"
          "../application/transaction-service.rkt"
+         "../application/register-operations-service.rkt"
          "../support/health.rkt")
 
 (provide make-app
@@ -43,10 +45,21 @@
        (string? (second path))
        (positive? (string-length (second path)))))
 
-(define (make-app transaction-service)
+(define (shift-close-path? path)
+  (and (= (length path) 3)
+       (equal? (first path) "shifts")
+       (string? (second path))
+       (positive? (string-length (second path)))
+       (equal? (third path) "close")))
+
+(define (make-app transaction-service [register-service #f])
   (unless (transaction-service? transaction-service)
     (raise-argument-error
      'make-app "transaction-service?" transaction-service))
+  (unless (or (not register-service)
+              (register-operations-service? register-service))
+    (raise-argument-error
+     'make-app "(or/c #f register-operations-service?)" register-service))
 
   (lambda (req)
     (define method (request-method req))
@@ -61,6 +74,26 @@
       [(equal? path '("transaction-commands"))
        (if (equal? method #"POST")
            (handle-transaction-command-request transaction-service req)
+           (method-not-allowed-response #"POST"))]
+
+      [(and register-service (equal? path '("register-context")))
+       (if (equal? method #"GET")
+           (handle-register-context-request register-service)
+           (method-not-allowed-response #"GET"))]
+
+      [(and register-service (equal? path '("cashiers")))
+       (if (equal? method #"GET")
+           (handle-active-cashiers-request register-service)
+           (method-not-allowed-response #"GET"))]
+
+      [(and register-service (equal? path '("shifts" "open")))
+       (if (equal? method #"POST")
+           (handle-open-shift-request register-service req)
+           (method-not-allowed-response #"POST"))]
+
+      [(and register-service (shift-close-path? path))
+       (if (equal? method #"POST")
+           (handle-close-shift-request register-service (second path) req)
            (method-not-allowed-response #"POST"))]
 
       [(transaction-query-path? path)

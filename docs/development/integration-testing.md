@@ -28,6 +28,8 @@ Each test fixture:
 - creates an isolated temporary directory;
 - activates the versioned development Catalog Snapshot v2 into that fixture's
   SQLite database through the production catalog CLI before first startup;
+- activates the development Operational Configuration Snapshot v1 through its
+  production CLI before first startup;
 - starts `pos-backend-racket/main.rkt` with an absolute temporary
   `SQLITE_DB_PATH`;
 - waits for the real `GET /health` response with a bounded deadline;
@@ -41,7 +43,7 @@ XDG cashier recovery file. It adds no production endpoint or fault-injection
 behavior. Restart scenarios deliberately retain only their fixture's SQLite
 and recovery files between child-process instances. The catalog is activated
 only for the initial fresh fixture; POS Core restarts reuse the persisted rows
-without automatic reseeding.
+without automatic reseeding. Operational configuration follows the same rule.
 
 The full-sale expectations therefore cross the production path:
 
@@ -50,7 +52,8 @@ Flutter controller
   -> HttpPosCoreClient
   -> Racket runtime
   -> SQLite catalog lookup
-  -> sale-time transaction event
+  -> SQLite open shift + active transaction slot
+  -> sale-time transaction event and Receipt Schema v2
 ```
 
 The suite verifies the configured development line tax, tax-inclusive tender
@@ -66,11 +69,21 @@ voided lookup, and explicitly activate a replacement catalog/tax snapshot to
 prove the old receipt still uses sale-time journal facts. Replacement is
 scenario-controlled; ordinary fixture restart never re-seeds the catalog.
 
+Operational scenarios start from configured/no-shift state, list the active
+development cashier, and open a real shift through HTTP. They verify transaction
+slot claim/release, close rejection during an active sale, void-then-close,
+active binding across POS Core restart, and historical Receipt v2 attribution
+after current register/cashier names are replaced. The bounded ten-sale cycle
+uses one shift for all transactions and closes it after the final completed
+sale.
+
 If catalog activation fails, the fixture fails before starting the server and
 reports bounded CLI output. The fixture activates Catalog Snapshot Schema v2,
 including deterministic development-only tax categories. Test Apples exists
 only in that version-controlled snapshot; production runtime contains no
 implicit fixture lookup, and the fixture rate is not legal tax configuration.
+The development register/cashier fixture is likewise test attribution data,
+not production seed data or authentication.
 
 ## Environment
 

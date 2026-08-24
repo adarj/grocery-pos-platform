@@ -1,11 +1,14 @@
 #lang racket
 
 (require "money.rkt"
+         "register-operations.rkt"
          "tax.rkt"
-         "transaction.rkt")
+         "transaction.rkt"
+         (prefix-in op: "transaction-operational-context.rkt"))
 
 (provide (struct-out canonical-receipt-line)
          (struct-out canonical-receipt)
+         (struct-out operational-canonical-receipt)
          (struct-out receipt-created)
          (struct-out receipt-unavailable)
          derive-canonical-receipt)
@@ -105,6 +108,55 @@
             tendered-cash
             change-due)))
 
+(struct operational-canonical-receipt canonical-receipt
+  (register cashier shift-id started-at-epoch-ms completed-at-epoch-ms)
+  #:transparent
+  #:guard
+  (lambda (transaction-id
+           transaction-version
+           line-items
+           subtotal
+           tax
+           total
+           tendered-cash
+           change-due
+           register
+           cashier
+           shift-id
+           started-at-epoch-ms
+           completed-at-epoch-ms
+           type-name)
+    (unless (register-identity? register)
+      (raise-argument-error type-name "register-identity?" register))
+    (unless (cashier-identity? cashier)
+      (raise-argument-error type-name "cashier-identity?" cashier))
+    (unless (and (string? shift-id) (positive? (string-length shift-id)))
+      (raise-argument-error type-name "non-empty-string?" shift-id))
+    (unless (and (exact-integer? started-at-epoch-ms)
+                 (>= started-at-epoch-ms 0))
+      (raise-argument-error
+       type-name "exact-nonnegative-integer?" started-at-epoch-ms))
+    (unless (and (exact-integer? completed-at-epoch-ms)
+                 (>= completed-at-epoch-ms started-at-epoch-ms))
+      (raise-arguments-error
+       type-name
+       "completion time must be an exact epoch millisecond no earlier than start"
+       "started at" started-at-epoch-ms
+       "completed at" completed-at-epoch-ms))
+    (values transaction-id
+            transaction-version
+            line-items
+            subtotal
+            tax
+            total
+            tendered-cash
+            change-due
+            register
+            cashier
+            (string->immutable-string shift-id)
+            started-at-epoch-ms
+            completed-at-epoch-ms)))
+
 (struct receipt-created (receipt)
   #:transparent
   #:guard
@@ -149,15 +201,41 @@
        (error
         'derive-canonical-receipt
         "completed transaction is missing tendered cash or change due"))
-     (receipt-created
-      (canonical-receipt
-       (transaction-id transaction)
-       transaction-version
+     (define context (transaction-operational-context transaction))
+     (define completed-at (transaction-completed-at-epoch-ms transaction))
+     (unless (eq? (not context) (not completed-at))
+       (error
+        'derive-canonical-receipt
+        "completed transaction has inconsistent operational context and completion time"))
+     (define lines
        (for/list ([line-item
                    (in-list (transaction-line-items transaction))])
-         (transaction-line->receipt-line line-item))
-       (transaction-subtotal transaction)
-       (transaction-tax transaction)
-       (transaction-total transaction)
-       tendered-cash
-       change-due))]))
+         (transaction-line->receipt-line line-item)))
+     (define common
+       (list (transaction-id transaction)
+             transaction-version
+             lines
+             (transaction-subtotal transaction)
+             (transaction-tax transaction)
+             (transaction-total transaction)
+             tendered-cash
+             change-due))
+     (receipt-created
+      (if context
+          (apply
+           operational-canonical-receipt
+           (append
+            common
+            (list
+             (register-identity
+              (op:transaction-operational-context-register-id context)
+              (op:transaction-operational-context-register-display-name
+               context))
+             (cashier-identity
+              (op:transaction-operational-context-cashier-id context)
+              (op:transaction-operational-context-cashier-display-name
+               context))
+             (op:transaction-operational-context-shift-id context)
+             (op:transaction-operational-context-started-at-epoch-ms context)
+             completed-at)))
+          (apply canonical-receipt common))) ]))

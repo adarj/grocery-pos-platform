@@ -6,6 +6,7 @@ import 'package:pos_terminal/core/pos_core/models/canonical_receipt.dart';
 import 'package:pos_terminal/core/pos_core/models/command_result.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_failure.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_health.dart';
+import 'package:pos_terminal/core/pos_core/models/register_operations.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_command.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_snapshot.dart';
 import 'package:pos_terminal/core/pos_core/pos_core_client.dart';
@@ -13,10 +14,14 @@ import 'package:pos_terminal/features/receipt/canonical_receipt_view.dart';
 import 'package:pos_terminal/features/receipt/receipt_lookup_screen.dart';
 import 'package:pos_terminal/features/receipt/receipt_screen.dart';
 
+import '../../support/unimplemented_register_operations_client.dart';
+
 typedef ReceiptHandler =
     Future<CanonicalReceipt> Function(String transactionId);
 
-final class FakeReceiptClient implements PosCoreClient {
+final class FakeReceiptClient
+    with UnimplementedRegisterOperationsClient
+    implements PosCoreClient {
   final Queue<ReceiptHandler> receiptHandlers = Queue();
   final List<String> receiptReads = [];
   int commandCalls = 0;
@@ -118,6 +123,41 @@ void main() {
 
     expect(find.textContaining('legacy', findRichText: true), findsNothing);
     expect(find.textContaining('%', findRichText: true), findsNothing);
+  });
+
+  testWidgets('Receipt Schema v2 displays exact register cashier shift and UTC time', (
+    tester,
+  ) async {
+    final v2 = CanonicalReceipt(
+      schemaVersion: 2,
+      transactionId: 'txn-v2',
+      transactionVersion: 4,
+      lineItems: const [],
+      subtotalMinorUnits: 199,
+      taxMinorUnits: 777,
+      totalMinorUnits: 1234,
+      tenderedCashMinorUnits: 2000,
+      changeDueMinorUnits: 999,
+      register: const RegisterIdentity(
+        registerId: 'register-one',
+        displayName: 'Front Register',
+      ),
+      cashier: const CashierIdentity(
+        cashierId: 'cashier-one',
+        displayName: 'Alice',
+      ),
+      shiftId: 'shift-one',
+      startedAtEpochMs: 0,
+      completedAtEpochMs: 1000,
+    );
+    await tester.pumpWidget(
+      MaterialApp(home: Scaffold(body: CanonicalReceiptView(receipt: v2))),
+    );
+    expect(find.text('Register: Front Register (register-one)'), findsOneWidget);
+    expect(find.text('Cashier: Alice (cashier-one)'), findsOneWidget);
+    expect(find.text('Shift: shift-one'), findsOneWidget);
+    expect(find.text('Started: 1970-01-01 00:00:00 UTC'), findsOneWidget);
+    expect(find.text('Completed: 1970-01-01 00:00:01 UTC'), findsOneWidget);
   });
 
   testWidgets('completed receipt screen performs exact query and displays it', (

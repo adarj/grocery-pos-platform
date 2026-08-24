@@ -4,6 +4,7 @@
          "../domain/money.rkt"
          "../domain/tax.rkt"
          "../domain/transaction-event.rkt"
+         "../domain/transaction-operational-context.rkt"
          "strict-json.rkt")
 
 (provide transaction-event->jsexpr
@@ -43,6 +44,26 @@
         (hasheq
          'transaction_id
          (transaction-started-transaction-id event)))]
+      [(operational-transaction-started? event)
+       (define context (operational-transaction-started-context event))
+       (values
+        2
+        "transaction_started"
+        (hasheq
+         'transaction_id
+         (operational-transaction-started-transaction-id event)
+         'register_id
+         (transaction-operational-context-register-id context)
+         'register_display_name
+         (transaction-operational-context-register-display-name context)
+         'cashier_id
+         (transaction-operational-context-cashier-id context)
+         'cashier_display_name
+         (transaction-operational-context-cashier-display-name context)
+         'shift_id
+         (transaction-operational-context-shift-id context)
+         'started_at_epoch_ms
+         (transaction-operational-context-started-at-epoch-ms context)))]
       [(sale-item-added? event)
        (values
         1
@@ -86,8 +107,22 @@
                 (sale-line-removed-line-index event)))]
       [(transaction-completed? event)
        (values 1 "transaction_completed" (hasheq))]
+      [(timestamped-transaction-completed? event)
+       (values
+        2
+        "transaction_completed"
+        (hasheq
+         'completed_at_epoch_ms
+         (timestamped-transaction-completed-completed-at-epoch-ms event)))]
       [(transaction-voided? event)
-       (values 1 "transaction_voided" (hasheq))]))
+       (values 1 "transaction_voided" (hasheq))]
+      [(timestamped-transaction-voided? event)
+       (values
+        2
+        "transaction_voided"
+        (hasheq
+         'voided_at_epoch_ms
+         (timestamped-transaction-voided-voided-at-epoch-ms event)))]))
 
   (hasheq 'schema_version schema-version
           'event_type event-type
@@ -151,6 +186,65 @@
          (event-decode-success
           (transaction-started transaction-id))
          (invalid-field-type 'transaction_id "a string"))]))
+
+(define (non-empty-string-field payload field)
+  (define value (hash-ref payload field))
+  (if (and (string? value) (positive? (string-length value)))
+      value
+      (event-decode-failure
+       'invalid-field-type
+       (format "field ~s must contain a non-empty string" field))))
+
+(define (epoch-ms-field payload field)
+  (define value (hash-ref payload field))
+  (if (and (exact-integer? value) (>= value 0))
+      value
+      (event-decode-failure
+       'invalid-field-type
+       (format
+        "field ~s must contain an exact nonnegative epoch millisecond integer"
+        field))))
+
+(define (decode-operational-transaction-started payload)
+  (define fields
+    '(transaction_id
+      register_id
+      register_display_name
+      cashier_id
+      cashier_display_name
+      shift_id
+      started_at_epoch_ms))
+  (define shape-failure
+    (validate-exact-fields payload fields
+                           "schema v2 transaction_started payload"))
+  (cond
+    [shape-failure shape-failure]
+    [else
+     (define transaction-id
+       (non-empty-string-field payload 'transaction_id))
+     (define register-id (non-empty-string-field payload 'register_id))
+     (define register-name
+       (non-empty-string-field payload 'register_display_name))
+     (define cashier-id (non-empty-string-field payload 'cashier_id))
+     (define cashier-name
+       (non-empty-string-field payload 'cashier_display_name))
+     (define shift-id (non-empty-string-field payload 'shift_id))
+     (define started-at (epoch-ms-field payload 'started_at_epoch_ms))
+     (define failure
+       (for/first ([value
+                    (in-list
+                     (list transaction-id register-id register-name cashier-id
+                           cashier-name shift-id started-at))]
+                   #:when (event-decode-failure? value))
+         value))
+     (if failure
+         failure
+         (event-decode-success
+          (operational-transaction-started
+           transaction-id
+           (transaction-operational-context
+            register-id register-name cashier-id cashier-name shift-id
+            started-at))))]))
 
 (define (decode-sale-item-added payload)
   (define shape-failure
@@ -262,6 +356,20 @@
       shape-failure
       (event-decode-success (transaction-completed))))
 
+(define (decode-timestamped-transaction-completed payload)
+  (define shape-failure
+    (validate-exact-fields payload
+                           '(completed_at_epoch_ms)
+                           "schema v2 transaction_completed payload"))
+  (cond
+    [shape-failure shape-failure]
+    [else
+     (define completed-at (epoch-ms-field payload 'completed_at_epoch_ms))
+     (if (event-decode-failure? completed-at)
+         completed-at
+         (event-decode-success
+          (timestamped-transaction-completed completed-at))) ]))
+
 (define (decode-sale-line-removed payload)
   (define shape-failure
     (validate-exact-fields payload
@@ -286,6 +394,20 @@
   (if shape-failure
       shape-failure
       (event-decode-success (transaction-voided))))
+
+(define (decode-timestamped-transaction-voided payload)
+  (define shape-failure
+    (validate-exact-fields payload
+                           '(voided_at_epoch_ms)
+                           "schema v2 transaction_voided payload"))
+  (cond
+    [shape-failure shape-failure]
+    [else
+     (define voided-at (epoch-ms-field payload 'voided_at_epoch_ms))
+     (if (event-decode-failure? voided-at)
+         voided-at
+         (event-decode-success
+          (timestamped-transaction-voided voided-at)))]))
 
 (define (jsexpr->transaction-event value)
   (cond
@@ -317,13 +439,21 @@
           [else
            (cond
              [(= version 2)
-              (if (string=? event-type "sale_item_added")
-                  (decode-taxed-sale-item-added payload)
-                  (event-decode-failure
-                   'unsupported-schema-event-type
-                   (format
-                    "transaction event schema version 2 does not support event type ~s"
-                    event-type)))]
+              (cond
+                [(string=? event-type "transaction_started")
+                 (decode-operational-transaction-started payload)]
+                [(string=? event-type "sale_item_added")
+                 (decode-taxed-sale-item-added payload)]
+                [(string=? event-type "transaction_completed")
+                 (decode-timestamped-transaction-completed payload)]
+                [(string=? event-type "transaction_voided")
+                 (decode-timestamped-transaction-voided payload)]
+                [else
+                 (event-decode-failure
+                  'unsupported-schema-event-type
+                  (format
+                   "transaction event schema version 2 does not support event type ~s"
+                   event-type))])]
              [(string=? event-type "transaction_started")
               (decode-transaction-started payload)]
              [(string=? event-type "sale_item_added")

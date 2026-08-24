@@ -134,22 +134,22 @@ SQL
     [(zero? actual-version)
      (define first-event (first events))
      (cond
-       [(not (transaction-started? first-event))
+       [(not (transaction-start-event? first-event))
         (journal-append-rejected
          'first-event-not-transaction-started
          actual-version)]
        [(not (string=?
               transaction-id
-              (transaction-started-transaction-id first-event)))
+              (transaction-start-event-transaction-id first-event)))
         (journal-append-rejected
          'stream-identity-mismatch
          actual-version)]
-       [(ormap transaction-started? (rest events))
+       [(ormap transaction-start-event? (rest events))
         (journal-append-rejected
          'transaction-already-started
          actual-version)]
        [else #f])]
-    [(ormap transaction-started? events)
+    [(ormap transaction-start-event? events)
      (journal-append-rejected
       'transaction-already-started
       actual-version)]
@@ -341,27 +341,27 @@ SQL
                  envelope-type
                  "journal event_type disagrees with event_json")]
                [(and (= sequence 1)
-                     (not (transaction-started? event)))
+                     (not (transaction-start-event? event)))
                 (load-failure
                  'invalid-first-event
                  sequence
                  canonical-type
                  "the first stream event is not transaction_started")]
                [(and (> sequence 1)
-                     (transaction-started? event))
+                     (transaction-start-event? event))
                 (load-failure
                  'duplicate-transaction-started
                  sequence
                  canonical-type
                  "transaction_started appears after the first stream event")]
-               [(and (transaction-started? event)
+               [(and (transaction-start-event? event)
                      (not (string=?
                            transaction-id
-                           (transaction-started-transaction-id event))))
+                           (transaction-start-event-transaction-id event))))
                 (load-failure
                  'stream-identity-mismatch
                  sequence
-                 (transaction-started-transaction-id event)
+                 (transaction-start-event-transaction-id event)
                  "transaction_started ID disagrees with the journal stream ID")]
                [else
                 (loop (rest remaining)

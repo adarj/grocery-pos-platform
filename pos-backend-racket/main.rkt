@@ -24,7 +24,8 @@
     (printf "Starting Grocery POS Core on http://~a:~a\n" host port)
     (printf "Health endpoint: http://~a:~a/health\n" host port)
     (serve/servlet
-     (make-app (pos-runtime-transaction-service runtime))
+     (make-app (pos-runtime-transaction-service runtime)
+               (pos-runtime-register-operations-service runtime))
      #:launch-browser? #f
      #:quit? #f
      #:listen-ip host

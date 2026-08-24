@@ -93,19 +93,28 @@ exactly one item-category mapping per catalog item. Existing v3 items receive
 an explicit zero-tax compatibility mapping. Migration-3-owned table definitions
 and existing event/receipt rows remain unchanged.
 
+Migration version 5, `create_register_operations`, adds current singleton
+register configuration, the current cashier directory, and durable shift rows.
+It creates no default identities. Shift rows snapshot register/cashier display
+values and hold the single-register active-transaction coordination slot; they
+are operational durability, not transaction truth. See
+[Register Operations and Shift Context](register-operations.md).
+
 The migration runner treats recorded history as an exact prefix of the known
-ordered migration list. A fresh database applies versions 1 through 4. Real
+ordered migration list. A fresh database applies versions 1 through 5. Real
 v1/v2 databases upgrade through the remaining sequence, while a real v3
 database preserves its merchandise rows and receives zero-tax mappings. A
-correct v4 database is validated without schema mutation. Unknown, skipped, reordered,
+correct v4 database gains empty operational tables, and a correct v5 database
+is validated without schema mutation. Unknown, skipped, reordered,
 renamed, or drifted migration state fails rather than being silently repaired.
 
 Table creation is not hidden inside append or load. Application composition is
 responsible for running migrations explicitly before using the store.
 
-No recorded timestamp is present in either current table. A future timestamp
-would be persistence metadata only; it must never determine event order or
-affect replay.
+The journal envelope has no generic recorded timestamp, and event order remains
+the per-stream sequence. New operational event payloads explicitly record
+start/completion/void epoch milliseconds as business facts; legacy events have
+no time. Those payload values never determine stream order.
 
 ## Stream Sequence and Identity
 
@@ -193,10 +202,11 @@ inside a larger caller-owned transaction.
 The transaction-command unit of work now uses that composition seam. It
 serializes accepted events before reserving the writer, then uses one
 `BEGIN IMMEDIATE` for the final command-ID lookup, stream-version check, event
-append, and receipt insertion. A receipt-only deterministic outcome uses the
+append, receipt insertion, and any required shift-slot claim/release. A
+receipt-only deterministic outcome uses the
 same writer transaction without appending a transaction fact. If the receipt
-cannot be inserted after events were written, the callback aborts so the event
-inserts roll back rather than committing alone.
+cannot be inserted after events were written, or an operational effect fails,
+the callback aborts so event, receipt, and shift state roll back together.
 
 `transaction-stream-version/in-transaction` exposes the same current-version
 query to this persistence composition and requires an active caller-owned
@@ -388,13 +398,39 @@ before the unit of work leaves no event or receipt, so retrying that same ID can
 execute normally. This is a retry-based recovery protocol for uncertain caller
 observation; it is not a claim of arbitrary distributed exactly-once execution.
 
+### Operational context and shift coupling
+
+Production transaction starts now require a configured register and one open,
+idle shift. The service snapshots that shift's register/cashier identity and a
+POS-Core-recorded start epoch millisecond in `transaction_started` Schema v2.
+The final writer transaction rechecks and claims
+`shift.active_transaction_id`; a two-connection race therefore permits only one
+accepted start.
+
+For a context-bearing transaction, completion or void appends its timestamped
+Schema v2 event and clears only the slot that points back to that exact
+transaction. Event, command receipt, and slot change share one
+`BEGIN IMMEDIATE` boundary. Duplicate receipt lookup occurs before current
+shift validation, so a delayed same-ID retry recovers its original result after
+completion or shift close.
+
+Schema v1 start/completion/void events continue to replay with absent context
+and time. Existing legacy open/paid transactions may finish without invented
+operational attribution. Replay never queries current register/cashier/shift
+tables. See [ADR-0016](../adr/0016-snapshot-register-cashier-shift-and-operational-time.md).
+
 ### Canonical completed-sale receipts
 
 A completed transaction replay plus its final stream version contains every
-fact needed for Receipt Schema v1. POS Core maps final retained lines and the
+fact needed for a canonical receipt. POS Core maps final retained lines and the
 transaction projection into an immutable canonical receipt. It does not query
 current catalog/tax data or reconstruct merchandise through command receipts.
 Open, paid, and voided streams are explicitly ineligible.
+
+Legacy context-free streams derive the unchanged Receipt Schema v1. New
+context-bearing streams with a recorded completion time derive Receipt Schema
+v2 containing their historical register, cashier, shift, start, and completion
+facts.
 
 No materialized receipt table is added. This avoids a second historical sale
 authority and projection-synchronization boundary. Exact lookup is exposed by
@@ -411,7 +447,7 @@ uses those routes for the current cash-sale workflow. The journal design still
 does not add:
 
 - authoritative snapshots or projections;
-- timestamps or event UUIDs;
+- a generic journal-record timestamp or event UUIDs;
 - hash chaining or integrity signatures;
 - outbox or cloud synchronization tables;
 - materialized sale-receipt, tender, inventory, or card-payment tables;

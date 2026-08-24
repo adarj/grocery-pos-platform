@@ -98,3 +98,13 @@ This decision does not define physical printing, receipt number sequences,
 date/time, store identity/address, cashier/register/shift identity, refunds or
 returns, reprint audits, electronic delivery, cloud archives, or legal/fiscal
 receipt compliance.
+
+## Subsequent evolution
+
+[ADR-0016](0016-snapshot-register-cashier-shift-and-operational-time.md) later
+introduced explicit operational event facts for new transactions. Completed
+context-bearing transactions now derive Receipt Schema v2 with their recorded
+register, cashier, shift, start time, and completion time. This does not revise
+the original v1 decision: legacy transactions retain the exact context-free
+Receipt Schema v1, and both versions are still derived from replay without a
+materialized receipt table.

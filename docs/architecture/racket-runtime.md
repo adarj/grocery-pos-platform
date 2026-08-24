@@ -13,7 +13,7 @@ environment configuration
   -> startup schema initialization
   -> bounded request connection pool
   -> thread-mapped virtual connection
-  -> transaction service
+  -> transaction + register-operations services
   -> HTTP application
 ```
 
@@ -49,7 +49,7 @@ succeeded:
 
 ```text
 open dedicated SQLite connection in create mode
-  -> run and validate POS database migrations through v3
+  -> run and validate POS database migrations through v5
   -> disconnect dedicated startup connection
   -> construct request-time database resources
   -> construct HTTP application
@@ -100,7 +100,7 @@ The pool connector creates physical request connections under the same runtime
 custodian. Shutting down the runtime therefore closes its database resources
 rather than relying on a hidden global connection or process termination.
 
-## Application and catalog composition
+## Application, catalog, and register composition
 
 The runtime passes the shared virtual connection and a SQLite catalog lookup to
 `make-transaction-service`. New scans resolve active merchandise through the
@@ -115,6 +115,18 @@ the development fake is no longer a production default. Historical replay
 continues to use sale-time event snapshots and never queries current catalog
 data. See [Local Catalog](catalog.md).
 
+The runtime also constructs `register-operations-service` over the same virtual
+connection. Production composition injects a UTC epoch-millisecond clock and a
+cryptographically random 128-bit `shift_` identifier generator. The same clock
+is injected into transaction service planning so new operational start and
+terminal events record one consistent POS-Core-owned time source. Replay never
+calls it.
+
+Runtime migration creates but does not populate register/cashier tables. New
+transaction starts safely reject until an operator activates configuration and
+opens a shift. Focused tests may inject deterministic clocks/IDs. See
+[Register Operations and Shift Context](register-operations.md).
+
 `make-app` requires the constructed transaction service and returns the servlet
 handler. The service is captured explicitly rather than stored in a global.
 Transaction routes delegate to that service through the transport-only adapter
@@ -128,6 +140,11 @@ The implemented routes are:
 GET /health
 POST /transaction-commands
 GET /transactions/{transaction_id}
+GET /receipts/{transaction_id}
+GET /register-context
+GET /cashiers
+POST /shifts/open
+POST /shifts/{shift_id}/close
 ```
 
 `GET /health` remains a liveness endpoint and does not perform a database or
@@ -139,7 +156,7 @@ future checkout dependency is ready.
 
 Focused file-backed tests establish:
 
-- fresh runtime migration through schema v4;
+- fresh runtime migration through schema v5;
 - an empty persistent catalog rejecting the former development barcode rather
   than falling back to a fake;
 - active/inactive/unknown persistent catalog lookup behavior and exact
@@ -154,13 +171,15 @@ Focused file-backed tests establish:
   receipt recovery without duplicate events;
 - read/write request connections refusing to recreate a missing database;
 - unchanged `/health` and unknown-route behavior through `make-app`.
+- operational configuration/shift composition, active-transaction slot
+  persistence, and atomic slot release on completion or void.
 
 ## Deliberately deferred
 
 This runtime composition and HTTP adapter do not add:
 
 - a readiness endpoint;
-- authentication or authorization;
+- employee authentication, PINs/passwords, or authorization;
 - catalog HTTP administration, patch updates, or cloud synchronization;
 - automatic SQLite busy retry or backoff;
 - a generic service container or component framework;

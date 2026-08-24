@@ -154,7 +154,7 @@
     (check-failure
      (hash-set expected-taxed-item-added
                'event_type
-               "transaction_started")
+               "cash_tendered")
      'unsupported-schema-event-type))
 
   (test-case "all schema v1 events round trip through representations and JSON"

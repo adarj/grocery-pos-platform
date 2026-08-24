@@ -16,6 +16,10 @@ The implemented routes are:
 | `POST` | `/transaction-commands` | Execute or resolve one typed transaction command |
 | `GET` | `/transactions/{transaction_id}` | Read current authoritative transaction state |
 | `GET` | `/receipts/{transaction_id}` | Derive the canonical completed-sale receipt |
+| `GET` | `/register-context` | Read current register and open-shift state |
+| `GET` | `/cashiers` | List active configured cashiers |
+| `POST` | `/shifts/open` | Open or resolve a shift for one cashier |
+| `POST` | `/shifts/{shift_id}/close` | Close or resolve an idle shift |
 
 No command-specific mutation routes exist. The one command endpoint mirrors
 `transaction-service-execute-command` and prevents route handlers from
@@ -112,7 +116,14 @@ Durable receipt outcomes map as follows:
 `outcome_code` is the stable durable application code, such as
 `unknown_barcode`, `transaction_not_found`, `transaction_already_exists`,
 `line_item_not_found`, `invalid_transaction_state`,
-`stale_expected_version`, or `stream_version_conflict`.
+`stale_expected_version`, `stream_version_conflict`,
+`register_not_configured`, `shift_required`, or
+`shift_has_active_transaction`.
+
+`start_transaction` keeps its existing wire shape. POS Core, not Flutter,
+resolves the configured register and active shift. A new production start
+requires an open idle shift; no operational identity or timestamp is accepted
+from the command body.
 
 The command endpoint uses `200`, not `201`, for every accepted command because
 it represents command processing rather than a command-specific REST resource
@@ -268,6 +279,92 @@ or voided transaction returns `409 receipt_not_available` with reason
 Receipt Schema v1 contains no status, generated receipt ID, or fabricated
 timestamp. See [Canonical Completed-Sale Receipts](receipts.md).
 
+New transactions with recorded operational context return Receipt Schema v2.
+It retains all v1 line/money fields and adds exact historical values:
+
+```json
+{
+  "schema_version": 2,
+  "transaction_id": "txn_001",
+  "transaction_version": 4,
+  "register": {
+    "register_id": "register-front-01",
+    "display_name": "Front Register 1"
+  },
+  "cashier": {
+    "cashier_id": "cashier-001",
+    "display_name": "Alice"
+  },
+  "shift_id": "shift_...",
+  "started_at_epoch_ms": 1787500000000,
+  "completed_at_epoch_ms": 1787500030000,
+  "line_items": [
+    {
+      "barcode": "049000001234",
+      "description": "Test Apples",
+      "unit_price_minor_units": 199,
+      "tax_category_id": "development-standard",
+      "tax_rate_millionths": 100000,
+      "tax_amount_minor_units": 20
+    }
+  ],
+  "subtotal_minor_units": 199,
+  "tax_minor_units": 20,
+  "total_minor_units": 219,
+  "tendered_cash_minor_units": 500,
+  "change_due_minor_units": 281
+}
+```
+
+Identity and time come from transaction replay, not current configuration or
+query time. Legacy completed streams keep the exact v1 response.
+
+## Register and shift operations
+
+`GET /register-context` returns a legitimate unconfigured state rather than an
+error:
+
+```json
+{
+  "ok": true,
+  "register_context": {
+    "configured": false,
+    "register": null,
+    "active_shift": null
+  }
+}
+```
+
+When configured, `register` contains exact ID/display name. `active_shift` is
+null or contains its snapshotted register/cashier identity,
+`opened_at_epoch_ms`, nullable `closed_at_epoch_ms`, and nullable
+`active_transaction_id`.
+
+`GET /cashiers` returns only current active cashier IDs/display names used for
+selection. These are attribution references, not authentication credentials.
+
+`POST /shifts/open` requires exactly:
+
+```json
+{ "cashier_id": "cashier-001" }
+```
+
+POS Core supplies register/name/time/shift ID. Repeating the same-cashier open
+returns the existing shift; a different cashier conflicts. Stable errors
+include `register_not_configured`, `cashier_not_found`, `cashier_inactive`, and
+`shift_already_open`.
+
+`POST /shifts/{shift_id}/close` requires `{}`. It returns an already-closed
+shift safely, but an open shift with an active transaction returns
+`409 shift_has_active_transaction`. Other stable errors include
+`shift_not_found`. Unexpected/corrupt operational state fails as the safe
+generic `500 internal_error` without SQL or internal detail.
+
+Shift writes are not Transaction Command Schema mutations. They have no
+command ID, expected version, `retry_same_command_id`, or Flutter pending
+command record. After transport uncertainty, clients explicitly refresh
+`/register-context`.
+
 ## Routing and common errors
 
 Recognized routes with the wrong method return `405 Method Not Allowed` and an
@@ -279,6 +376,10 @@ Recognized routes with the wrong method return `405 Method Not Allowed` and an
 | `/transaction-commands` | `POST` |
 | `/transactions/{transaction_id}` | `GET` |
 | `/receipts/{transaction_id}` | `GET` |
+| `/register-context` | `GET` |
+| `/cashiers` | `GET` |
+| `/shifts/open` | `POST` |
+| `/shifts/{shift_id}/close` | `POST` |
 
 Unknown paths and malformed transaction query shapes return the common
 structured `404` response:
@@ -312,6 +413,7 @@ semantics. Flutter now has a typed client and the current start, scan, cash
 tender, pre-payment line removal/void, authoritative tax/change, completion,
 next-sale cashier slice, and exact completed-sale receipt lookup. Receipt
 printing, timestamps, broad sale search, paid reversal/refund, and manager
-authorization are not part of the current surface. The current
+authorization are not part of the current surface. Register/cashier selection
+is persistent attribution only; it is not PIN/password authentication. The current
 single-category line-tax model and on-screen receipt are not claims of
 universal tax or fiscal compliance.

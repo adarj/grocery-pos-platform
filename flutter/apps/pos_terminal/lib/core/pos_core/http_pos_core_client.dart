@@ -8,6 +8,7 @@ import 'models/canonical_receipt.dart';
 import 'models/json_fields.dart';
 import 'models/pos_core_failure.dart';
 import 'models/pos_core_health.dart';
+import 'models/register_operations.dart';
 import 'models/transaction_command.dart';
 import 'models/transaction_snapshot.dart';
 import 'pos_core_client.dart';
@@ -180,6 +181,57 @@ final class HttpPosCoreClient implements PosCoreClient {
     );
   }
 
+  @override
+  Future<RegisterContext> fetchRegisterContext() async {
+    final body = await _successfulQueryObject(
+      await _get(baseUri.resolve('/register-context')),
+      'register context response',
+    );
+    return RegisterContext.fromJson(
+      expectJsonObject(
+        requireJsonField(body, 'register_context', 'register context response'),
+        'register context response register_context',
+      ),
+    );
+  }
+
+  @override
+  Future<List<CashierIdentity>> fetchActiveCashiers() async {
+    final body = await _successfulQueryObject(
+      await _get(baseUri.resolve('/cashiers')),
+      'cashier list response',
+    );
+    return List.unmodifiable(
+      requireJsonList(body, 'cashiers', 'cashier list response').map(
+        (value) => CashierIdentity.fromJson(
+          expectJsonObject(value, 'cashier list entry'),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Future<RegisterShift> openShift(String cashierId) async {
+    if (cashierId.isEmpty) {
+      throw ArgumentError.value(cashierId, 'cashierId', 'must not be empty');
+    }
+    return _operationalShiftWrite(
+      '/shifts/open',
+      <String, Object?>{'cashier_id': cashierId},
+    );
+  }
+
+  @override
+  Future<RegisterShift> closeShift(String shiftId) async {
+    if (shiftId.isEmpty) {
+      throw ArgumentError.value(shiftId, 'shiftId', 'must not be empty');
+    }
+    return _operationalShiftWrite(
+      '/shifts/${Uri.encodeComponent(shiftId)}/close',
+      const <String, Object?>{},
+    );
+  }
+
   void close() {
     if (_ownsHttpClient) {
       _httpClient.close();
@@ -192,6 +244,54 @@ final class HttpPosCoreClient implements PosCoreClient {
     } on Exception {
       throw const PosCoreTransportFailure('Unable to reach POS Core.');
     }
+  }
+
+  Future<http.Response> _postReadRecoverable(
+    Uri uri,
+    Map<String, Object?> body,
+  ) async {
+    try {
+      return await _httpClient
+          .post(
+            uri,
+            headers: const {'Content-Type': 'application/json'},
+            body: jsonEncode(body),
+          )
+          .timeout(timeout);
+    } on Exception {
+      throw const PosCoreTransportFailure('Unable to reach POS Core.');
+    }
+  }
+
+  Future<Map<String, Object?>> _successfulQueryObject(
+    http.Response response,
+    String context,
+  ) async {
+    final body = _decodeObject(response);
+    final ok = requireJsonBool(body, 'ok', context);
+    if (response.statusCode == 200 && ok) {
+      return body;
+    }
+    if (body.containsKey('error') && !ok) {
+      throw _serverFailureFrom(body, response.statusCode);
+    }
+    throw PosCoreInvalidResponseFailure('$context is inconsistent.');
+  }
+
+  Future<RegisterShift> _operationalShiftWrite(
+    String path,
+    Map<String, Object?> requestBody,
+  ) async {
+    final body = await _successfulQueryObject(
+      await _postReadRecoverable(baseUri.resolve(path), requestBody),
+      'shift operation response',
+    );
+    return RegisterShift.fromJson(
+      expectJsonObject(
+        requireJsonField(body, 'shift', 'shift operation response'),
+        'shift operation response shift',
+      ),
+    );
   }
 
   Future<http.Response> _postCommand(TransactionCommand command) async {

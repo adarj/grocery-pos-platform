@@ -1,7 +1,10 @@
 #lang racket
 
 (require (prefix-in db: db)
+         file/sha1
+         racket/random
          "runtime-config.rkt"
+         "application/register-operations-service.rkt"
          "application/transaction-service.rkt"
          "persistence/pos-database-migrations.rkt"
          "persistence/sqlite-catalog.rkt")
@@ -13,6 +16,7 @@
          stop-pos-runtime!
          pos-runtime?
          pos-runtime-transaction-service
+         pos-runtime-register-operations-service
          pos-runtime-sqlite-db-path
          pos-runtime-stopped?)
 
@@ -24,7 +28,17 @@
 (define runtime-sqlite-max-idle-seconds 300)
 
 (struct pos-runtime
-  (transaction-service sqlite-db-path custodian stopped-box))
+  (transaction-service
+   register-operations-service
+   sqlite-db-path
+   custodian
+   stopped-box))
+
+(define (system-current-epoch-ms)
+  (inexact->exact (floor (current-inexact-milliseconds))))
+
+(define (secure-shift-id)
+  (string-append "shift_" (bytes->hex-string (crypto-random-bytes 16))))
 
 (define (pos-runtime-stopped? runtime)
   (unless (pos-runtime? runtime)
@@ -81,7 +95,9 @@
 (define (start-pos-runtime
          config
          #:catalog-lookup [catalog-lookup #f]
-         #:connect [connect open-sqlite-connection])
+         #:connect [connect open-sqlite-connection]
+         #:current-epoch-ms [current-epoch-ms system-current-epoch-ms]
+         #:generate-shift-id [generate-shift-id secure-shift-id])
   (define who 'start-pos-runtime)
   (unless (pos-runtime-config? config)
     (raise-argument-error who "pos-runtime-config?" config))
@@ -89,6 +105,11 @@
     (raise-argument-error who "(or/c #f procedure?)" catalog-lookup))
   (unless (procedure? connect)
     (raise-argument-error who "procedure?" connect))
+  (for ([value (in-list (list current-epoch-ms generate-shift-id))]
+        [name (in-list '(current-epoch-ms generate-shift-id))])
+    (unless (and (procedure? value) (procedure-arity-includes? value 0))
+      (raise-arguments-error
+       who "expected a zero-argument procedure" (symbol->string name) value)))
 
   (define database-path
     (pos-runtime-config-sqlite-db-path config))
@@ -107,7 +128,7 @@
           (set-box! stopped-box #t)
           (custodian-shutdown-all runtime-custodian)
           (raise value))])
-    (define service
+    (define-values (transaction-service register-service)
       (parameterize ([current-custodian runtime-custodian])
         (define pool
           (db:connection-pool
@@ -124,10 +145,17 @@
               (lambda (barcode)
                 (lookup-catalog-item-by-barcode
                  virtual-connection barcode))))
-        (make-transaction-service
-         virtual-connection
-         #:catalog-lookup effective-catalog-lookup)))
-    (pos-runtime service
+        (values
+         (make-transaction-service
+          virtual-connection
+          #:catalog-lookup effective-catalog-lookup
+          #:current-epoch-ms current-epoch-ms)
+         (make-register-operations-service
+          virtual-connection
+          #:current-epoch-ms current-epoch-ms
+          #:generate-shift-id generate-shift-id))))
+    (pos-runtime transaction-service
+                 register-service
                  database-path
                  runtime-custodian
                  stopped-box)))

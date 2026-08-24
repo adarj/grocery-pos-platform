@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:pos_terminal/core/pos_core/http_pos_core_client.dart';
 import 'package:pos_terminal/core/pos_core/models/command_result.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_failure.dart';
+import 'package:pos_terminal/core/pos_core/models/register_operations.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_command.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_snapshot.dart';
 import 'package:pos_terminal/features/cashier/cashier_id_generator.dart';
@@ -19,6 +20,10 @@ const _developmentDescription = 'Test Apples';
 const _developmentUnitPrice = 199;
 const _developmentLineTax = 20;
 const _developmentLineTotal = 219;
+const _developmentRegisterId = 'register-development-01';
+const _developmentRegisterName = 'Development Register 1';
+const _developmentCashierId = 'cashier-development-01';
+const _developmentCashierName = 'Development Cashier';
 
 final class _SequentialIntegrationIds implements CashierIdGenerator {
   _SequentialIntegrationIds(this.namespace);
@@ -88,11 +93,26 @@ final class _IntegrationCashier {
   }
 }
 
-Future<RealPosCoreFixture> _startFixture() async {
+Future<RealPosCoreFixture> _startFixture({bool openShift = true}) async {
   final fixture = await RealPosCoreFixture.create();
   addTearDown(fixture.dispose);
   await fixture.start();
+  if (openShift) {
+    await _openDevelopmentShift(fixture);
+  }
   return fixture;
+}
+
+Future<RegisterShift> _openDevelopmentShift(RealPosCoreFixture fixture) async {
+  final client = HttpPosCoreClient(
+    baseUri: fixture.baseUri,
+    timeout: const Duration(seconds: 3),
+  );
+  try {
+    return await client.openShift(_developmentCashierId);
+  } finally {
+    client.close();
+  }
 }
 
 Future<_IntegrationCashier> _createCashier(
@@ -155,6 +175,45 @@ void main() {
   });
 
   test(
+    'real operational startup exposes configuration and opens one shift',
+    () async {
+      final fixture = await _startFixture(openShift: false);
+      final client = HttpPosCoreClient(
+        baseUri: fixture.baseUri,
+        timeout: const Duration(seconds: 3),
+      );
+      addTearDown(client.close);
+
+      final before = await client.fetchRegisterContext();
+      expect(before.configured, isTrue);
+      expect(before.register!.registerId, _developmentRegisterId);
+      expect(before.register!.displayName, _developmentRegisterName);
+      expect(before.activeShift, isNull);
+
+      final cashiers = await client.fetchActiveCashiers();
+      expect(cashiers, hasLength(1));
+      expect(cashiers.single.cashierId, _developmentCashierId);
+      expect(cashiers.single.displayName, _developmentCashierName);
+
+      final opened = await client.openShift(_developmentCashierId);
+      expect(opened.shiftId, isNotEmpty);
+      expect(opened.registerId, _developmentRegisterId);
+      expect(opened.registerDisplayName, _developmentRegisterName);
+      expect(opened.cashierId, _developmentCashierId);
+      expect(opened.cashierDisplayName, _developmentCashierName);
+      expect(opened.closedAtEpochMs, isNull);
+      expect(opened.activeTransactionId, isNull);
+
+      final repeated = await client.openShift(_developmentCashierId);
+      expect(repeated.shiftId, opened.shiftId);
+      expect(
+        (await client.fetchRegisterContext()).activeShift!.shiftId,
+        opened.shiftId,
+      );
+    },
+  );
+
+  test(
     'real health and full cash sale cross Flutter, HTTP, Racket, and SQLite',
     () async {
       final fixture = await _startFixture();
@@ -168,6 +227,11 @@ void main() {
       await cashier.controller.startTransaction();
       final firstTransactionId = _snapshot(cashier.controller).transactionId;
       _expectOpenEmpty(_snapshot(cashier.controller));
+      final activeAfterStart = await cashier.client.fetchRegisterContext();
+      expect(
+        activeAfterStart.activeShift!.activeTransactionId,
+        firstTransactionId,
+      );
 
       await cashier.controller.scanBarcode(_developmentBarcode);
       final scanned = _snapshot(cashier.controller);
@@ -207,6 +271,22 @@ void main() {
       final completed = _snapshot(cashier.controller);
       expect(completed.status, TransactionStatus.completed);
       expect(completed.version, 4);
+      final idleAfterCompletion = await cashier.client.fetchRegisterContext();
+      expect(idleAfterCompletion.activeShift!.activeTransactionId, isNull);
+
+      final receipt = await cashier.client.fetchReceipt(firstTransactionId);
+      expect(receipt.schemaVersion, 2);
+      expect(receipt.register!.registerId, _developmentRegisterId);
+      expect(receipt.register!.displayName, _developmentRegisterName);
+      expect(receipt.cashier!.cashierId, _developmentCashierId);
+      expect(receipt.cashier!.displayName, _developmentCashierName);
+      expect(receipt.shiftId, idleAfterCompletion.activeShift!.shiftId);
+      expect(receipt.startedAtEpochMs, isNotNull);
+      expect(receipt.completedAtEpochMs, isNotNull);
+      expect(
+        receipt.completedAtEpochMs!,
+        greaterThanOrEqualTo(receipt.startedAtEpochMs!),
+      );
 
       await cashier.controller.beginNextSale();
       final nextSale = _snapshot(cashier.controller);
@@ -269,6 +349,7 @@ void main() {
       final receipt = await cashier.client.fetchReceipt(
         completed.transactionId,
       );
+      expect(receipt.schemaVersion, 2);
       expect(receipt.transactionId, completed.transactionId);
       expect(receipt.transactionVersion, 7);
       expect(receipt.lineItems, hasLength(2));
@@ -397,10 +478,53 @@ void main() {
     _expectOpenEmpty(nextSale);
   });
 
+  test(
+    'real shift close is blocked by an active sale and succeeds after void',
+    () async {
+      final fixture = await _startFixture();
+      final cashier = await _createCashier(fixture, 'close_protection');
+      final shiftId =
+          (await cashier.client.fetchRegisterContext()).activeShift!.shiftId;
+
+      await cashier.controller.startTransaction();
+      final transactionId = _snapshot(cashier.controller).transactionId;
+      expect(
+        (await cashier.client.fetchRegisterContext())
+            .activeShift!
+            .activeTransactionId,
+        transactionId,
+      );
+      await expectLater(
+        cashier.client.closeShift(shiftId),
+        throwsA(
+          isA<PosCoreServerFailure>().having(
+            (failure) => failure.code,
+            'code',
+            'shift_has_active_transaction',
+          ),
+        ),
+      );
+
+      await cashier.controller.voidTransaction();
+      expect(_snapshot(cashier.controller).status, TransactionStatus.voided);
+      expect(
+        (await cashier.client.fetchRegisterContext())
+            .activeShift!
+            .activeTransactionId,
+        isNull,
+      );
+      final closed = await cashier.client.closeShift(shiftId);
+      expect(closed.closedAtEpochMs, isNotNull);
+      expect((await cashier.client.fetchRegisterContext()).activeShift, isNull);
+    },
+  );
+
   test('ten bounded complete sale cycles do not leak session state', () async {
     final fixture = await _startFixture();
     final cashier = await _createCashier(fixture, 'endurance');
     final transactionIds = <String>{};
+    final shiftId =
+        (await cashier.client.fetchRegisterContext()).activeShift!.shiftId;
 
     await cashier.controller.startTransaction();
     for (var cycle = 0; cycle < 10; cycle += 1) {
@@ -424,12 +548,21 @@ void main() {
       expect(completed.lineItems, hasLength(3));
       expect(completed.taxMinorUnits, 60);
       expect(completed.totalMinorUnits, 657);
+      final receipt = await cashier.client.fetchReceipt(
+        completed.transactionId,
+      );
+      expect(receipt.schemaVersion, 2);
+      expect(receipt.shiftId, shiftId);
 
       if (cycle < 9) {
         await cashier.controller.beginNextSale();
       }
     }
     expect(transactionIds, hasLength(10));
+    final closed = await cashier.client.closeShift(shiftId);
+    expect(closed.closedAtEpochMs, isNotNull);
+    expect(closed.activeTransactionId, isNull);
+    expect((await cashier.client.fetchRegisterContext()).activeShift, isNull);
   });
 
   test(
@@ -448,6 +581,10 @@ void main() {
       firstCashier.close();
       await fixture.restart();
       final restoredCashier = await _createCashier(fixture, 'active_after');
+
+      final restoredContext = await restoredCashier.client
+          .fetchRegisterContext();
+      expect(restoredContext.activeShift!.activeTransactionId, transactionId);
 
       expect(
         restoredCashier.controller.state.activeTransactionId,
@@ -475,6 +612,12 @@ void main() {
       expect(
         _snapshot(restoredCashier.controller).status,
         TransactionStatus.completed,
+      );
+      expect(
+        (await restoredCashier.client.fetchRegisterContext())
+            .activeShift!
+            .activeTransactionId,
+        isNull,
       );
     },
   );
@@ -664,6 +807,8 @@ void main() {
       );
       final after = await restoredCashier.client.fetchReceipt(transactionId);
 
+      expect(after.schemaVersion, 2);
+      expect(after.schemaVersion, before.schemaVersion);
       expect(after.transactionId, before.transactionId);
       expect(after.transactionVersion, before.transactionVersion);
       expect(after.lineItems, hasLength(before.lineItems.length));
@@ -693,6 +838,13 @@ void main() {
       expect(after.totalMinorUnits, before.totalMinorUnits);
       expect(after.tenderedCashMinorUnits, before.tenderedCashMinorUnits);
       expect(after.changeDueMinorUnits, before.changeDueMinorUnits);
+      expect(after.register!.registerId, before.register!.registerId);
+      expect(after.register!.displayName, before.register!.displayName);
+      expect(after.cashier!.cashierId, before.cashier!.cashierId);
+      expect(after.cashier!.displayName, before.cashier!.displayName);
+      expect(after.shiftId, before.shiftId);
+      expect(after.startedAtEpochMs, before.startedAtEpochMs);
+      expect(after.completedAtEpochMs, before.completedAtEpochMs);
     },
   );
 
@@ -749,6 +901,79 @@ void main() {
       expect(receipt.subtotalMinorUnits, 199);
       expect(receipt.taxMinorUnits, 20);
       expect(receipt.totalMinorUnits, 219);
+    },
+  );
+
+  test(
+    'completed receipt keeps operational identity after configuration rename',
+    () async {
+      final fixture = await _startFixture();
+      final cashier = await _createCashier(fixture, 'configuration_history');
+      final firstShift =
+          (await cashier.client.fetchRegisterContext()).activeShift!;
+
+      await cashier.controller.startTransaction();
+      await cashier.controller.scanBarcode(_developmentBarcode);
+      await cashier.controller.tenderCash(500);
+      await cashier.controller.completeTransaction();
+      final firstTransactionId = _snapshot(cashier.controller).transactionId;
+      final firstReceipt = await cashier.client.fetchReceipt(
+        firstTransactionId,
+      );
+      expect(firstReceipt.schemaVersion, 2);
+      expect(firstReceipt.register!.displayName, _developmentRegisterName);
+      expect(firstReceipt.cashier!.displayName, _developmentCashierName);
+      expect(firstReceipt.shiftId, firstShift.shiftId);
+      await cashier.client.closeShift(firstShift.shiftId);
+
+      final replacementFile = File(
+        '${fixture.temporaryDirectory.path}${Platform.pathSeparator}'
+        'replacement-register-configuration-v1.json',
+      );
+      await replacementFile.writeAsString(
+        jsonEncode({
+          'schema_version': 1,
+          'register': {
+            'register_id': _developmentRegisterId,
+            'display_name': 'Renamed Development Register',
+          },
+          'cashiers': [
+            {
+              'cashier_id': _developmentCashierId,
+              'display_name': 'Renamed Development Cashier',
+              'active': true,
+            },
+          ],
+        }),
+        flush: true,
+      );
+      await fixture.activateOperationalConfigurationSnapshot(
+        replacementFile.path,
+      );
+
+      final secondShift = await cashier.client.openShift(_developmentCashierId);
+      expect(secondShift.registerDisplayName, 'Renamed Development Register');
+      expect(secondShift.cashierDisplayName, 'Renamed Development Cashier');
+      await cashier.controller.beginNextSale();
+      await cashier.controller.scanBarcode(_developmentBarcode);
+      await cashier.controller.tenderCash(500);
+      await cashier.controller.completeTransaction();
+      final secondReceipt = await cashier.client.fetchReceipt(
+        _snapshot(cashier.controller).transactionId,
+      );
+
+      final oldReceiptAgain = await cashier.client.fetchReceipt(
+        firstTransactionId,
+      );
+      expect(oldReceiptAgain.register!.displayName, _developmentRegisterName);
+      expect(oldReceiptAgain.cashier!.displayName, _developmentCashierName);
+      expect(oldReceiptAgain.shiftId, firstShift.shiftId);
+      expect(
+        secondReceipt.register!.displayName,
+        'Renamed Development Register',
+      );
+      expect(secondReceipt.cashier!.displayName, 'Renamed Development Cashier');
+      expect(secondReceipt.shiftId, secondShift.shiftId);
     },
   );
 

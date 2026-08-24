@@ -9,7 +9,8 @@ This document defines the initial communication boundary between local Flutter a
 The health endpoint and Transaction HTTP API v1 are implemented. The detailed
 transaction command/query contract is documented in
 [Transaction HTTP API v1](transaction-http-api-v1.md).
-That contract also defines exact read-only completed-sale receipt lookup.
+That contract also defines exact read-only completed-sale receipt lookup and
+the narrow current register/cashier/shift operational routes.
 
 ## Purpose
 
@@ -87,7 +88,7 @@ Localhost is still treated as an application trust boundary. Backend authorizati
 
 The Racket process now constructs its durable transaction service before the
 HTTP listener starts. Startup resolves `SQLITE_DB_PATH`, migrates and validates
-the POS database through schema v4 using a dedicated connection, and then
+the POS database through schema v5 using a dedicated connection, and then
 builds a bounded SQLite pool plus one thread-mapped virtual connection for
 request use.
 The service held by the application uses that virtual connection; unrelated
@@ -105,6 +106,14 @@ explicitly activated SQLite catalog through the same virtual connection pool;
 runtime startup never seeds development merchandise. Migration 4 adds current
 tax categories/item mappings; new scans snapshot Racket's exact line-tax
 decision and the transaction query exposes authoritative tax.
+
+Migration 5 adds one current register configuration, a current cashier
+directory, and durable shifts. Production runtime composes a register
+operations service over the same virtual connection and injects one POS Core
+clock and secure shift-ID generator. It never seeds development identities.
+New transaction starts resolve operational context inside POS Core and
+atomically couple their event/receipt with the active shift slot. See
+[Register Operations and Shift Context](register-operations.md).
 
 ## Health Endpoint
 
@@ -387,6 +396,10 @@ GET /health
 POST /transaction-commands
 GET /transactions/{transaction_id}
 GET /receipts/{transaction_id}
+GET /register-context
+GET /cashiers
+POST /shifts/open
+POST /shifts/{shift_id}/close
 ```
 
 The transaction routes expose the durable typed-command mutation,
@@ -394,5 +407,10 @@ authoritative current-state replay query, and canonical completed-sale receipt
 derived from that same replay. Receipt lookup creates no command or cashier
 recovery record. Command-specific mutation routes, broad sale search, and
 speculative transaction operations are deliberately absent.
+
+Shift open/close are operational resource writes, not transaction commands.
+They create no command ID or same-command retry marker; explicit
+`GET /register-context` resolves transport uncertainty. Cashier selection is
+attribution only and provides no authentication claim.
 
 The domain model should drive the interface, not the reverse.

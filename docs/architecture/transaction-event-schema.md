@@ -5,7 +5,8 @@
 Transaction Event Schemas v1 and v2 define stable JSON representations for the
 implemented cash-sale transaction domain events. Existing lifecycle and
 correction events and legacy untaxed sale lines use v1. New taxed sale lines
-use v2.
+use v2, and new operationally bound starts/completion/voids use their explicit
+v2 forms.
 
 It covers event payload serialization only. It does not define a SQLite
 journal table or persisted journal-record envelope.
@@ -91,6 +92,33 @@ Payload fields:
 
 - `transaction_id`: string containing the externally supplied transaction
   identifier.
+
+Schema v1 means that operational register/cashier/shift context and start time
+are absent. It remains the exact replay form for legacy transactions.
+
+### Schema v2 `transaction_started`
+
+New production starts use:
+
+```json
+{
+  "schema_version": 2,
+  "event_type": "transaction_started",
+  "payload": {
+    "transaction_id": "txn-001",
+    "register_id": "register-front-01",
+    "register_display_name": "Front Register 1",
+    "cashier_id": "cashier-001",
+    "cashier_display_name": "Alice",
+    "shift_id": "shift_...",
+    "started_at_epoch_ms": 1787500000000
+  }
+}
+```
+
+The IDs and names are exact non-empty sale-start snapshots. The time is an
+exact nonnegative UTC Unix epoch millisecond recorded by POS Core. Replay uses
+these values directly and never joins current configuration or calls a clock.
 
 ### `sale_item_added`
 
@@ -179,6 +207,21 @@ values during replay.
 The payload must be empty. Completion status is derived by applying this event
 to a paid transaction.
 
+For a context-bearing new transaction, completion uses:
+
+```json
+{
+  "schema_version": 2,
+  "event_type": "transaction_completed",
+  "payload": {
+    "completed_at_epoch_ms": 1787500030000
+  }
+}
+```
+
+The exact nonnegative epoch millisecond must not precede the stored transaction
+start time. Schema v1 completion keeps completion time absent.
+
 ### `sale_line_removed`
 
 ```json
@@ -212,6 +255,21 @@ The payload must be empty. Applying the event changes an open transaction to
 the terminal `voided` state while retaining its cancelled basket and monetary
 projection for inspection.
 
+For a context-bearing new transaction, void uses:
+
+```json
+{
+  "schema_version": 2,
+  "event_type": "transaction_voided",
+  "payload": {
+    "voided_at_epoch_ms": 1787500020000
+  }
+}
+```
+
+The same exact time and start-order rules apply. Schema v1 void keeps terminal
+time absent.
+
 ## Money representation
 
 All money uses exact integer minor units:
@@ -244,7 +302,9 @@ Persisted event data is untrusted. The version-aware decoder rejects:
 - invalid Schema v2 category/rate fields or a tax amount inconsistent with the
   v2 algorithm;
 - a negative, fractional, inexact, or incorrectly typed removal line index;
-- event types not defined for Schema v2;
+- event types or v2 payload combinations not explicitly defined above;
+- empty or incorrectly typed operational identities;
+- negative, fractional, or incorrectly typed epoch milliseconds;
 - a non-empty `transaction_completed` or `transaction_voided` payload.
 
 The decoder does not ignore unknown fields or coerce values. Semantic evolution
@@ -289,6 +349,12 @@ zero tax; v2 lines contribute their stored tax. Removal events subtract the
 selected line's already-stored base-price and tax contribution without catalog
 lookup. No correction deletes or rewrites an earlier journal event.
 
+A Schema v1 start with Schema v1 terminal event represents a legacy
+transaction with absent operational context/time. A Schema v2 start requires a
+matching Schema v2 completion or void time for canonical Receipt v2. Invalid
+context/time combinations fail closed. Existing legacy open/paid transactions
+can still finish without invented attribution.
+
 ## Deliberately deferred metadata
 
 Schema v1 does not contain:
@@ -297,7 +363,8 @@ Schema v1 does not contain:
 - transaction stream keys;
 - stream sequence numbers;
 - event IDs;
-- recorded timestamps;
+- a generic journal-recorded timestamp (only the explicit operational event
+  times above exist);
 - previous or current hashes;
 - command IDs;
 - filesystem paths or other storage locations.

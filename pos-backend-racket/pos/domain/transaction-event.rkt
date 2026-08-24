@@ -1,16 +1,22 @@
 #lang racket
 
 (require "money.rkt"
-         "tax.rkt")
+         "tax.rkt"
+         "transaction-operational-context.rkt")
 
 (provide transaction-event?
+         transaction-start-event?
+         transaction-start-event-transaction-id
          (struct-out transaction-started)
+         (struct-out operational-transaction-started)
          (struct-out sale-item-added)
          (struct-out taxed-sale-item-added)
          (struct-out sale-line-removed)
          (struct-out cash-tendered)
          (struct-out transaction-completed)
-         (struct-out transaction-voided))
+         (struct-out timestamped-transaction-completed)
+         (struct-out transaction-voided)
+         (struct-out timestamped-transaction-voided))
 
 (struct transaction-event ()
   #:transparent)
@@ -22,6 +28,35 @@
     (unless (string? transaction-id)
       (raise-argument-error type-name "string?" transaction-id))
     (string->immutable-string transaction-id)))
+
+(struct operational-transaction-started transaction-event
+  (transaction-id context)
+  #:transparent
+  #:guard
+  (lambda (transaction-id context type-name)
+    (unless (and (string? transaction-id)
+                 (positive? (string-length transaction-id)))
+      (raise-argument-error type-name "non-empty-string?" transaction-id))
+    (unless (transaction-operational-context? context)
+      (raise-argument-error
+       type-name "transaction-operational-context?" context))
+    (values (string->immutable-string transaction-id) context)))
+
+(define (transaction-start-event? event)
+  (or (transaction-started? event)
+      (operational-transaction-started? event)))
+
+(define (transaction-start-event-transaction-id event)
+  (cond
+    [(transaction-started? event)
+     (transaction-started-transaction-id event)]
+    [(operational-transaction-started? event)
+     (operational-transaction-started-transaction-id event)]
+    [else
+     (raise-argument-error
+      'transaction-start-event-transaction-id
+      "transaction-start-event?"
+      event)]))
 
 (struct sale-item-added transaction-event (barcode description unit-price)
   #:transparent
@@ -98,5 +133,27 @@
 (struct transaction-completed transaction-event ()
   #:transparent)
 
+(struct timestamped-transaction-completed transaction-event
+  (completed-at-epoch-ms)
+  #:transparent
+  #:guard
+  (lambda (completed-at-epoch-ms type-name)
+    (unless (and (exact-integer? completed-at-epoch-ms)
+                 (>= completed-at-epoch-ms 0))
+      (raise-argument-error
+       type-name "exact-nonnegative-integer?" completed-at-epoch-ms))
+    completed-at-epoch-ms))
+
 (struct transaction-voided transaction-event ()
   #:transparent)
+
+(struct timestamped-transaction-voided transaction-event
+  (voided-at-epoch-ms)
+  #:transparent
+  #:guard
+  (lambda (voided-at-epoch-ms type-name)
+    (unless (and (exact-integer? voided-at-epoch-ms)
+                 (>= voided-at-epoch-ms 0))
+      (raise-argument-error
+       type-name "exact-nonnegative-integer?" voided-at-epoch-ms))
+    voided-at-epoch-ms))
