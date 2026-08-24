@@ -3,6 +3,7 @@
 (require (prefix-in db: db)
          racket/file
          "../pos/persistence/operational-configuration-snapshot-codec.rkt"
+         "../pos/persistence/sqlite-connection.rkt"
          "../pos/persistence/sqlite-register-operations.rkt"
          "../pos/runtime.rkt")
 
@@ -61,7 +62,7 @@
     (define resolved (path->complete-path database-path))
     (initialize-sqlite-database! resolved)
     (define connection
-      (db:sqlite3-connect #:database resolved #:mode 'read/write))
+      (open-pos-sqlite-connection resolved 'read/write))
     (dynamic-wind
       void
       (lambda ()

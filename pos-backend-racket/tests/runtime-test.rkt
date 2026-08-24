@@ -17,6 +17,7 @@
          "../pos/persistence/catalog-snapshot-codec.rkt"
          "../pos/persistence/operational-configuration-snapshot-codec.rkt"
          "../pos/persistence/sqlite-catalog.rkt"
+         "../pos/persistence/sqlite-connection.rkt"
          "../pos/persistence/sqlite-register-operations.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt")
 
@@ -338,7 +339,7 @@ SQL
        (define opened '())
        (define (recording-connect path mode)
          (define connection
-           (db:sqlite3-connect #:database path #:mode mode))
+           (open-pos-sqlite-connection path mode))
          (set! opened (append opened (list (cons mode connection))))
          connection)
 
@@ -356,6 +357,18 @@ SQL
        (check-equal? (map car opened) '(create read/write))
        (define request-connection (cdr (second opened)))
        (check-true (db:connected? request-connection))
+       (check-equal?
+        (db:query-value request-connection "PRAGMA journal_mode")
+        "wal")
+       (check-equal?
+        (db:query-value request-connection "PRAGMA synchronous")
+        2)
+       (check-equal?
+        (db:query-value request-connection "PRAGMA foreign_keys")
+        1)
+       (check-equal?
+        (db:query-value request-connection "PRAGMA wal_autocheckpoint")
+        pos-sqlite-wal-autocheckpoint-pages)
 
        (stop-pos-runtime! runtime)
        (check-true (pos-runtime-stopped? runtime))

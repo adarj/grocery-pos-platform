@@ -94,6 +94,9 @@ JSON
          void
          (lambda ()
            (check-equal?
+            (db:query-value connection "PRAGMA journal_mode")
+            "wal")
+           (check-equal?
             (db:query-row
              connection
              "SELECT register_id, display_name FROM register_configuration")

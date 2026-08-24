@@ -10,7 +10,7 @@ The runtime composition is intentionally separate from transaction meaning:
 
 ```text
 environment configuration
-  -> startup schema initialization
+  -> startup SQLite operating policy + schema initialization
   -> bounded request connection pool
   -> thread-mapped virtual connection
   -> transaction + register-operations services
@@ -42,6 +42,31 @@ directory must already exist; runtime startup does not silently create an
 arbitrary directory hierarchy for a mistyped storage path. The development
 shell provisions the normal `.local/sqlite` directory.
 
+## SQLite connection operating policy
+
+All production runtime and administrative database connections are constructed
+through `pos/persistence/sqlite-connection.rkt`. The shared constructor passes
+Racket's `sqlite3-connect` an explicit busy retry limit of `10` and retry delay
+of `0.1` seconds. It then returns a connection only after the required SQLite
+policy has been established and verified.
+
+The create-capable initialization connection establishes and verifies
+`journal_mode=WAL`. Normal `read/write` connections only verify that the
+database is already WAL; they fail closed instead of converting journal mode
+during request or administrative work. Every production connection also
+establishes and verifies:
+
+```text
+synchronous:       FULL (2)
+foreign_keys:      ON (1)
+wal_autocheckpoint: 1000 pages
+```
+
+If policy setup or verification fails after the underlying connection opens,
+the constructor disconnects it before propagating the failure. This policy is
+separate from schema migration history and adds no migration after v6. See
+[ADR-0018](../adr/0018-use-wal-with-full-synchronous-durability.md).
+
 ## Startup schema lifecycle
 
 The HTTP listener does not begin accepting requests until SQLite startup has
@@ -49,7 +74,9 @@ succeeded:
 
 ```text
 open dedicated SQLite connection in create mode
-  -> run and validate POS database migrations through v5
+  -> establish and verify WAL
+  -> establish and verify per-connection durability policy
+  -> run and validate POS database migrations through v6
   -> disconnect dedicated startup connection
   -> construct request-time database resources
   -> construct HTTP application
@@ -62,8 +89,9 @@ or migration failure propagates and prevents construction of a usable runtime;
 the process does not start in a partially durable mode.
 
 Request connections do not run migrations and open the initialized database in
-SQLite `read/write` mode. If the initialized file disappears, request handling
-fails instead of silently creating an empty replacement database.
+SQLite `read/write` mode. Each physical pool connection verifies WAL and its
+per-connection policy before use. If the initialized file disappears, request
+handling fails instead of silently creating an empty replacement database.
 
 ## Request connection ownership
 
@@ -82,6 +110,12 @@ work. When a servlet request thread terminates, its lease is released to the
 pool. Consequently, unrelated request threads do not share one physical
 SQLite transaction context even though they use one shared transaction-service
 value.
+
+The pool factory uses the same production connection constructor as startup,
+but opens in `read/write` mode. The connector's bounded SQLITE_BUSY handling
+does not add a process-global lock or retry a whole command or domain decision.
+If contention remains after the connector exhausts its limit, the existing
+persistence/error boundary reports the failure or uncertain outcome.
 
 This runtime ownership model complements the command unit of work's
 `BEGIN IMMEDIATE`, final command-ID check, and final stream-version check. It
@@ -162,6 +196,12 @@ future checkout dependency is ready.
 
 Focused file-backed tests establish:
 
+- fresh initialization establishing WAL before migration and applying the
+  exact per-connection durability policy;
+- conversion of a compatible existing database to WAL without migration or
+  transaction-history loss;
+- normal `read/write` production opening rejecting a non-WAL database;
+- policy failure disconnecting the newly opened connection;
 - fresh runtime migration through schema v6;
 - an empty persistent catalog rejecting the former development barcode rather
   than falling back to a fake;
@@ -176,7 +216,7 @@ Focused file-backed tests establish:
 - runtime stop followed by restart, transaction recovery, and same-command-ID
   receipt recovery without duplicate events;
 - read/write request connections refusing to recreate a missing database;
-- unchanged `/health` and unknown-route behavior through `make-app`.
+- unchanged `/health` and unknown-route behavior through `make-app`;
 - operational configuration/shift composition, active-transaction slot
   persistence, atomic net cash-sale movement plus slot release on completion,
   and movement-free slot release on void.
@@ -188,7 +228,9 @@ This runtime composition and HTTP adapter do not add:
 - a readiness endpoint;
 - employee authentication, PINs/passwords, or authorization;
 - catalog HTTP administration, patch updates, or cloud synchronization;
-- automatic SQLite busy retry or backoff;
+- application-level busy retry/backoff or whole-command retry;
+- custom checkpoint scheduling, manual checkpoint tooling, or WAL metrics;
+- backup, restore, corruption-recovery tooling, or integrity-check commands;
 - a generic service container or component framework;
 - external payment/device integration, physical cash-drawer control, or
   receipt-printer integration;

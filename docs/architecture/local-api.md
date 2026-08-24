@@ -88,9 +88,12 @@ Localhost is still treated as an application trust boundary. Backend authorizati
 
 The Racket process now constructs its durable transaction service before the
 HTTP listener starts. Startup resolves `SQLITE_DB_PATH`, migrates and validates
-the POS database through schema v6 using a dedicated connection, and then
-builds a bounded SQLite pool plus one thread-mapped virtual connection for
-request use.
+the POS database through schema v6 using a dedicated connection after
+establishing WAL with FULL synchronous durability. Every production connection
+explicitly enables foreign-key enforcement, retains a 1000-page WAL automatic
+checkpoint threshold, and uses the bounded Racket connector busy policy.
+Request connections verify the database is already WAL before joining the
+bounded SQLite pool and thread-mapped virtual connection used for requests.
 The service held by the application uses that virtual connection; unrelated
 request threads therefore do not share one physical transaction context.
 

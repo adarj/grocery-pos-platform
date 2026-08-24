@@ -7,7 +7,8 @@
          "application/register-operations-service.rkt"
          "application/transaction-service.rkt"
          "persistence/pos-database-migrations.rkt"
-         "persistence/sqlite-catalog.rkt")
+         "persistence/sqlite-catalog.rkt"
+         "persistence/sqlite-connection.rkt")
 
 (provide runtime-sqlite-max-connections
          runtime-sqlite-max-idle-connections
@@ -45,9 +46,6 @@
     (raise-argument-error 'pos-runtime-stopped? "pos-runtime?" runtime))
   (unbox (pos-runtime-stopped-box runtime)))
 
-(define (open-sqlite-connection database-path mode)
-  (db:sqlite3-connect #:database database-path #:mode mode))
-
 (define (check-database-parent! who database-path)
   (define parent-directory (path-only database-path))
   (unless (and parent-directory
@@ -62,7 +60,7 @@
 
 (define (initialize-sqlite-database!
          database-path
-         #:connect [connect open-sqlite-connection]
+         #:connect [connect open-pos-sqlite-connection]
          #:migrate! [migrate! migrate-pos-database!])
   (define who 'initialize-sqlite-database!)
   (unless (path-string? database-path)
@@ -95,7 +93,7 @@
 (define (start-pos-runtime
          config
          #:catalog-lookup [catalog-lookup #f]
-         #:connect [connect open-sqlite-connection]
+         #:connect [connect open-pos-sqlite-connection]
          #:current-epoch-ms [current-epoch-ms system-current-epoch-ms]
          #:generate-shift-id [generate-shift-id secure-shift-id])
   (define who 'start-pos-runtime)

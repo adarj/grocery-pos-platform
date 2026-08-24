@@ -147,8 +147,9 @@ Verified capabilities currently include:
   shift close reconciliation with exact signed over/short;
 * idempotent persistent transaction application service with deterministic
   two-connection concurrency and file-backed restart/retry coverage;
-* Racket runtime composition with startup migration, a bounded SQLite pool,
-  thread-mapped virtual request connections, and explicit shutdown ownership;
+* explicit SQLite WAL/FULL connection policy with foreign-key enforcement,
+  bounded connector busy handling, a bounded SQLite pool, thread-mapped virtual
+  request connections, and explicit shutdown ownership;
 * Transaction HTTP API v1 with one strict idempotent command route,
   authoritative transaction-state reads, and exact completed-sale canonical
   receipt lookup derived from journal replay, plus narrow register/shift
