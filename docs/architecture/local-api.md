@@ -88,7 +88,7 @@ Localhost is still treated as an application trust boundary. Backend authorizati
 
 The Racket process now constructs its durable transaction service before the
 HTTP listener starts. Startup resolves `SQLITE_DB_PATH`, migrates and validates
-the POS database through schema v5 using a dedicated connection, and then
+the POS database through schema v6 using a dedicated connection, and then
 builds a bounded SQLite pool plus one thread-mapped virtual connection for
 request use.
 The service held by the application uses that virtual connection; unrelated
@@ -114,6 +114,11 @@ clock and secure shift-ID generator. It never seeds development identities.
 New transaction starts resolve operational context inside POS Core and
 atomically couple their event/receipt with the active shift slot. See
 [Register Operations and Shift Context](register-operations.md).
+
+Migration 6 adds the append-only shift cash ledger and immutable close
+reconciliation. Completed cash-sale movement and shift-slot release participate
+in the same transaction-command writer boundary. See
+[Shift Cash Accountability](cash-accountability.md).
 
 ## Health Endpoint
 
@@ -400,6 +405,7 @@ GET /register-context
 GET /cashiers
 POST /shifts/open
 POST /shifts/{shift_id}/close
+GET /shifts/{shift_id}/cash-summary
 ```
 
 The transaction routes expose the durable typed-command mutation,
@@ -410,7 +416,9 @@ speculative transaction operations are deliberately absent.
 
 Shift open/close are operational resource writes, not transaction commands.
 They create no command ID or same-command retry marker; explicit
-`GET /register-context` resolves transport uncertainty. Cashier selection is
-attribution only and provides no authentication claim.
+`GET /register-context` and exact shift cash-summary reads resolve transport
+uncertainty. Opening and counted cash are exact integer minor units. Flutter
+does not calculate expected cash or over/short. Cashier selection is attribution
+only and provides no authentication claim.
 
 The domain model should drive the interface, not the reverse.

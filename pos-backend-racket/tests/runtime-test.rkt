@@ -105,7 +105,8 @@
        connection
        #:current-epoch-ms (lambda () 1000)
        #:generate-shift-id (lambda () "shift-runtime"))
-      "runtime-cashier"))))
+      "runtime-cashier"
+      (money 0)))))
 
 (define (check-command-outcome result kind code)
   (define receipt (resolved-receipt result))
@@ -157,7 +158,8 @@
                   (vector 2 "create_transaction_command_receipts")
                   (vector 3 "create_catalog")
                   (vector 4 "create_tax_categories")
-                  (vector 5 "create_register_operations")))
+                  (vector 5 "create_register_operations")
+                  (vector 6 "create_shift_cash_accountability")))
            (with-connection
             database-path
             (lambda (connection)
@@ -403,7 +405,8 @@ SQL
                   (vector 2 "create_transaction_command_receipts")
                   (vector 3 "create_catalog")
                   (vector 4 "create_tax_categories")
-                  (vector 5 "create_register_operations")))
+                  (vector 5 "create_register_operations")
+                  (vector 6 "create_shift_cash_accountability")))
            (define service
              (pos-runtime-transaction-service runtime-B))
            (define retry-receipt

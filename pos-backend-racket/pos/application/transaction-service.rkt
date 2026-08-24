@@ -8,6 +8,7 @@
          "../domain/transaction.rkt"
          (prefix-in op: "../domain/transaction-operational-context.rkt")
          "../persistence/sqlite-register-operations.rkt"
+         "../persistence/sqlite-shift-cash-accountability.rkt"
          "../persistence/sqlite-transaction-event-store.rkt"
          "../persistence/transaction-command-receipt-store.rkt"
          "../persistence/transaction-command-unit-of-work.rkt")
@@ -232,9 +233,15 @@
   (transaction-command-commit-plan
    command decision-version 'accepted "accepted" events))
 
-(define (accepted-plan-with-effect
+(define (accepted-plan-with-pre-effect
          command decision-version events operational-effect)
-  (transaction-command-commit-plan-with-operational-effect
+  (transaction-command-commit-plan-with-pre-append-effect
+   (accepted-plan command decision-version events)
+   operational-effect))
+
+(define (accepted-plan-with-post-effect
+         command decision-version events operational-effect)
+  (transaction-command-commit-plan-with-post-append-effect
    (accepted-plan command decision-version events)
    operational-effect))
 
@@ -401,7 +408,7 @@
                  context))
               (commit-plan
                service
-               (accepted-plan-with-effect
+               (accepted-plan-with-pre-effect
                 command
                 0
                 (start-accepted-events result)
@@ -442,20 +449,27 @@
         (tender-rejected-code result)))))
 
 (define (completion-command->plan service command transaction version)
+  (define context (transaction-operational-context transaction))
+  (define completed-at (and context (current-epoch-ms service)))
   (define result
     (complete-transaction
      transaction
-     (and (transaction-operational-context transaction)
-          (current-epoch-ms service))))
+     completed-at))
   (if (completion-accepted? result)
-      (if (transaction-operational-context transaction)
-          (accepted-plan-with-effect
+      (if context
+          (accepted-plan-with-post-effect
            command
            version
            (completion-accepted-events result)
-           (release-slot-effect
-            (transaction-operational-context transaction)
-            (transaction-id transaction)))
+           (lambda (connection)
+             (record-completed-cash-sale/in-transaction!
+              connection
+              (op:transaction-operational-context-shift-id context)
+              (transaction-id transaction)
+              (transaction-total transaction)
+              completed-at)
+             ((release-slot-effect context (transaction-id transaction))
+              connection)))
           (accepted-plan command version (completion-accepted-events result)))
       (receipt-only-plan
        command
@@ -486,7 +500,7 @@
           (current-epoch-ms service))))
   (if (void-accepted? result)
       (if (transaction-operational-context transaction)
-          (accepted-plan-with-effect
+          (accepted-plan-with-post-effect
            command
            version
            (void-accepted-events result)

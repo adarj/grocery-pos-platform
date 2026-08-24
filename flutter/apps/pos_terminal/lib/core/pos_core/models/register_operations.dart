@@ -32,12 +32,7 @@ final class CashierIdentity {
   factory CashierIdentity.fromJson(Map<String, Object?> json) {
     const context = 'cashier identity';
     return CashierIdentity(
-      cashierId: requireJsonString(
-        json,
-        'cashier_id',
-        context,
-        nonEmpty: true,
-      ),
+      cashierId: requireJsonString(json, 'cashier_id', context, nonEmpty: true),
       displayName: requireJsonString(
         json,
         'display_name',
@@ -114,12 +109,7 @@ final class RegisterShift {
         context,
         nonEmpty: true,
       ),
-      cashierId: requireJsonString(
-        json,
-        'cashier_id',
-        context,
-        nonEmpty: true,
-      ),
+      cashierId: requireJsonString(json, 'cashier_id', context, nonEmpty: true),
       cashierDisplayName: requireJsonString(
         json,
         'cashier_display_name',
@@ -191,4 +181,129 @@ final class RegisterContext {
   final bool configured;
   final RegisterIdentity? register;
   final RegisterShift? activeShift;
+}
+
+enum ShiftCashStatus { open, closed }
+
+final class ShiftCashSummary {
+  const ShiftCashSummary({
+    required this.shiftId,
+    required this.status,
+    required this.openingCashMinorUnits,
+    required this.completedCashSaleCount,
+    required this.cashSalesMinorUnits,
+    required this.expectedCashMinorUnits,
+    required this.countedCashMinorUnits,
+    required this.overShortMinorUnits,
+  });
+
+  factory ShiftCashSummary.fromJson(Map<String, Object?> json) {
+    const context = 'shift cash summary';
+    final statusValue = requireJsonString(json, 'status', context);
+    final status = switch (statusValue) {
+      'open' => ShiftCashStatus.open,
+      'closed' => ShiftCashStatus.closed,
+      _ => throw const PosCoreInvalidResponseFailure(
+        'Shift cash summary status is unsupported.',
+      ),
+    };
+    final counted = requireJsonNullableNonnegativeInt(
+      json,
+      'counted_cash_minor_units',
+      context,
+    );
+    final overShortValue = requireJsonField(
+      json,
+      'over_short_minor_units',
+      context,
+    );
+    final int? overShort;
+    if (overShortValue == null) {
+      overShort = null;
+    } else if (overShortValue is int) {
+      overShort = overShortValue;
+    } else {
+      throw const PosCoreInvalidResponseFailure(
+        'Shift cash summary over_short_minor_units must be null or an exact integer.',
+      );
+    }
+    if (status == ShiftCashStatus.open &&
+        (counted != null || overShort != null)) {
+      throw const PosCoreInvalidResponseFailure(
+        'An open shift cash summary cannot contain reconciliation values.',
+      );
+    }
+    if (status == ShiftCashStatus.closed &&
+        (counted == null || overShort == null)) {
+      throw const PosCoreInvalidResponseFailure(
+        'A closed shift cash summary requires reconciliation values.',
+      );
+    }
+    return ShiftCashSummary(
+      shiftId: requireJsonString(json, 'shift_id', context, nonEmpty: true),
+      status: status,
+      openingCashMinorUnits: requireJsonNonnegativeInt(
+        json,
+        'opening_cash_minor_units',
+        context,
+      ),
+      completedCashSaleCount: requireJsonNonnegativeInt(
+        json,
+        'completed_cash_sale_count',
+        context,
+      ),
+      cashSalesMinorUnits: requireJsonNonnegativeInt(
+        json,
+        'cash_sales_minor_units',
+        context,
+      ),
+      expectedCashMinorUnits: requireJsonNonnegativeInt(
+        json,
+        'expected_cash_minor_units',
+        context,
+      ),
+      countedCashMinorUnits: counted,
+      overShortMinorUnits: overShort,
+    );
+  }
+
+  final String shiftId;
+  final ShiftCashStatus status;
+  final int openingCashMinorUnits;
+  final int completedCashSaleCount;
+  final int cashSalesMinorUnits;
+  final int expectedCashMinorUnits;
+  final int? countedCashMinorUnits;
+  final int? overShortMinorUnits;
+}
+
+final class ShiftOperationResult {
+  const ShiftOperationResult({required this.shift, required this.cashSummary});
+
+  factory ShiftOperationResult.fromJson(Map<String, Object?> json) {
+    const context = 'shift operation response';
+    final shift = RegisterShift.fromJson(
+      expectJsonObject(
+        requireJsonField(json, 'shift', context),
+        '$context shift',
+      ),
+    );
+    final summary = ShiftCashSummary.fromJson(
+      expectJsonObject(
+        requireJsonField(json, 'cash_summary', context),
+        '$context cash_summary',
+      ),
+    );
+    if (shift.shiftId != summary.shiftId ||
+        ((shift.closedAtEpochMs == null) !=
+            (summary.status == ShiftCashStatus.open))) {
+      throw const PosCoreInvalidResponseFailure(
+        'Shift operation identity or lifecycle disagrees with its cash summary.',
+      );
+    }
+    return ShiftOperationResult(shift: shift, cashSummary: summary);
+  }
+
+  final RegisterShift shift;
+  final ShiftCashSummary cashSummary;
 }

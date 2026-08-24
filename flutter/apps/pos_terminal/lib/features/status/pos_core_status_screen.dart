@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+import '../../core/money/money_format.dart';
+import '../../core/money/money_input.dart';
 import '../../core/pos_core/models/pos_core_failure.dart';
 import '../../core/pos_core/models/pos_core_health.dart';
 import '../../core/pos_core/models/register_operations.dart';
@@ -31,14 +34,24 @@ final class PosCoreStatusScreen extends StatefulWidget {
 
 final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
   late Future<_RegisterHomeData> _homeFuture;
+  final TextEditingController _openingCashController = TextEditingController();
   bool _operationPending = false;
   String? _operationFeedback;
+  String? _openingCashValidation;
   String? _selectedCashierId;
+  RegisterShift? _uncertainCloseShift;
+  ShiftOperationResult? _closedResult;
 
   @override
   void initState() {
     super.initState();
     _homeFuture = _loadHome();
+  }
+
+  @override
+  void dispose() {
+    _openingCashController.dispose();
+    super.dispose();
   }
 
   Future<_RegisterHomeData> _loadHome() async {
@@ -48,6 +61,7 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
         health: health,
         context: null,
         cashiers: const [],
+        cashSummary: null,
       );
     }
     final registerContext = await widget.client.fetchRegisterContext();
@@ -55,10 +69,22 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
         registerContext.configured && registerContext.activeShift == null
         ? await widget.client.fetchActiveCashiers()
         : const <CashierIdentity>[];
+    ShiftCashSummary? cashSummary;
+    if (registerContext.activeShift != null) {
+      cashSummary = await widget.client.fetchShiftCashSummary(
+        registerContext.activeShift!.shiftId,
+      );
+    } else if (_uncertainCloseShift != null) {
+      final recovered = await widget.client.fetchShiftCashSummary(
+        _uncertainCloseShift!.shiftId,
+      );
+      if (recovered.status == ShiftCashStatus.closed) cashSummary = recovered;
+    }
     return _RegisterHomeData(
       health: health,
       context: registerContext,
       cashiers: cashiers,
+      cashSummary: cashSummary,
     );
   }
 
@@ -92,15 +118,24 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
   Future<void> _openShift() async {
     final cashierId = _selectedCashierId;
     if (_operationPending || cashierId == null) return;
+    final openingCash = parseMoneyInputMinorUnits(_openingCashController.text);
+    if (openingCash == null) {
+      setState(() {
+        _openingCashValidation = 'Enter a valid opening cash amount.';
+      });
+      return;
+    }
     setState(() {
       _operationPending = true;
       _operationFeedback = null;
+      _openingCashValidation = null;
     });
     try {
-      await widget.client.openShift(cashierId);
+      await widget.client.openShift(cashierId, openingCash);
       if (!mounted) return;
       setState(() {
         _operationPending = false;
+        _openingCashController.clear();
         _homeFuture = _loadHome();
       });
     } on Object catch (error) {
@@ -117,39 +152,28 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
   }
 
   Future<void> _confirmCloseShift(RegisterShift shift) async {
-    final confirmed = await showDialog<bool>(
+    final countedCash = await showDialog<int>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Close shift?'),
-        content: Text('Cashier: ${shift.cashierDisplayName}'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Keep Shift'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Close Shift'),
-          ),
-        ],
-      ),
+      builder: (context) => _CloseShiftDialog(shift: shift),
     );
-    if (confirmed != true || !mounted || _operationPending) return;
+    if (countedCash == null || !mounted || _operationPending) return;
     setState(() {
       _operationPending = true;
       _operationFeedback = null;
     });
     try {
-      await widget.client.closeShift(shift.shiftId);
+      final result = await widget.client.closeShift(shift.shiftId, countedCash);
       if (!mounted) return;
       setState(() {
         _operationPending = false;
-        _homeFuture = _loadHome();
+        _uncertainCloseShift = null;
+        _closedResult = result;
       });
     } on Object catch (error) {
       if (!mounted) return;
       setState(() {
         _operationPending = false;
+        if (error is! PosCoreServerFailure) _uncertainCloseShift = shift;
         _operationFeedback = _operationalFailureMessage(
           error,
           unknownOutcome:
@@ -157,6 +181,15 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
         );
       });
     }
+  }
+
+  void _finishClosedShift() {
+    setState(() {
+      _closedResult = null;
+      _uncertainCloseShift = null;
+      _operationFeedback = null;
+      _homeFuture = _loadHome();
+    });
   }
 
   String _operationalFailureMessage(
@@ -167,8 +200,7 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
         error.code == 'shift_has_active_transaction') {
       return 'Finish or void the active sale before closing the shift.';
     }
-    if (error is PosCoreServerFailure &&
-        error.code == 'shift_already_open') {
+    if (error is PosCoreServerFailure && error.code == 'shift_already_open') {
       return 'A different cashier shift is already open. Refresh Register State.';
     }
     if (error is PosCoreServerFailure && error.code == 'cashier_inactive') {
@@ -233,6 +265,13 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
   }
 
   Widget _buildOperationalHome(_RegisterHomeData data) {
+    final completedClose = _closedResult;
+    if (completedClose != null) {
+      return _buildClosedShiftResult(
+        completedClose.shift,
+        completedClose.cashSummary,
+      );
+    }
     final registerContext = data.context!;
     if (!registerContext.configured) {
       return _StatusLayout(
@@ -242,15 +281,19 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
             'Activate register and cashier configuration with the operator CLI.',
         icon: Icons.settings_outlined,
         feedback: _operationFeedback,
-        actions: [
-          _lookupButton(),
-          _refreshButton(),
-        ],
+        actions: [_lookupButton(), _refreshButton()],
       );
     }
 
     final shift = registerContext.activeShift;
     if (shift == null) {
+      if (data.cashSummary?.status == ShiftCashStatus.closed &&
+          _uncertainCloseShift != null) {
+        return _buildClosedShiftResult(
+          _uncertainCloseShift!,
+          data.cashSummary!,
+        );
+      }
       final validSelection = data.cashiers.any(
         (cashier) => cashier.cashierId == _selectedCashierId,
       );
@@ -265,20 +308,40 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
         detail: 'Open a shift to begin cashier transactions.',
         icon: Icons.badge_outlined,
         feedback: _operationFeedback,
-        body: DropdownButtonFormField<String>(
-          key: const Key('cashier-selection'),
-          initialValue: _selectedCashierId,
-          decoration: const InputDecoration(labelText: 'Cashier'),
-          items: [
-            for (final cashier in data.cashiers)
-              DropdownMenuItem(
-                value: cashier.cashierId,
-                child: Text(cashier.displayName),
+        body: Column(
+          children: [
+            DropdownButtonFormField<String>(
+              key: const Key('cashier-selection'),
+              initialValue: _selectedCashierId,
+              decoration: const InputDecoration(labelText: 'Cashier'),
+              items: [
+                for (final cashier in data.cashiers)
+                  DropdownMenuItem(
+                    value: cashier.cashierId,
+                    child: Text(cashier.displayName),
+                  ),
+              ],
+              onChanged: _operationPending
+                  ? null
+                  : (value) => setState(() => _selectedCashierId = value),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              key: const Key('opening-cash-input'),
+              controller: _openingCashController,
+              enabled: !_operationPending,
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
               ),
+              inputFormatters: [
+                FilteringTextInputFormatter.allow(RegExp(r'[0-9.]')),
+              ],
+              decoration: InputDecoration(
+                labelText: 'Opening Cash',
+                errorText: _openingCashValidation,
+              ),
+            ),
           ],
-          onChanged: _operationPending
-              ? null
-              : (value) => setState(() => _selectedCashierId = value),
         ),
         actions: [
           FilledButton.icon(
@@ -301,7 +364,8 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
       detail:
           'Cashier: ${shift.cashierDisplayName}\n'
           'Shift: ${shift.shiftId}\n'
-          'Opened: ${_formatUtcEpochMs(shift.openedAtEpochMs)}',
+          'Opened: ${_formatUtcEpochMs(shift.openedAtEpochMs)}\n'
+          'Opening Cash: ${formatUsdMinorUnits(data.cashSummary!.openingCashMinorUnits)}',
       icon: Icons.point_of_sale,
       feedback: _operationFeedback,
       actions: [
@@ -319,6 +383,26 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
           label: const Text('Close Shift'),
         ),
         _refreshButton(),
+      ],
+    );
+  }
+
+  Widget _buildClosedShiftResult(
+    RegisterShift shift,
+    ShiftCashSummary summary,
+  ) {
+    return _StatusLayout(
+      title: shift.registerDisplayName,
+      status: 'Shift Closed',
+      detail: 'Cashier: ${shift.cashierDisplayName}\nShift: ${shift.shiftId}',
+      icon: Icons.fact_check_outlined,
+      body: _CashReconciliationView(summary: summary),
+      actions: [
+        FilledButton(
+          style: _primaryStatusActionStyle,
+          onPressed: _finishClosedShift,
+          child: const Text('Done'),
+        ),
       ],
     );
   }
@@ -343,11 +427,126 @@ final class _RegisterHomeData {
     required this.health,
     required this.context,
     required this.cashiers,
+    required this.cashSummary,
   });
 
   final PosCoreHealth health;
   final RegisterContext? context;
   final List<CashierIdentity> cashiers;
+  final ShiftCashSummary? cashSummary;
+}
+
+final class _CashReconciliationView extends StatelessWidget {
+  const _CashReconciliationView({required this.summary});
+
+  final ShiftCashSummary summary;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        _row(
+          'Opening Cash',
+          formatUsdMinorUnits(summary.openingCashMinorUnits),
+        ),
+        _row('Cash Sales', formatUsdMinorUnits(summary.cashSalesMinorUnits)),
+        _row(
+          'Expected Cash',
+          formatUsdMinorUnits(summary.expectedCashMinorUnits),
+        ),
+        _row(
+          'Counted Cash',
+          formatUsdMinorUnits(summary.countedCashMinorUnits!),
+        ),
+        _row(
+          'Over / Short',
+          formatSignedUsdMinorUnits(summary.overShortMinorUnits!),
+        ),
+      ],
+    );
+  }
+
+  Widget _row(String label, String value) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 4),
+    child: Row(
+      children: [
+        Expanded(child: Text(label)),
+        Text(value),
+      ],
+    ),
+  );
+}
+
+final class _CloseShiftDialog extends StatefulWidget {
+  const _CloseShiftDialog({required this.shift});
+
+  final RegisterShift shift;
+
+  @override
+  State<_CloseShiftDialog> createState() => _CloseShiftDialogState();
+}
+
+final class _CloseShiftDialogState extends State<_CloseShiftDialog> {
+  final TextEditingController _controller = TextEditingController();
+  String? _validation;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final parsed = parseMoneyInputMinorUnits(_controller.text);
+    if (parsed == null) {
+      setState(() => _validation = 'Enter a valid closing cash amount.');
+      return;
+    }
+    Navigator.of(context).pop(parsed);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      scrollable: true,
+      title: const Text('Close Shift'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Cashier: ${widget.shift.cashierDisplayName}'),
+          Text('Shift: ${widget.shift.shiftId}'),
+          const SizedBox(height: 16),
+          const Text('Count all physical cash currently in the drawer.'),
+          const SizedBox(height: 12),
+          TextField(
+            key: const Key('closing-cash-input'),
+            controller: _controller,
+            autofocus: true,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            inputFormatters: [
+              FilteringTextInputFormatter.allow(RegExp(r'[0-9.]')),
+            ],
+            decoration: InputDecoration(
+              labelText: 'Closing Cash',
+              errorText: _validation,
+            ),
+            onSubmitted: (_) => _submit(),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: _submit,
+          child: const Text('Reconcile & Close'),
+        ),
+      ],
+    );
+  }
 }
 
 String _formatUtcEpochMs(int epochMs) {
@@ -424,10 +623,7 @@ final class _StatusLayout extends StatelessWidget {
                         ),
                       ),
                     ],
-                    if (body != null) ...[
-                      const SizedBox(height: 24),
-                      body!,
-                    ],
+                    if (body != null) ...[const SizedBox(height: 24), body!],
                     if (actions.isNotEmpty) ...[
                       const SizedBox(height: 24),
                       Wrap(

@@ -74,10 +74,11 @@ SQL
         #(2 "create_transaction_command_receipts")
         #(3 "create_catalog")
         #(4 "create_tax_categories")
-        #(5 "create_register_operations")))
+        #(5 "create_register_operations")
+        #(6 "create_shift_cash_accountability")))
 
 (module+ test
-  (test-case "fresh database migrates through versions 1 through 5"
+  (test-case "fresh database migrates through versions 1 through 6"
     (call-with-test-database
      (lambda (connection)
        (migrate-pos-database! connection)
@@ -177,7 +178,7 @@ SQL
        (check-equal? (transaction-status recovered) 'open)
        (check-equal? (transaction-subtotal recovered) (money 199)))))
 
-  (test-case "valid v5 migration is safe to run again"
+  (test-case "valid v6 migration is safe to run again"
     (call-with-test-database
      (lambda (connection)
        (migrate-pos-database! connection)
@@ -205,7 +206,7 @@ SQL
        (migrate-pos-database! connection)
        (query-exec
         connection
-        "INSERT INTO pos_schema_migrations (version, name) VALUES (6, 'unknown')")
+       "INSERT INTO pos_schema_migrations (version, name) VALUES (7, 'unknown')")
        (check-exn exn:fail?
                   (lambda () (migrate-pos-database! connection)))))
 

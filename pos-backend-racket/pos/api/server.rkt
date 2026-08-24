@@ -52,6 +52,13 @@
        (positive? (string-length (second path)))
        (equal? (third path) "close")))
 
+(define (shift-cash-summary-path? path)
+  (and (= (length path) 3)
+       (equal? (first path) "shifts")
+       (string? (second path))
+       (positive? (string-length (second path)))
+       (equal? (third path) "cash-summary")))
+
 (define (make-app transaction-service [register-service #f])
   (unless (transaction-service? transaction-service)
     (raise-argument-error
@@ -95,6 +102,11 @@
        (if (equal? method #"POST")
            (handle-close-shift-request register-service (second path) req)
            (method-not-allowed-response #"POST"))]
+
+      [(and register-service (shift-cash-summary-path? path))
+       (if (equal? method #"GET")
+           (handle-shift-cash-summary-request register-service (second path))
+           (method-not-allowed-response #"GET"))]
 
       [(transaction-query-path? path)
        (if (equal? method #"GET")

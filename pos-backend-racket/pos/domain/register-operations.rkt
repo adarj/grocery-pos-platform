@@ -123,7 +123,7 @@
        "active shift" active-shift))
     (values configured? register active-shift)))
 
-(struct register-shift-opened (shift) #:transparent)
+(struct register-shift-opened (shift cash-summary) #:transparent)
 (struct register-shift-open-rejected (code) #:transparent)
-(struct register-shift-closed (shift) #:transparent)
+(struct register-shift-closed (shift cash-summary) #:transparent)
 (struct register-shift-close-rejected (code) #:transparent)

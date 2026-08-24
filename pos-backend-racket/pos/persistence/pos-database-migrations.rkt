@@ -12,6 +12,7 @@
 (define migration-3-name "create_catalog")
 (define migration-4-name "create_tax_categories")
 (define migration-5-name "create_register_operations")
+(define migration-6-name "create_shift_cash_accountability")
 (define stream-sequence-index-name
   "transaction_events_stream_sequence_unique")
 
@@ -316,6 +317,105 @@ WHERE active_transaction_id IS NOT NULL
 SQL
   )
 
+(define create-shift-cash-movements-table-sql
+  #<<SQL
+CREATE TABLE shift_cash_movements (
+  id INTEGER PRIMARY KEY,
+  shift_id TEXT NOT NULL
+    CHECK (
+      typeof(shift_id) = 'text'
+      AND length(shift_id) > 0
+    ),
+  movement_sequence INTEGER NOT NULL
+    CHECK (
+      typeof(movement_sequence) = 'integer'
+      AND movement_sequence > 0
+    ),
+  movement_type TEXT NOT NULL
+    CHECK (
+      typeof(movement_type) = 'text'
+      AND movement_type IN ('opening_float', 'cash_sale')
+    ),
+  amount_minor_units INTEGER NOT NULL
+    CHECK (
+      typeof(amount_minor_units) = 'integer'
+      AND amount_minor_units >= 0
+    ),
+  transaction_id TEXT
+    CHECK (
+      transaction_id IS NULL
+      OR (
+        typeof(transaction_id) = 'text'
+        AND length(transaction_id) > 0
+      )
+    ),
+  recorded_at_epoch_ms INTEGER NOT NULL
+    CHECK (
+      typeof(recorded_at_epoch_ms) = 'integer'
+      AND recorded_at_epoch_ms >= 0
+    ),
+  CHECK (
+    (movement_type = 'opening_float' AND transaction_id IS NULL)
+    OR
+    (movement_type = 'cash_sale' AND transaction_id IS NOT NULL)
+  )
+)
+SQL
+  )
+
+(define create-shift-cash-reconciliations-table-sql
+  #<<SQL
+CREATE TABLE shift_cash_reconciliations (
+  shift_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(shift_id) = 'text'
+      AND length(shift_id) > 0
+    ),
+  expected_cash_minor_units INTEGER NOT NULL
+    CHECK (
+      typeof(expected_cash_minor_units) = 'integer'
+      AND expected_cash_minor_units >= 0
+    ),
+  counted_cash_minor_units INTEGER NOT NULL
+    CHECK (
+      typeof(counted_cash_minor_units) = 'integer'
+      AND counted_cash_minor_units >= 0
+    ),
+  over_short_minor_units INTEGER NOT NULL
+    CHECK (
+      typeof(over_short_minor_units) = 'integer'
+    ),
+  CHECK (
+    over_short_minor_units =
+      counted_cash_minor_units - expected_cash_minor_units
+  )
+)
+SQL
+  )
+
+(define create-shift-movement-sequence-index-sql
+  #<<SQL
+CREATE UNIQUE INDEX shift_cash_movements_shift_sequence_unique
+ON shift_cash_movements (shift_id, movement_sequence)
+SQL
+  )
+
+(define create-shift-opening-index-sql
+  #<<SQL
+CREATE UNIQUE INDEX shift_cash_movements_one_opening_unique
+ON shift_cash_movements (shift_id)
+WHERE movement_type = 'opening_float'
+SQL
+  )
+
+(define create-cash-sale-transaction-index-sql
+  #<<SQL
+CREATE UNIQUE INDEX shift_cash_movements_cash_sale_transaction_unique
+ON shift_cash_movements (transaction_id)
+WHERE movement_type = 'cash_sale'
+SQL
+  )
+
 (define (schema-object-exists? connection type name)
   (= 1
      (db:query-value
@@ -450,6 +550,21 @@ SQL
         (vector "opened_at_epoch_ms" "INTEGER" 1 0)
         (vector "closed_at_epoch_ms" "INTEGER" 0 0)
         (vector "active_transaction_id" "TEXT" 0 0)))
+
+(define expected-shift-cash-movement-columns
+  (list (vector "id" "INTEGER" 0 1)
+        (vector "shift_id" "TEXT" 1 0)
+        (vector "movement_sequence" "INTEGER" 1 0)
+        (vector "movement_type" "TEXT" 1 0)
+        (vector "amount_minor_units" "INTEGER" 1 0)
+        (vector "transaction_id" "TEXT" 0 0)
+        (vector "recorded_at_epoch_ms" "INTEGER" 1 0)))
+
+(define expected-shift-cash-reconciliation-columns
+  (list (vector "shift_id" "TEXT" 1 1)
+        (vector "expected_cash_minor_units" "INTEGER" 1 0)
+        (vector "counted_cash_minor_units" "INTEGER" 1 0)
+        (vector "over_short_minor_units" "INTEGER" 1 0)))
 
 (define (validate-owned-table-schema connection
                                      migration-version
@@ -621,6 +736,126 @@ SQL
    "register_shifts_active_transaction_unique"
    create-active-transaction-index-sql))
 
+(define (validate-shift-cash-integrity connection)
+  (define orphan-movements
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM shift_cash_movements AS movement
+LEFT JOIN register_shifts AS shift ON shift.shift_id = movement.shift_id
+WHERE shift.shift_id IS NULL
+SQL
+     ))
+  (define orphan-reconciliations
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM shift_cash_reconciliations AS reconciliation
+LEFT JOIN register_shifts AS shift ON shift.shift_id = reconciliation.shift_id
+WHERE shift.shift_id IS NULL
+SQL
+     ))
+  (define tracked-without-one-opening
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM (
+  SELECT shift_id,
+         SUM(CASE WHEN movement_type = 'opening_float' THEN 1 ELSE 0 END)
+           AS opening_count
+  FROM shift_cash_movements
+  GROUP BY shift_id
+)
+WHERE opening_count <> 1
+SQL
+     ))
+  (define open-without-opening
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM register_shifts AS shift
+LEFT JOIN shift_cash_movements AS movement
+  ON movement.shift_id = shift.shift_id
+ AND movement.movement_type = 'opening_float'
+WHERE shift.closed_at_epoch_ms IS NULL
+  AND movement.id IS NULL
+SQL
+     ))
+  (define noncontiguous-ledgers
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM (
+  SELECT shift_id, COUNT(*) AS movement_count,
+         MIN(movement_sequence) AS minimum_sequence,
+         MAX(movement_sequence) AS maximum_sequence
+  FROM shift_cash_movements
+  GROUP BY shift_id
+)
+WHERE minimum_sequence <> 1 OR maximum_sequence <> movement_count
+SQL
+     ))
+  (define inconsistent-reconciliations
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM shift_cash_reconciliations AS reconciliation
+JOIN register_shifts AS shift ON shift.shift_id = reconciliation.shift_id
+LEFT JOIN (
+  SELECT shift_id, SUM(amount_minor_units) AS expected_cash_minor_units
+  FROM shift_cash_movements
+  GROUP BY shift_id
+) AS ledger ON ledger.shift_id = reconciliation.shift_id
+WHERE shift.closed_at_epoch_ms IS NULL
+   OR ledger.expected_cash_minor_units IS NULL
+   OR reconciliation.expected_cash_minor_units <>
+        ledger.expected_cash_minor_units
+SQL
+     ))
+  (unless (zero? orphan-movements)
+    (error 'migrate-pos-database! "cash movements reference missing shifts"))
+  (unless (zero? orphan-reconciliations)
+    (error 'migrate-pos-database!
+           "cash reconciliations reference missing shifts"))
+  (unless (zero? tracked-without-one-opening)
+    (error 'migrate-pos-database!
+           "tracked shift cash ledgers require exactly one opening movement"))
+  (unless (zero? open-without-opening)
+    (error 'migrate-pos-database!
+           "open v6 shifts require an opening cash movement"))
+  (unless (zero? noncontiguous-ledgers)
+    (error 'migrate-pos-database!
+           "shift cash movement sequences must be contiguous from one"))
+  (unless (zero? inconsistent-reconciliations)
+    (error 'migrate-pos-database!
+           "shift cash reconciliation disagrees with shift or ledger state")))
+
+(define (validate-shift-cash-accountability-schema connection)
+  (validate-owned-table-schema
+   connection 6 "shift_cash_movements"
+   expected-shift-cash-movement-columns
+   create-shift-cash-movements-table-sql)
+  (validate-owned-table-schema
+   connection 6 "shift_cash_reconciliations"
+   expected-shift-cash-reconciliation-columns
+   create-shift-cash-reconciliations-table-sql)
+  (validate-owned-index-schema
+   connection 6 "shift_cash_movements_shift_sequence_unique"
+   create-shift-movement-sequence-index-sql)
+  (validate-owned-index-schema
+   connection 6 "shift_cash_movements_one_opening_unique"
+   create-shift-opening-index-sql)
+  (validate-owned-index-schema
+   connection 6 "shift_cash_movements_cash_sale_transaction_unique"
+   create-cash-sale-transaction-index-sql)
+  (validate-shift-cash-integrity connection))
+
 (define (apply-migration-1! connection)
   (db:query-exec connection create-events-table-sql)
   (db:query-exec connection create-stream-sequence-index-sql))
@@ -660,6 +895,19 @@ SQL
   (db:query-exec connection create-open-shift-index-sql)
   (db:query-exec connection create-active-transaction-index-sql))
 
+(define (apply-migration-6! connection)
+  (when (positive?
+         (db:query-value
+          connection
+          "SELECT COUNT(*) FROM register_shifts WHERE closed_at_epoch_ms IS NULL"))
+    (error 'migrate-pos-database!
+           "cash-accountability migration requires every v5 shift to be closed"))
+  (db:query-exec connection create-shift-cash-movements-table-sql)
+  (db:query-exec connection create-shift-cash-reconciliations-table-sql)
+  (db:query-exec connection create-shift-movement-sequence-index-sql)
+  (db:query-exec connection create-shift-opening-index-sql)
+  (db:query-exec connection create-cash-sale-transaction-index-sql))
+
 (define migrations
   (list
    (pos-database-migration 1
@@ -681,7 +929,11 @@ SQL
    (pos-database-migration 5
                            migration-5-name
                            apply-migration-5!
-                           validate-register-operations-schema)))
+                           validate-register-operations-schema)
+   (pos-database-migration 6
+                           migration-6-name
+                           apply-migration-6!
+                           validate-shift-cash-accountability-schema)))
 
 (define (migration-row-matches? row migration)
   (and (= (vector-length row) 2)

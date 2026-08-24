@@ -41,15 +41,46 @@ const withShift = RegisterContext(
   register: register,
   activeShift: activeShift,
 );
+const openCashSummary = ShiftCashSummary(
+  shiftId: 'shift-one',
+  status: ShiftCashStatus.open,
+  openingCashMinorUnits: 10000,
+  completedCashSaleCount: 0,
+  cashSalesMinorUnits: 0,
+  expectedCashMinorUnits: 10000,
+  countedCashMinorUnits: null,
+  overShortMinorUnits: null,
+);
+const closedCashSummary = ShiftCashSummary(
+  shiftId: 'shift-one',
+  status: ShiftCashStatus.closed,
+  openingCashMinorUnits: 10000,
+  completedCashSaleCount: 3,
+  cashSalesMinorUnits: 1000,
+  expectedCashMinorUnits: 77777,
+  countedCashMinorUnits: 80000,
+  overShortMinorUnits: -999,
+);
 
 final class FakeClient implements PosCoreClient {
   final Queue<RegisterContext> contexts = Queue();
+  final Queue<ShiftCashSummary> summaries = Queue();
   List<CashierIdentity> cashiers = const [cashier];
-  Future<RegisterShift> Function(String cashierId)? onOpen;
-  Future<RegisterShift> Function(String shiftId)? onClose;
+  Future<ShiftOperationResult> Function(
+    String cashierId,
+    int openingCashMinorUnits,
+  )?
+  onOpen;
+  Future<ShiftOperationResult> Function(
+    String shiftId,
+    int countedCashMinorUnits,
+  )?
+  onClose;
   int openCalls = 0;
   int closeCalls = 0;
   final List<String> openedCashierIds = [];
+  final List<int> openingCashValues = [];
+  final List<int> countedCashValues = [];
 
   @override
   Future<PosCoreHealth> fetchHealth() async => const PosCoreHealth(
@@ -67,17 +98,29 @@ final class FakeClient implements PosCoreClient {
   Future<List<CashierIdentity>> fetchActiveCashiers() async => cashiers;
 
   @override
-  Future<RegisterShift> openShift(String cashierId) {
+  Future<ShiftOperationResult> openShift(
+    String cashierId,
+    int openingCashMinorUnits,
+  ) {
     openCalls += 1;
     openedCashierIds.add(cashierId);
-    return onOpen!(cashierId);
+    openingCashValues.add(openingCashMinorUnits);
+    return onOpen!(cashierId, openingCashMinorUnits);
   }
 
   @override
-  Future<RegisterShift> closeShift(String shiftId) {
+  Future<ShiftOperationResult> closeShift(
+    String shiftId,
+    int countedCashMinorUnits,
+  ) {
     closeCalls += 1;
-    return onClose!(shiftId);
+    countedCashValues.add(countedCashMinorUnits);
+    return onClose!(shiftId, countedCashMinorUnits);
   }
+
+  @override
+  Future<ShiftCashSummary> fetchShiftCashSummary(String shiftId) async =>
+      summaries.removeFirst();
 
   @override
   Future<CanonicalReceipt> fetchReceipt(String transactionId) =>
@@ -142,26 +185,38 @@ void main() {
   testWidgets(
     'Open Shift selects identity once and disables duplicate submission',
     (tester) async {
-      final completer = Completer<RegisterShift>();
+      final completer = Completer<ShiftOperationResult>();
       final client = FakeClient()
         ..contexts.addAll([noShift, withShift])
-        ..onOpen = (_) => completer.future;
+        ..summaries.add(openCashSummary)
+        ..onOpen = (_, _) => completer.future;
       await tester.pumpWidget(app(client));
       await tester.pumpAndSettle();
       expect(find.text('Select Cashier'), findsOneWidget);
       expect(find.text('Alice'), findsOneWidget);
+      await tester.enterText(
+        find.byKey(const Key('opening-cash-input')),
+        '100.00',
+      );
       await tester.tap(find.text('Open Shift'));
       await tester.pump();
       expect(client.openCalls, 1);
       expect(client.openedCashierIds, ['cashier-one']);
+      expect(client.openingCashValues, [10000]);
       await tester.tap(find.text('Opening...'));
       await tester.pump();
       expect(client.openCalls, 1);
-      completer.complete(activeShift);
+      completer.complete(
+        const ShiftOperationResult(
+          shift: activeShift,
+          cashSummary: openCashSummary,
+        ),
+      );
       await tester.pumpAndSettle();
       expect(find.text('Shift Open'), findsOneWidget);
       expect(find.textContaining('Cashier: Alice'), findsOneWidget);
       expect(find.textContaining('1970-01-01 00:00:00 UTC'), findsOneWidget);
+      expect(find.textContaining('Opening Cash: \$100.00'), findsOneWidget);
       expect(find.text('Open Register'), findsOneWidget);
     },
   );
@@ -171,9 +226,13 @@ void main() {
     (tester) async {
       final client = FakeClient()
         ..contexts.add(noShift)
-        ..onOpen = (_) async => throw const PosCoreTransportFailure('lost');
+        ..onOpen = (_, _) async => throw const PosCoreTransportFailure('lost');
       await tester.pumpWidget(app(client));
       await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('opening-cash-input')),
+        '0.00',
+      );
       await tester.tap(find.text('Open Shift'));
       await tester.pumpAndSettle();
       expect(
@@ -192,7 +251,8 @@ void main() {
     (tester) async {
       final client = FakeClient()
         ..contexts.add(withShift)
-        ..onClose = (_) async => throw const PosCoreServerFailure(
+        ..summaries.add(openCashSummary)
+        ..onClose = (_, _) async => throw const PosCoreServerFailure(
           code: 'shift_has_active_transaction',
           message: 'safe',
           statusCode: 409,
@@ -201,10 +261,25 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Close Shift'));
       await tester.pumpAndSettle();
-      expect(find.text('Close shift?'), findsOneWidget);
-      await tester.tap(find.widgetWithText(FilledButton, 'Close Shift'));
+      expect(
+        find.text('Count all physical cash currently in the drawer.'),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const Key('closing-cash-input')))
+            .controller!
+            .text,
+        isEmpty,
+      );
+      await tester.enterText(
+        find.byKey(const Key('closing-cash-input')),
+        '100.00',
+      );
+      await tester.tap(find.widgetWithText(FilledButton, 'Reconcile & Close'));
       await tester.pumpAndSettle();
       expect(client.closeCalls, 1);
+      expect(client.countedCashValues, [10000]);
       expect(
         find.text('Finish or void the active sale before closing the shift.'),
         findsOneWidget,
@@ -228,19 +303,85 @@ void main() {
     );
     final client = FakeClient()
       ..contexts.addAll([withShift, noShift])
-      ..onClose = (_) async => closedShift;
+      ..summaries.add(openCashSummary)
+      ..onClose = (_, _) async => const ShiftOperationResult(
+        shift: closedShift,
+        cashSummary: closedCashSummary,
+      );
     await tester.pumpWidget(app(client));
     await tester.pumpAndSettle();
 
     await tester.tap(find.text('Close Shift'));
     await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(FilledButton, 'Close Shift'));
+    await tester.enterText(
+      find.byKey(const Key('closing-cash-input')),
+      '800.00',
+    );
+    await tester.tap(find.widgetWithText(FilledButton, 'Reconcile & Close'));
     await tester.pumpAndSettle();
 
     expect(client.closeCalls, 1);
+    expect(find.text('Shift Closed'), findsOneWidget);
+    expect(find.text('\$100.00'), findsOneWidget);
+    expect(find.text('\$10.00'), findsOneWidget);
+    expect(find.text('\$777.77'), findsOneWidget);
+    expect(find.text('\$800.00'), findsOneWidget);
+    expect(find.text('-\$9.99'), findsOneWidget);
+    expect(find.text('\$110.00'), findsNothing);
+    expect(find.text('\$22.23'), findsNothing);
+    await tester.tap(find.text('Done'));
+    await tester.pumpAndSettle();
     expect(find.text('Select Cashier'), findsOneWidget);
     expect(find.text('Open Shift'), findsOneWidget);
     expect(find.text('Open Register'), findsNothing);
     expect(find.text('Lookup Completed Sale'), findsOneWidget);
+  });
+
+  testWidgets('invalid opening syntax prevents operational write', (
+    tester,
+  ) async {
+    final client = FakeClient()..contexts.add(noShift);
+    await tester.pumpWidget(app(client));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('opening-cash-input')),
+      '1.999',
+    );
+    await tester.tap(find.text('Open Shift'));
+    await tester.pump();
+    expect(client.openCalls, 0);
+    expect(find.text('Enter a valid opening cash amount.'), findsOneWidget);
+  });
+
+  testWidgets('close uncertainty recovers immutable reconciliation by read', (
+    tester,
+  ) async {
+    final client = FakeClient()
+      ..contexts.addAll([withShift, noShift])
+      ..summaries.addAll([openCashSummary, closedCashSummary])
+      ..onClose = (_, _) async => throw const PosCoreTransportFailure('lost');
+    await tester.pumpWidget(app(client));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Close Shift'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('closing-cash-input')),
+      '800.00',
+    );
+    await tester.tap(find.widgetWithText(FilledButton, 'Reconcile & Close'));
+    await tester.pumpAndSettle();
+    expect(find.text('Shift Closed'), findsNothing);
+    expect(
+      find.text(
+        'Close Shift result could not be confirmed. Refresh Register State.',
+      ),
+      findsOneWidget,
+    );
+    await tester.ensureVisible(find.text('Refresh Register State'));
+    await tester.tap(find.text('Refresh Register State'));
+    await tester.pumpAndSettle();
+    expect(client.closeCalls, 1);
+    expect(find.text('Shift Closed'), findsOneWidget);
+    expect(find.text('-\$9.99'), findsOneWidget);
   });
 }

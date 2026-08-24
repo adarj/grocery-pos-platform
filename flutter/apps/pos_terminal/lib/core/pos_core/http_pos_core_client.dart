@@ -211,25 +211,70 @@ final class HttpPosCoreClient implements PosCoreClient {
   }
 
   @override
-  Future<RegisterShift> openShift(String cashierId) async {
+  Future<ShiftOperationResult> openShift(
+    String cashierId,
+    int openingCashMinorUnits,
+  ) async {
     if (cashierId.isEmpty) {
       throw ArgumentError.value(cashierId, 'cashierId', 'must not be empty');
     }
+    if (openingCashMinorUnits < 0) {
+      throw ArgumentError.value(
+        openingCashMinorUnits,
+        'openingCashMinorUnits',
+        'must be nonnegative',
+      );
+    }
+    return _operationalShiftWrite('/shifts/open', <String, Object?>{
+      'cashier_id': cashierId,
+      'opening_cash_minor_units': openingCashMinorUnits,
+    });
+  }
+
+  @override
+  Future<ShiftOperationResult> closeShift(
+    String shiftId,
+    int countedCashMinorUnits,
+  ) async {
+    if (shiftId.isEmpty) {
+      throw ArgumentError.value(shiftId, 'shiftId', 'must not be empty');
+    }
+    if (countedCashMinorUnits < 0) {
+      throw ArgumentError.value(
+        countedCashMinorUnits,
+        'countedCashMinorUnits',
+        'must be nonnegative',
+      );
+    }
     return _operationalShiftWrite(
-      '/shifts/open',
-      <String, Object?>{'cashier_id': cashierId},
+      '/shifts/${Uri.encodeComponent(shiftId)}/close',
+      <String, Object?>{'counted_cash_minor_units': countedCashMinorUnits},
     );
   }
 
   @override
-  Future<RegisterShift> closeShift(String shiftId) async {
+  Future<ShiftCashSummary> fetchShiftCashSummary(String shiftId) async {
     if (shiftId.isEmpty) {
       throw ArgumentError.value(shiftId, 'shiftId', 'must not be empty');
     }
-    return _operationalShiftWrite(
-      '/shifts/${Uri.encodeComponent(shiftId)}/close',
-      const <String, Object?>{},
+    final body = await _successfulQueryObject(
+      await _get(
+        baseUri.resolve('/shifts/${Uri.encodeComponent(shiftId)}/cash-summary'),
+      ),
+      'shift cash summary response',
     );
+    final summary = ShiftCashSummary.fromJson(
+      expectJsonObject(
+        requireJsonField(body, 'cash_summary', 'shift cash summary response'),
+        'shift cash summary response cash_summary',
+      ),
+    );
+    if (summary.shiftId != shiftId) {
+      throw const PosCoreInvalidResponseFailure(
+        'Shift cash summary identity does not match the request.',
+      );
+    }
+    return summary;
   }
 
   void close() {
@@ -278,7 +323,7 @@ final class HttpPosCoreClient implements PosCoreClient {
     throw PosCoreInvalidResponseFailure('$context is inconsistent.');
   }
 
-  Future<RegisterShift> _operationalShiftWrite(
+  Future<ShiftOperationResult> _operationalShiftWrite(
     String path,
     Map<String, Object?> requestBody,
   ) async {
@@ -286,12 +331,7 @@ final class HttpPosCoreClient implements PosCoreClient {
       await _postReadRecoverable(baseUri.resolve(path), requestBody),
       'shift operation response',
     );
-    return RegisterShift.fromJson(
-      expectJsonObject(
-        requireJsonField(body, 'shift', 'shift operation response'),
-        'shift operation response shift',
-      ),
-    );
+    return ShiftOperationResult.fromJson(body);
   }
 
   Future<http.Response> _postCommand(TransactionCommand command) async {

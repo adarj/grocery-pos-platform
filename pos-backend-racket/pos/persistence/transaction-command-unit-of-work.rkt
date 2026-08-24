@@ -8,7 +8,8 @@
          "transaction-command-receipt-store.rkt")
 
 (provide (struct-out transaction-command-commit-plan)
-         transaction-command-commit-plan-with-operational-effect
+         transaction-command-commit-plan-with-pre-append-effect
+         transaction-command-commit-plan-with-post-append-effect
          (struct-out transaction-command-operational-effect-succeeded)
          (struct-out transaction-command-operational-effect-rejected)
          (struct-out transaction-command-operational-effect-failed)
@@ -27,7 +28,8 @@
    outcome-kind
    outcome-code
    events
-   [operational-effect #:auto #:mutable])
+   [pre-append-effect #:auto #:mutable]
+   [post-append-effect #:auto #:mutable])
   #:auto-value #f
   #:transparent
   #:guard
@@ -77,25 +79,39 @@
 ;; Operational coordination is attached only by application composition after
 ;; the ordinary transaction decision has produced a valid plan. The effect is
 ;; invoked inside the same BEGIN IMMEDIATE boundary as event and receipt writes.
-(define (transaction-command-commit-plan-with-operational-effect plan effect)
+(define (set-operational-effect! who plan effect setter)
   (unless (transaction-command-commit-plan? plan)
     (raise-argument-error
-     'transaction-command-commit-plan-with-operational-effect
+     who
      "transaction-command-commit-plan?"
      plan))
   (unless (and (procedure? effect) (procedure-arity-includes? effect 1))
     (raise-argument-error
-     'transaction-command-commit-plan-with-operational-effect
+     who
      "one-argument-procedure?"
      effect))
   (unless (eq? (transaction-command-commit-plan-outcome-kind plan) 'accepted)
     (raise-arguments-error
-     'transaction-command-commit-plan-with-operational-effect
+     who
      "operational effects are valid only for accepted provisional plans"
      "outcome kind"
      (transaction-command-commit-plan-outcome-kind plan)))
-  (set-transaction-command-commit-plan-operational-effect! plan effect)
+  (setter plan effect)
   plan)
+
+(define (transaction-command-commit-plan-with-pre-append-effect plan effect)
+  (set-operational-effect!
+   'transaction-command-commit-plan-with-pre-append-effect
+   plan
+   effect
+   set-transaction-command-commit-plan-pre-append-effect!))
+
+(define (transaction-command-commit-plan-with-post-append-effect plan effect)
+  (set-operational-effect!
+   'transaction-command-commit-plan-with-post-append-effect
+   plan
+   effect
+   set-transaction-command-commit-plan-post-append-effect!))
 
 (struct transaction-command-operational-effect-succeeded () #:transparent)
 (struct transaction-command-operational-effect-rejected
@@ -206,7 +222,7 @@
       insert-receipt!)]
     [(eq? (transaction-command-commit-plan-outcome-kind plan) 'accepted)
      (define effect
-       (transaction-command-commit-plan-operational-effect plan))
+       (transaction-command-commit-plan-pre-append-effect plan))
      (define effect-result
        (if effect
            (effect connection)
@@ -238,14 +254,40 @@
            prepared-events))
         (cond
           [(journal-append-succeeded? append-result)
-           (resolved-after-insert
-            connection
-            (transaction-command-receipt
-             command
-             'accepted
-             (transaction-command-commit-plan-outcome-code plan)
-             (journal-append-succeeded-new-version append-result))
-            insert-receipt!)]
+           (define post-effect
+             (transaction-command-commit-plan-post-append-effect plan))
+           (define post-result
+             (if post-effect
+                 (post-effect connection)
+                 (transaction-command-operational-effect-succeeded)))
+           (cond
+             [(transaction-command-operational-effect-succeeded? post-result)
+              (resolved-after-insert
+               connection
+               (transaction-command-receipt
+                command
+                'accepted
+                (transaction-command-commit-plan-outcome-code plan)
+                (journal-append-succeeded-new-version append-result))
+               insert-receipt!)]
+             [(transaction-command-operational-effect-failed? post-result)
+              (abort-transaction!
+               (transaction-command-commit-failed
+                (transaction-command-operational-effect-failed-code post-result)
+                (transaction-command-operational-effect-failed-detail post-result)
+                (transaction-command-operational-effect-failed-message post-result)))]
+             [(transaction-command-operational-effect-rejected? post-result)
+              (abort-transaction!
+               (transaction-command-commit-failed
+                'post-append-operational-rejection
+                (transaction-command-operational-effect-rejected-outcome-code
+                 post-result)
+                "post-append operational state rejected an already-decided command"))]
+             [else
+              (error
+               'commit-transaction-command-outcome!
+               "post-append operational effect returned an unsupported result: ~e"
+               post-result)])]
           [(journal-append-rejected? append-result)
            (abort-transaction!
             (transaction-command-commit-failed

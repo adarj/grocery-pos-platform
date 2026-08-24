@@ -100,24 +100,30 @@ never activates it automatically at startup.
 
 ## Shift lifecycle
 
-`POST /shifts/open` accepts only a `cashier_id`. POS Core resolves the current
+`POST /shifts/open` accepts a `cashier_id` and exact nonnegative integer
+`opening_cash_minor_units`. POS Core resolves the current
 register and active cashier, generates a cryptographically random `shift_...`
 ID, records an exact UTC Unix epoch-millisecond open time, and snapshots the
-current display names. An inactive or unknown cashier cannot open a shift.
+current display names. The shift and immutable sequence-1 opening movement
+commit atomically. An inactive or unknown cashier cannot open a shift.
 
-Repeating open for the same cashier returns the existing open shift. An open
+Repeating open for the same cashier returns the existing open shift and its
+original cash summary without changing the opening amount. An open
 shift for a different cashier returns `shift_already_open`. This resource
 idempotence supports lost-response recovery without adding Transaction Command
 Schema receipts to shift operations.
 
-`POST /shifts/{shift_id}/close` accepts an exact empty object. Closing an idle
-shift records `closed_at_epoch_ms`; repeating close returns the already-closed
-shift. A shift with an active transaction returns
+`POST /shifts/{shift_id}/close` accepts exact nonnegative integer
+`counted_cash_minor_units`. Closing an idle shift validates its cash ledger,
+derives expected cash, and records signed over/short atomically with
+`closed_at_epoch_ms`. Repeating close returns the first durable reconciliation
+without changing it. A shift with an active transaction returns
 `shift_has_active_transaction` and is not changed.
 
 Open/close transport uncertainty is recovered by explicitly reading
-`GET /register-context`. Flutter never puts shift writes into its transaction
-command recovery file and never labels them `Retry Command`.
+`GET /register-context` and `GET /shifts/{shift_id}/cash-summary`. Flutter never
+puts shift writes into its transaction command recovery file and never labels
+them `Retry Command`. See [Shift Cash Accountability](cash-accountability.md).
 
 ## Active transaction slot and atomicity
 
@@ -127,7 +133,7 @@ start only in that state. The transaction command unit of work uses one
 
 ```text
 start:    transaction_started v2 + command receipt + claim shift slot
-complete: transaction_completed v2 + command receipt + release shift slot
+complete: transaction_completed v2 + cash_sale movement + command receipt + release shift slot
 void:     transaction_voided v2 + command receipt + release shift slot
 ```
 
@@ -165,13 +171,17 @@ GET  /register-context
 GET  /cashiers
 POST /shifts/open
 POST /shifts/{shift_id}/close
+GET  /shifts/{shift_id}/cash-summary
 ```
 
 The connected Flutter home renders unconfigured, configured/no-shift, and
-active-shift states. With no shift it lists only active cashier references and
-offers `Open Shift`. With an active shift it presents register, cashier, shift
-ID, UTC open time, `Open Register`, completed-sale lookup, and confirmed shift
-close. Backend enforcement remains authoritative if Flutter state is stale.
+active-shift states. With no shift it lists active cashier references, accepts
+exact opening cash, and offers `Open Shift`. With an active shift it presents
+register, cashier, shift ID, UTC open time, backend opening cash,
+`Open Register`, completed-sale lookup, and close reconciliation. The physical
+closing count is not prefilled with expected cash, and all reconciliation
+values are rendered from the backend. Backend enforcement remains authoritative
+if Flutter state is stale.
 
 Cashier selection is attribution only. There is no PIN, password, role,
 manager approval, lockout, or authentication claim.
@@ -179,6 +189,6 @@ manager approval, lockout, or authentication claim.
 ## Deliberately deferred
 
 This model does not define employee authentication, store/address identity,
-roles, opening cash, drawer counts, expected cash, cash drops, over/short,
-breaks, payroll/timeclock behavior, receipt numbering, broad transaction
-search, or cloud employee synchronization.
+roles, cash drops, paid-outs, refunds, manager variance approval, drawer
+hardware, breaks, payroll/timeclock behavior, receipt numbering, broad
+transaction search, or cloud employee synchronization.

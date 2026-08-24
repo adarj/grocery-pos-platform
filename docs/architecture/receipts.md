@@ -126,6 +126,10 @@ opposite combination, fails closed rather than silently downgrading to v1.
 Flutter parses both versions. It displays v2 register, cashier, shift, and UTC
 completion time; it invents no placeholders for v1.
 
+Shift opening cash, drawer movements, expected cash, and close reconciliation
+remain shift-level operational facts. They are not customer receipt fields and
+do not change Receipt Schema v1 or v2.
+
 ## Corrections and line order
 
 Receipt lines are the final retained transaction lines after replaying every

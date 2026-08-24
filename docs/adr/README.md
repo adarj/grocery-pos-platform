@@ -22,3 +22,4 @@ ADRs document important architectural decisions, their context, and their conseq
 - [ADR-0014: Represent cashier corrections as append-only transaction events](0014-represent-cashier-corrections-as-append-only-transaction-events.md)
 - [ADR-0015: Derive canonical receipts from completed transaction replay](0015-derive-canonical-receipts-from-completed-transaction-replay.md)
 - [ADR-0016: Snapshot register, cashier, shift, and operational time in transaction history](0016-snapshot-register-cashier-shift-and-operational-time.md)
+- [ADR-0017: Use an append-only shift cash ledger for drawer accountability](0017-use-an-append-only-shift-cash-ledger-for-drawer-accountability.md)

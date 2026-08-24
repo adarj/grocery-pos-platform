@@ -24,7 +24,8 @@ are governed by
 - reading current authoritative transaction state;
 - reading a canonical completed-sale receipt by exact transaction ID;
 - reading configured register/active-shift context and active cashier choices;
-- explicitly opening and closing a register shift.
+- explicitly opening and reconciling/closing a register shift;
+- reading authoritative shift cash summaries.
 
 Widgets do not receive raw `http.Response` values or package HTTP exceptions.
 Flutter owns presentation and cashier intent orchestration; it does not
@@ -210,17 +211,32 @@ database shows `Register configuration required`, points to the explicit CLI
 workflow, blocks `Open Register`, and still permits historical receipt lookup.
 Flutter does not create a default identity.
 
-A configured register with no shift loads the active cashier directory and
-offers `Select Cashier` / `Open Shift`. The request sends only the exact
-cashier ID. While it is pending the action cannot be submitted again. Transport
+A configured register with no shift loads the active cashier directory,
+accepts exact opening cash through the shared integer-only money parser, and
+offers `Select Cashier` / `Open Shift`. The request sends the exact cashier ID
+and nonnegative opening minor units. While it is pending the action cannot be submitted again. Transport
 uncertainty offers `Refresh Register State`; it never enters transaction
 same-command recovery.
 
 An active shift displays its snapshotted register/cashier names, opaque shift
-ID, and explicitly UTC open time. It enables `Open Register`, receipt lookup,
-and confirmed `Close Shift`. An active-sale close rejection tells the operator
-to finish or void the sale; Flutter never abandons transaction state to force
-closure. A successful close refreshes into cashier selection.
+ID, explicitly UTC open time, and backend opening cash. It enables
+`Open Register`, receipt lookup, and a close-reconciliation workflow. The
+cashier enters an independent physical count; expected cash is not prefilled.
+An active-sale close rejection tells the operator to finish or void the sale;
+Flutter never abandons transaction state to force closure. Success first shows
+the authoritative opening, sales, expected, counted, and signed over/short
+values, then `Done` returns to cashier selection.
+
+`ShiftCashSummary` strictly parses nonnegative opening/sales/expected/count
+fields, a nonnegative completed-sale count, explicit open/closed status, and a
+signed variance only for a closed reconciliation. Widgets render those values
+independently even if they appear arithmetically surprising. Flutter never
+calculates expected cash or over/short.
+
+An uncertain open or close is recovered through `GET /register-context` and
+`GET /shifts/{shift_id}/cash-summary`; Flutter does not automatically repeat the
+write. A closed summary recovers the durable result after response loss. No
+cash summary or reconciliation is added to `CashierSessionStore`.
 
 The operational models and client parse exact nonnegative epoch milliseconds,
 strict identity fields, and valid configured/shift nullability. Operational
@@ -457,11 +473,14 @@ and proves that replacing the current persistent catalog/tax snapshot cannot
 change an old receipt's sale-time facts.
 
 Operational scenarios additionally prove configured/no-shift startup,
-same-cashier shift open, active-transaction close protection, slot release on
-completion/void, Receipt v2 attribution, shift/transaction binding across POS
-Core restart, and historical identity stability after configuration rename.
-The ten-cycle endurance run uses one shift and closes it only after its final
-terminal sale.
+same-cashier shift open with immutable opening cash, active-transaction close
+protection, exact net sale movements, duplicate-completion defense, correction
+and void cash behavior, exact and shortage reconciliation, close-response read
+recovery, Receipt v2 attribution, shift/transaction binding across POS Core
+restart, and historical identity stability after configuration rename. The
+mixed ten-transaction endurance run uses one shift, reconciles only completed
+sales, records a deliberate overage, and verifies the closed summary after
+restart.
 
 These tests remain outside ordinary `flutter test` discovery. The fast Flutter
 unit/widget suite continues to use deterministic clients, while
@@ -474,9 +493,9 @@ and diagnostics are documented in
 This slice does not implement automatic retry, retry timers, cached/offline
 transaction truth, quantity editing, post-payment refund/reversal, split
 tender, card/external payment behavior, receipt printing, receipt numbering or
-date/recent-sale search, or drawer behavior.
-It also does not implement employee authentication, PINs/passwords, roles,
-manager authorization, opening cash, drawer counts, or shift reconciliation.
+date/recent-sale search, drawer hardware, cash drops, paid-outs, refunds, or
+general accounting reports. It also does not implement employee authentication,
+PINs/passwords, roles, manager authorization, or variance approval.
 Current recovery payloads may contain an opaque barcode, integer cash amount,
 or nonnegative removal line index; void and lifecycle commands have empty
 payloads. The recovery record is never logged.

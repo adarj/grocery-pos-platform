@@ -8,7 +8,8 @@
          register-operations-load-context
          register-operations-list-active-cashiers
          register-operations-open-shift
-         register-operations-close-shift)
+         register-operations-close-shift
+         register-operations-load-cash-summary)
 
 (struct register-operations-service
   (connection current-epoch-ms generate-shift-id)
@@ -43,17 +44,25 @@
   (load-active-cashiers
    (register-operations-service-connection service)))
 
-(define (register-operations-open-shift service cashier-id)
+(define (register-operations-open-shift service cashier-id opening-cash)
   (check-service 'register-operations-open-shift service)
   (open-register-shift!
    (register-operations-service-connection service)
    cashier-id
+   opening-cash
    (register-operations-service-current-epoch-ms service)
    (register-operations-service-generate-shift-id service)))
 
-(define (register-operations-close-shift service shift-id)
+(define (register-operations-close-shift service shift-id counted-cash)
   (check-service 'register-operations-close-shift service)
   (close-register-shift!
    (register-operations-service-connection service)
    shift-id
+   counted-cash
    (register-operations-service-current-epoch-ms service)))
+
+(define (register-operations-load-cash-summary service shift-id)
+  (check-service 'register-operations-load-cash-summary service)
+  (load-shift-cash-summary
+   (register-operations-service-connection service)
+   shift-id))

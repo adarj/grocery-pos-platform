@@ -103,3 +103,9 @@ This decision does not define PIN/password authentication, roles, manager
 approval, store/address identity, payroll/timeclock behavior, breaks, opening
 cash, drawer counts, expected cash, over/short, cash drops, receipt numbering,
 broad transaction search, refunds, or cloud employee synchronization.
+
+## Subsequent decision
+
+ADR-0017 adds opening cash, completed-sale cash movements, and immutable shift
+close reconciliation. It builds on this shift lifecycle without changing the
+identity-attribution, timestamp, or transaction/shift coupling decisions above.

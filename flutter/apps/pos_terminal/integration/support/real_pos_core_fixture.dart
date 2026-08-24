@@ -11,11 +11,14 @@ final class RealPosCoreFixture {
     required this.temporaryDirectory,
   });
 
-  static const _startupTimeout = Duration(seconds: 15);
+  // Racket startup and CLI activation include migration validation. Keep their
+  // bounds generous enough for a loaded development/CI host while polling and
+  // teardown remain independently bounded.
+  static const _startupTimeout = Duration(seconds: 30);
   static const _healthAttemptTimeout = Duration(milliseconds: 400);
   static const _healthPollInterval = Duration(milliseconds: 50);
   static const _shutdownTimeout = Duration(seconds: 5);
-  static const _referenceDataActivationTimeout = Duration(seconds: 15);
+  static const _referenceDataActivationTimeout = Duration(seconds: 30);
 
   static Future<RealPosCoreFixture> create() async {
     final repositoryRoot = await _findRepositoryRoot(Directory.current);

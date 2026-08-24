@@ -116,17 +116,39 @@
 
   (test-case "open validates strictly and safely repeats same cashier"
     (define malformed
-      (post app "/shifts/open" (hasheq 'cashier_id "active" 'extra #t)))
+      (post app "/shifts/open"
+            (hasheq 'cashier_id "active"
+                    'opening_cash_minor_units 10000
+                    'extra #t)))
     (check-equal? (response-code malformed) 400)
+    (for ([invalid (in-list (list -1 1.5 "10000"))])
+      (check-equal?
+       (response-code
+        (post app "/shifts/open"
+              (hasheq 'cashier_id "active"
+                      'opening_cash_minor_units invalid)))
+       400))
     (define inactive
-      (post app "/shifts/open" (hasheq 'cashier_id "inactive")))
+      (post app "/shifts/open"
+            (hasheq 'cashier_id "inactive"
+                    'opening_cash_minor_units 10000)))
     (check-equal? (response-code inactive) 409)
     (check-equal? (error-code inactive) "cashier_inactive")
-    (define opened (post app "/shifts/open" (hasheq 'cashier_id "active")))
+    (define opened
+      (post app "/shifts/open"
+            (hasheq 'cashier_id "active"
+                    'opening_cash_minor_units 10000)))
     (check-equal? (response-code opened) 200)
     (check-equal? (hash-ref (hash-ref (body opened) 'shift) 'shift_id)
                   "shift-one")
-    (define repeated (post app "/shifts/open" (hasheq 'cashier_id "active")))
+    (check-equal?
+     (hash-ref (hash-ref (body opened) 'cash_summary)
+               'opening_cash_minor_units)
+     10000)
+    (define repeated
+      (post app "/shifts/open"
+            (hasheq 'cashier_id "active"
+                    'opening_cash_minor_units 999)))
     (check-equal? (response-code repeated) 200)
     (check-equal? (body repeated) (body opened)))
 
@@ -170,18 +192,44 @@
     (db:query-exec
      connection
      "UPDATE register_shifts SET active_transaction_id = 'txn-one' WHERE shift_id = 'shift-one'")
-    (define blocked (post app "/shifts/shift-one/close" (hasheq)))
+    (define blocked
+      (post app "/shifts/shift-one/close"
+            (hasheq 'counted_cash_minor_units 10000)))
     (check-equal? (response-code blocked) 409)
     (check-equal? (error-code blocked) "shift_has_active_transaction")
     (db:query-exec
      connection
      "UPDATE register_shifts SET active_transaction_id = NULL WHERE shift_id = 'shift-one'")
-    (define closed (post app "/shifts/shift-one/close" (hasheq)))
+    (define before-close
+      (app (request* #"GET" "/shifts/shift-one/cash-summary")))
+    (check-equal? (response-code before-close) 200)
+    (check-equal?
+     (hash-ref (hash-ref (body before-close) 'cash_summary) 'status)
+     "open")
+    (check-equal?
+     (hash-ref (hash-ref (body before-close) 'cash_summary)
+               'expected_cash_minor_units)
+     10000)
+    (for ([invalid (in-list (list -1 1.5 "10000"))])
+      (check-equal?
+       (response-code
+        (post app "/shifts/shift-one/close"
+              (hasheq 'counted_cash_minor_units invalid)))
+       400))
+    (define closed
+      (post app "/shifts/shift-one/close"
+            (hasheq 'counted_cash_minor_units 9975)))
     (check-equal? (response-code closed) 200)
     (check-equal? (hash-ref (hash-ref (body closed) 'shift)
                             'closed_at_epoch_ms)
                   2000)
-    (define repeated (post app "/shifts/shift-one/close" (hasheq)))
+    (define closed-summary (hash-ref (body closed) 'cash_summary))
+    (check-equal? (hash-ref closed-summary 'status) "closed")
+    (check-equal? (hash-ref closed-summary 'counted_cash_minor_units) 9975)
+    (check-equal? (hash-ref closed-summary 'over_short_minor_units) -25)
+    (define repeated
+      (post app "/shifts/shift-one/close"
+            (hasheq 'counted_cash_minor_units 10000)))
     (check-equal? (response-code repeated) 200)
     (check-equal? (body repeated) (body closed)))
 
@@ -190,6 +238,10 @@
       (check-equal? (response-code (app (request* #"POST" path #"{}"))) 405))
     (check-equal? (response-code (app (request* #"GET" "/shifts/open"))) 405)
     (check-equal?
-     (response-code (app (request* #"GET" "/shifts/shift-one/close"))) 405))
+     (response-code (app (request* #"GET" "/shifts/shift-one/close"))) 405)
+    (check-equal?
+     (response-code
+      (app (request* #"POST" "/shifts/shift-one/cash-summary" #"{}")))
+     405))
 
   (db:disconnect connection))

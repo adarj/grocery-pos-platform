@@ -142,6 +142,8 @@ Verified capabilities currently include:
 * migration v5 current register/cashier configuration and durable shifts with
   one active-transaction slot, POS-Core-recorded epoch-millisecond times, and
   historical identity snapshotting;
+* migration v6 append-only opening/completed-sale cash movements and immutable
+  shift close reconciliation with exact signed over/short;
 * idempotent persistent transaction application service with deterministic
   two-connection concurrency and file-backed restart/retry coverage;
 * Racket runtime composition with startup migration, a bounded SQLite pool,
@@ -153,14 +155,15 @@ Verified capabilities currently include:
 * Flutter Linux ARM64 POS terminal;
 * typed Flutter POS Core client models for transaction commands, durable command
   outcomes, authoritative transaction snapshots, Receipt Schemas v1/v2,
-  register/shift context, and safe failures;
+  register/shift context, authoritative shift cash summaries, and safe failures;
 * Flutter cashier session orchestration and a
   start/scan/remove/void/cash-tender/complete interface rendering authoritative
   basket, subtotal, tax, total, payment, and change;
 * Flutter widget tests;
 * isolated Flutter-to-Racket real-process integration tests covering complete
-  cash sales, restart recovery, uncertain transport, and durable same-command
-  receipt resolution under a real persistent shift;
+  cash sales, restart recovery, uncertain transport, durable same-command
+  receipt resolution, net drawer movements, shift reconciliation, and mixed
+  one-shift endurance;
 * Flutter-to-Racket local health connection;
 * nixGL-based Flutter GUI launch in the current VM environment;
 * GitHub Actions workflow definitions for scaffold/Nix validation, Racket

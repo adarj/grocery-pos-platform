@@ -70,12 +70,16 @@ prove the old receipt still uses sale-time journal facts. Replacement is
 scenario-controlled; ordinary fixture restart never re-seeds the catalog.
 
 Operational scenarios start from configured/no-shift state, list the active
-development cashier, and open a real shift through HTTP. They verify transaction
-slot claim/release, close rejection during an active sale, void-then-close,
-active binding across POS Core restart, and historical Receipt v2 attribution
-after current register/cashier names are replaced. The bounded ten-sale cycle
-uses one shift for all transactions and closes it after the final completed
-sale.
+development cashier, and open a real shift with exact opening cash through
+HTTP. They verify transaction slot claim/release, close rejection during an
+active sale, transaction-total cash movements, same-ID completion
+deduplication, correction and void cash effects, exact and shortage
+reconciliation, response-loss recovery by cash-summary GET, active binding
+across POS Core restart, and historical Receipt v2 attribution after current
+register/cashier names are replaced. The mixed ten-transaction cycle uses one
+shift, includes repeated scans/correction/void, reconciles only completed
+sales, closes with a deliberate overage, and verifies the immutable summary
+after restart.
 
 If catalog activation fails, the fixture fails before starting the server and
 reports bounded CLI output. The fixture activates Catalog Snapshot Schema v2,

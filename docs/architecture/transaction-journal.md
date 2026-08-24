@@ -100,12 +100,19 @@ values and hold the single-register active-transaction coordination slot; they
 are operational durability, not transaction truth. See
 [Register Operations and Shift Context](register-operations.md).
 
+Migration version 6, `create_shift_cash_accountability`, adds append-only shift
+cash movements and immutable close reconciliation. It does not change
+transaction events, command receipts, catalog/tax tables, or migration-5 shift
+DDL. A v5 open shift blocks upgrade rather than receiving fabricated opening
+cash; closed v5 shifts remain explicitly untracked. See
+[Shift Cash Accountability](cash-accountability.md).
+
 The migration runner treats recorded history as an exact prefix of the known
-ordered migration list. A fresh database applies versions 1 through 5. Real
+ordered migration list. A fresh database applies versions 1 through 6. Real
 v1/v2 databases upgrade through the remaining sequence, while a real v3
 database preserves its merchandise rows and receives zero-tax mappings. A
 correct v4 database gains empty operational tables, and a correct v5 database
-is validated without schema mutation. Unknown, skipped, reordered,
+with no open shift gains empty cash-accountability tables. Unknown, skipped, reordered,
 renamed, or drifted migration state fails rather than being silently repaired.
 
 Table creation is not hidden inside append or load. Application composition is
@@ -202,11 +209,13 @@ inside a larger caller-owned transaction.
 The transaction-command unit of work now uses that composition seam. It
 serializes accepted events before reserving the writer, then uses one
 `BEGIN IMMEDIATE` for the final command-ID lookup, stream-version check, event
-append, receipt insertion, and any required shift-slot claim/release. A
+append, receipt insertion, and any required shift-slot claim/release or
+completed-sale cash movement. A
 receipt-only deterministic outcome uses the
 same writer transaction without appending a transaction fact. If the receipt
 cannot be inserted after events were written, or an operational effect fails,
-the callback aborts so event, receipt, and shift state roll back together.
+the callback aborts so event, receipt, cash movement, and shift state roll back
+together.
 
 `transaction-stream-version/in-transaction` exposes the same current-version
 query to this persistence composition and requires an active caller-owned

@@ -3,6 +3,7 @@
 (require (prefix-in db: db)
          rackunit
          "../pos/application/register-operations-service.rkt"
+         "../pos/domain/money.rkt"
          "../pos/domain/register-operations.rkt"
          "../pos/persistence/operational-configuration-snapshot-codec.rkt"
          "../pos/persistence/pos-database-migrations.rkt"
@@ -85,7 +86,7 @@ JSON
 
        (define service (make-service connection '(1000 2000) '("shift_one")))
        (define opened
-         (register-operations-open-shift service "cashier-alice"))
+         (register-operations-open-shift service "cashier-alice" (money 0)))
        (check-pred register-shift-opened? opened)
        (define shift (register-shift-opened-shift opened))
        (check-equal? (register-shift-shift-id shift) "shift_one")
@@ -107,7 +108,7 @@ JSON
 
        (check-pred
         register-shift-closed?
-        (register-operations-close-shift service "shift_one"))
+        (register-operations-close-shift service "shift_one" (money 0)))
        (check-pred
         operational-configuration-activation-succeeded?
         (activate-operational-configuration!
@@ -126,17 +127,17 @@ JSON
      (lambda (connection)
        (define service (make-service connection '(1000) '("unused")))
        (define unconfigured
-         (register-operations-open-shift service "cashier-alice"))
+         (register-operations-open-shift service "cashier-alice" (money 0)))
        (check-equal? (register-shift-open-rejected-code unconfigured)
                      'register-not-configured)
        (activate-operational-configuration! connection (snapshot config-json))
        (check-equal?
         (register-shift-open-rejected-code
-         (register-operations-open-shift service "cashier-missing"))
+         (register-operations-open-shift service "cashier-missing" (money 0)))
         'cashier-not-found)
        (check-equal?
         (register-shift-open-rejected-code
-         (register-operations-open-shift service "cashier-old"))
+         (register-operations-open-shift service "cashier-old" (money 0)))
         'cashier-inactive))))
 
   (test-case "open is same-cashier idempotent and different-cashier exclusive"
@@ -145,14 +146,14 @@ JSON
        (activate-operational-configuration! connection (snapshot config-json))
        (define service (make-service connection '(1000) '("shift_exact")))
        (define first
-         (register-operations-open-shift service "cashier-alice"))
+         (register-operations-open-shift service "cashier-alice" (money 0)))
        (define repeated
-         (register-operations-open-shift service "cashier-alice"))
+         (register-operations-open-shift service "cashier-alice" (money 999)))
        (check-pred register-shift-opened? repeated)
        (check-equal? (register-shift-opened-shift repeated)
                      (register-shift-opened-shift first))
        (define conflict
-         (register-operations-open-shift service "cashier-bob"))
+         (register-operations-open-shift service "cashier-bob" (money 0)))
        (check-pred register-shift-open-rejected? conflict)
        (check-equal? (register-shift-open-rejected-code conflict)
                      'shift-already-open)
@@ -166,12 +167,12 @@ JSON
        (activate-operational-configuration! connection (snapshot config-json))
        (define service
          (make-service connection '(1000 2000) '("shift_close")))
-       (register-operations-open-shift service "cashier-alice")
+       (register-operations-open-shift service "cashier-alice" (money 0))
        (db:query-exec
         connection
         "UPDATE register_shifts SET active_transaction_id = 'txn-active' WHERE shift_id = 'shift_close'")
        (define blocked
-         (register-operations-close-shift service "shift_close"))
+         (register-operations-close-shift service "shift_close" (money 0)))
        (check-pred register-shift-close-rejected? blocked)
        (check-equal? (register-shift-close-rejected-code blocked)
                      'shift-has-active-transaction)
@@ -179,20 +180,20 @@ JSON
         connection
         "UPDATE register_shifts SET active_transaction_id = NULL WHERE shift_id = 'shift_close'")
        (define closed
-         (register-operations-close-shift service "shift_close"))
+         (register-operations-close-shift service "shift_close" (money 0)))
        (check-pred register-shift-closed? closed)
        (check-equal?
         (register-shift-closed-at-epoch-ms
          (register-shift-closed-shift closed))
         2000)
        (define repeated
-         (register-operations-close-shift service "shift_close"))
+         (register-operations-close-shift service "shift_close" (money 5)))
        (check-pred register-shift-closed? repeated)
        (check-equal? (register-shift-closed-shift repeated)
                      (register-shift-closed-shift closed))
        (check-equal?
         (register-shift-close-rejected-code
-         (register-operations-close-shift service "missing"))
+         (register-operations-close-shift service "missing" (money 0)))
         'shift-not-found))))
 
   (test-case "register context and active cashier list expose current state only"
@@ -208,7 +209,7 @@ JSON
         (map cashier-identity-cashier-id
              (register-operations-list-active-cashiers service))
         '("cashier-alice" "cashier-bob"))
-       (register-operations-open-shift service "cashier-alice")
+       (register-operations-open-shift service "cashier-alice" (money 0))
        (define active (register-operations-load-context service))
        (check-true (register-context-configured? active))
        (check-equal?

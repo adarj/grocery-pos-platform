@@ -275,12 +275,149 @@ SQL
    connection
    "INSERT INTO pos_schema_migrations (version, name) VALUES (4, 'create_tax_categories')"))
 
+(define frozen-register-configuration-table-sql
+  #<<SQL
+CREATE TABLE register_configuration (
+  singleton_id INTEGER PRIMARY KEY
+    CHECK (
+      typeof(singleton_id) = 'integer'
+      AND singleton_id = 1
+    ),
+  register_id TEXT NOT NULL
+    CHECK (
+      typeof(register_id) = 'text'
+      AND length(register_id) > 0
+    ),
+  display_name TEXT NOT NULL
+    CHECK (
+      typeof(display_name) = 'text'
+      AND length(display_name) > 0
+    )
+)
+SQL
+  )
+
+(define frozen-cashiers-table-sql
+  #<<SQL
+CREATE TABLE cashiers (
+  cashier_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(cashier_id) = 'text'
+      AND length(cashier_id) > 0
+    ),
+  display_name TEXT NOT NULL
+    CHECK (
+      typeof(display_name) = 'text'
+      AND length(display_name) > 0
+    ),
+  active INTEGER NOT NULL
+    CHECK (
+      typeof(active) = 'integer'
+      AND active IN (0, 1)
+    )
+)
+SQL
+  )
+
+(define frozen-register-shifts-table-sql
+  #<<SQL
+CREATE TABLE register_shifts (
+  shift_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(shift_id) = 'text'
+      AND length(shift_id) > 0
+    ),
+  register_id TEXT NOT NULL
+    CHECK (
+      typeof(register_id) = 'text'
+      AND length(register_id) > 0
+    ),
+  register_display_name TEXT NOT NULL
+    CHECK (
+      typeof(register_display_name) = 'text'
+      AND length(register_display_name) > 0
+    ),
+  cashier_id TEXT NOT NULL
+    CHECK (
+      typeof(cashier_id) = 'text'
+      AND length(cashier_id) > 0
+    ),
+  cashier_display_name TEXT NOT NULL
+    CHECK (
+      typeof(cashier_display_name) = 'text'
+      AND length(cashier_display_name) > 0
+    ),
+  opened_at_epoch_ms INTEGER NOT NULL
+    CHECK (
+      typeof(opened_at_epoch_ms) = 'integer'
+      AND opened_at_epoch_ms >= 0
+    ),
+  closed_at_epoch_ms INTEGER
+    CHECK (
+      closed_at_epoch_ms IS NULL
+      OR (
+        typeof(closed_at_epoch_ms) = 'integer'
+        AND closed_at_epoch_ms >= opened_at_epoch_ms
+      )
+    ),
+  active_transaction_id TEXT
+    CHECK (
+      active_transaction_id IS NULL
+      OR (
+        typeof(active_transaction_id) = 'text'
+        AND length(active_transaction_id) > 0
+      )
+    ),
+  CHECK (
+    closed_at_epoch_ms IS NULL
+    OR active_transaction_id IS NULL
+  )
+)
+SQL
+  )
+
+(define (install-frozen-v5! connection #:open? [open? #f])
+  (install-frozen-v4! connection)
+  (db:query-exec connection frozen-register-configuration-table-sql)
+  (db:query-exec
+   connection
+   "CREATE UNIQUE INDEX register_configuration_register_id_unique ON register_configuration (register_id)")
+  (db:query-exec connection frozen-cashiers-table-sql)
+  (db:query-exec connection frozen-register-shifts-table-sql)
+  (db:query-exec
+   connection
+   "CREATE UNIQUE INDEX register_shifts_one_open_per_register ON register_shifts (register_id) WHERE closed_at_epoch_ms IS NULL")
+  (db:query-exec
+   connection
+   "CREATE UNIQUE INDEX register_shifts_active_transaction_unique ON register_shifts (active_transaction_id) WHERE active_transaction_id IS NOT NULL")
+  (db:query-exec
+   connection
+   "INSERT INTO pos_schema_migrations (version, name) VALUES (5, 'create_register_operations')")
+  (db:query-exec
+   connection
+   "INSERT INTO register_configuration VALUES (1, 'register-v5', 'V5 Register')")
+  (db:query-exec
+   connection
+   "INSERT INTO cashiers VALUES ('cashier-v5', 'V5 Cashier', 1)")
+  (db:query-exec
+   connection
+   #<<SQL
+INSERT INTO register_shifts
+  (shift_id, register_id, register_display_name, cashier_id,
+   cashier_display_name, opened_at_epoch_ms, closed_at_epoch_ms,
+   active_transaction_id)
+VALUES ('shift-v5', 'register-v5', 'V5 Register', 'cashier-v5',
+        'V5 Cashier', 1000, ?, NULL)
+SQL
+   (if open? db:sql-null 2000)))
+
 (define expected-history
   (list #(1 "create_transaction_events")
         #(2 "create_transaction_command_receipts")
         #(3 "create_catalog")
         #(4 "create_tax_categories")
-        #(5 "create_register_operations")))
+        #(5 "create_register_operations")
+        #(6 "create_shift_cash_accountability")))
 
 (module+ test
   (test-case "fresh database creates catalog and tax schema through migration 4"
@@ -346,6 +483,104 @@ SQL
                      0)
        (check-equal? (db:query-value connection "SELECT COUNT(*) FROM cashiers")
                      0))))
+
+  (test-case "real frozen v5 closed shift upgrades without fabricated cash facts"
+    (call-with-database
+     (lambda (connection)
+       (install-frozen-v5! connection)
+       (define events-before
+         (db:query-rows connection "SELECT * FROM transaction_events"))
+       (define receipts-before
+         (db:query-rows connection "SELECT * FROM transaction_command_receipts"))
+       (define catalog-before
+         (db:query-rows connection "SELECT * FROM catalog_items"))
+       (define tax-before
+         (db:query-rows connection "SELECT * FROM tax_categories"))
+       (define operations-before
+         (db:query-rows connection "SELECT * FROM register_shifts"))
+       (migrate-pos-database! connection)
+       (check-equal?
+        (db:query-rows
+         connection
+         "SELECT version, name FROM pos_schema_migrations ORDER BY version")
+        expected-history)
+       (check-equal? (db:query-rows connection "SELECT * FROM transaction_events")
+                     events-before)
+       (check-equal?
+        (db:query-rows connection "SELECT * FROM transaction_command_receipts")
+        receipts-before)
+       (check-equal? (db:query-rows connection "SELECT * FROM catalog_items")
+                     catalog-before)
+       (check-equal? (db:query-rows connection "SELECT * FROM tax_categories")
+                     tax-before)
+       (check-equal? (db:query-rows connection "SELECT * FROM register_shifts")
+                     operations-before)
+       (check-equal?
+        (db:query-value connection "SELECT COUNT(*) FROM shift_cash_movements")
+        0)
+       (check-equal?
+        (db:query-value connection "SELECT COUNT(*) FROM shift_cash_reconciliations")
+        0))))
+
+  (test-case "real frozen v5 open shift blocks cash-accountability migration"
+    (call-with-database
+     (lambda (connection)
+       (install-frozen-v5! connection #:open? #t)
+       (check-exn
+        #rx"requires every v5 shift to be closed"
+        (lambda () (migrate-pos-database! connection)))
+       (check-equal?
+        (db:query-list
+         connection
+         "SELECT version FROM pos_schema_migrations ORDER BY version")
+        '(1 2 3 4 5))
+       (check-equal?
+        (db:query-value
+         connection
+         "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'shift_cash_movements'")
+        0))))
+
+  (test-case "migration 6 validates tables indexes and movement uniqueness"
+    (for ([table
+           (in-list '("shift_cash_movements"
+                      "shift_cash_reconciliations"))])
+      (call-with-database
+       (lambda (connection)
+         (migrate-pos-database! connection)
+         (db:query-exec connection (format "DROP TABLE ~a" table))
+         (check-exn exn:fail?
+                    (lambda () (migrate-pos-database! connection))))))
+    (for ([index
+           (in-list '("shift_cash_movements_shift_sequence_unique"
+                      "shift_cash_movements_one_opening_unique"
+                      "shift_cash_movements_cash_sale_transaction_unique"))])
+      (call-with-database
+       (lambda (connection)
+         (migrate-pos-database! connection)
+         (db:query-exec connection (format "DROP INDEX ~a" index))
+         (check-exn exn:fail?
+                    (lambda () (migrate-pos-database! connection))))))
+    (call-with-database
+     (lambda (connection)
+       (migrate-pos-database! connection)
+       (db:query-exec
+        connection
+        "INSERT INTO shift_cash_movements VALUES (NULL, 'shift', 1, 'opening_float', 0, NULL, 0)")
+       (check-exn
+        db:exn:fail:sql?
+        (lambda ()
+          (db:query-exec
+           connection
+           "INSERT INTO shift_cash_movements VALUES (NULL, 'shift', 2, 'opening_float', 1, NULL, 1)")))
+       (db:query-exec
+        connection
+        "INSERT INTO shift_cash_movements VALUES (NULL, 'shift', 2, 'cash_sale', 10, 'txn-one', 2)")
+       (check-exn
+        db:exn:fail:sql?
+        (lambda ()
+          (db:query-exec
+           connection
+           "INSERT INTO shift_cash_movements VALUES (NULL, 'other', 1, 'cash_sale', 10, 'txn-one', 2)"))))))
 
   (test-case "migration 5 validates owned tables and partial indexes"
     (for ([table

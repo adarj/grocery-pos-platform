@@ -6,9 +6,16 @@ mixin UnimplementedRegisterOperationsClient {
   Future<List<CashierIdentity>> fetchActiveCashiers() =>
       throw UnimplementedError();
 
-  Future<RegisterShift> openShift(String cashierId) =>
-      throw UnimplementedError();
+  Future<ShiftOperationResult> openShift(
+    String cashierId,
+    int openingCashMinorUnits,
+  ) => throw UnimplementedError();
 
-  Future<RegisterShift> closeShift(String shiftId) =>
+  Future<ShiftOperationResult> closeShift(
+    String shiftId,
+    int countedCashMinorUnits,
+  ) => throw UnimplementedError();
+
+  Future<ShiftCashSummary> fetchShiftCashSummary(String shiftId) =>
       throw UnimplementedError();
 }

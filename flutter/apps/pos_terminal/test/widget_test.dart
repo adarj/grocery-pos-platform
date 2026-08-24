@@ -61,11 +61,27 @@ mixin FakeRegisterOperations {
 
   Future<List<CashierIdentity>> fetchActiveCashiers() async => const [];
 
-  Future<RegisterShift> openShift(String cashierId) =>
-      throw UnimplementedError();
+  Future<ShiftOperationResult> openShift(
+    String cashierId,
+    int openingCashMinorUnits,
+  ) => throw UnimplementedError();
 
-  Future<RegisterShift> closeShift(String shiftId) =>
-      throw UnimplementedError();
+  Future<ShiftOperationResult> closeShift(
+    String shiftId,
+    int countedCashMinorUnits,
+  ) => throw UnimplementedError();
+
+  Future<ShiftCashSummary> fetchShiftCashSummary(String shiftId) async =>
+      const ShiftCashSummary(
+        shiftId: 'shift-test',
+        status: ShiftCashStatus.open,
+        openingCashMinorUnits: 0,
+        completedCashSaleCount: 0,
+        cashSalesMinorUnits: 0,
+        expectedCashMinorUnits: 0,
+        countedCashMinorUnits: null,
+        overShortMinorUnits: null,
+      );
 }
 
 class FakeConnectedPosCoreClient

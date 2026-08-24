@@ -127,6 +127,11 @@ transaction starts safely reject until an operator activates configuration and
 opens a shift. Focused tests may inject deterministic clocks/IDs. See
 [Register Operations and Shift Context](register-operations.md).
 
+Migration v6 adds shift cash movements and reconciliation. Runtime uses the
+same virtual connection for cash-summary reads, opening/close writes, and the
+completion unit of work. It never auto-seeds an opening float or rewrites
+drawer state at startup. See [Shift Cash Accountability](cash-accountability.md).
+
 `make-app` requires the constructed transaction service and returns the servlet
 handler. The service is captured explicitly rather than stored in a global.
 Transaction routes delegate to that service through the transport-only adapter
@@ -145,6 +150,7 @@ GET /register-context
 GET /cashiers
 POST /shifts/open
 POST /shifts/{shift_id}/close
+GET /shifts/{shift_id}/cash-summary
 ```
 
 `GET /health` remains a liveness endpoint and does not perform a database or
@@ -156,7 +162,7 @@ future checkout dependency is ready.
 
 Focused file-backed tests establish:
 
-- fresh runtime migration through schema v5;
+- fresh runtime migration through schema v6;
 - an empty persistent catalog rejecting the former development barcode rather
   than falling back to a fake;
 - active/inactive/unknown persistent catalog lookup behavior and exact
@@ -172,7 +178,8 @@ Focused file-backed tests establish:
 - read/write request connections refusing to recreate a missing database;
 - unchanged `/health` and unknown-route behavior through `make-app`.
 - operational configuration/shift composition, active-transaction slot
-  persistence, and atomic slot release on completion or void.
+  persistence, atomic net cash-sale movement plus slot release on completion,
+  and movement-free slot release on void.
 
 ## Deliberately deferred
 

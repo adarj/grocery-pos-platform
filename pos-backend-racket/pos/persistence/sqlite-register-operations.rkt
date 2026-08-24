@@ -1,9 +1,12 @@
 #lang racket
 
 (require (prefix-in db: db)
+         "../domain/money.rkt"
          "../domain/register-operations.rkt"
+         "../domain/shift-cash-accountability.rkt"
          "../domain/transaction-operational-context.rkt"
-         "operational-configuration-snapshot-codec.rkt")
+         "operational-configuration-snapshot-codec.rkt"
+         "sqlite-shift-cash-accountability.rkt")
 
 (provide (struct-out operational-configuration-activation-succeeded)
          (struct-out operational-configuration-activation-rejected)
@@ -12,6 +15,7 @@
          load-active-cashiers
          open-register-shift!
          close-register-shift!
+         load-shift-cash-summary
          (struct-out shift-transaction-slot-claimed)
          (struct-out shift-transaction-slot-released)
          (struct-out shift-transaction-slot-rejected)
@@ -182,11 +186,13 @@ SQL
     (cashier-identity (vector-ref row 0) (vector-ref row 1))))
 
 (define (open-register-shift!
-         connection cashier-id current-epoch-ms generate-shift-id)
+         connection cashier-id opening-cash current-epoch-ms generate-shift-id)
   (define who 'open-register-shift!)
   (check-connection who connection)
   (unless (and (string? cashier-id) (positive? (string-length cashier-id)))
     (raise-argument-error who "non-empty-string?" cashier-id))
+  (unless (money? opening-cash)
+    (raise-argument-error who "money?" opening-cash))
   (check-procedure who current-epoch-ms "current-epoch-ms")
   (check-procedure who generate-shift-id "generate-shift-id")
 
@@ -200,7 +206,14 @@ SQL
        [(register-context-active-shift context)
         => (lambda (existing)
              (if (string=? (register-shift-cashier-id existing) cashier-id)
-                 (register-shift-opened existing)
+                 (let ([summary
+                        (load-shift-cash-summary
+                         connection (register-shift-shift-id existing))])
+                   (unless (shift-cash-summary-found? summary)
+                     (error who "existing open shift has no cash summary"))
+                   (register-shift-opened
+                    existing
+                    (shift-cash-summary-found-summary summary)))
                  (register-shift-open-rejected 'shift-already-open)))]
        [else
         (define cashier-row
@@ -242,15 +255,24 @@ SQL
             cashier-id
             (vector-ref cashier-row 0)
             opened-at)
+           (record-opening-float/in-transaction!
+            connection shift-id opening-cash opened-at)
+           (define summary (load-shift-cash-summary connection shift-id))
+           (unless (shift-cash-summary-found? summary)
+             (error who "new shift opening cash could not be recovered"))
            (register-shift-opened
-            (load-shift-by-id connection shift-id))])]))
+            (load-shift-by-id connection shift-id)
+            (shift-cash-summary-found-summary summary))])]))
    #:option 'immediate))
 
-(define (close-register-shift! connection shift-id current-epoch-ms)
+(define (close-register-shift!
+         connection shift-id counted-cash current-epoch-ms)
   (define who 'close-register-shift!)
   (check-connection who connection)
   (unless (and (string? shift-id) (positive? (string-length shift-id)))
     (raise-argument-error who "non-empty-string?" shift-id))
+  (unless (money? counted-cash)
+    (raise-argument-error who "money?" counted-cash))
   (check-procedure who current-epoch-ms "current-epoch-ms")
 
   (db:call-with-transaction
@@ -260,14 +282,32 @@ SQL
      (cond
        [(not shift) (register-shift-close-rejected 'shift-not-found)]
        [(register-shift-closed-at-epoch-ms shift)
-        (register-shift-closed shift)]
+        (define summary (load-shift-cash-summary connection shift-id))
+        (cond
+          [(shift-cash-summary-found? summary)
+           (register-shift-closed
+            shift (shift-cash-summary-found-summary summary))]
+          [(shift-cash-summary-unavailable? summary)
+           (register-shift-close-rejected 'cash-accounting-unavailable)]
+          [else (error who "closed shift cash summary could not be recovered")])]
        [(register-shift-active-transaction-id shift)
         (register-shift-close-rejected 'shift-has-active-transaction)]
        [else
+        (define open-summary-result
+          (load-shift-cash-summary connection shift-id))
+        (unless (shift-cash-summary-found? open-summary-result)
+          (error who "open shift cash summary could not be recovered"))
+        (define open-summary
+          (shift-cash-summary-found-summary open-summary-result))
         (define closed-at (current-epoch-ms))
         (unless (and (exact-integer? closed-at)
                      (>= closed-at (register-shift-opened-at-epoch-ms shift)))
           (error who "clock returned an invalid shift close time"))
+        (record-shift-cash-reconciliation/in-transaction!
+         connection
+         shift-id
+         (shift-cash-summary-expected-cash open-summary)
+         counted-cash)
         (db:query-exec
          connection
          #<<SQL
@@ -281,8 +321,13 @@ SQL
          shift-id)
         (unless (= (db:query-value connection "SELECT changes()") 1)
           (error who "shift state changed during close"))
+        (define closed-summary-result
+          (load-shift-cash-summary connection shift-id))
+        (unless (shift-cash-summary-found? closed-summary-result)
+          (error who "closed cash reconciliation could not be recovered"))
         (register-shift-closed
-         (load-shift-by-id connection shift-id))]))
+         (load-shift-by-id connection shift-id)
+         (shift-cash-summary-found-summary closed-summary-result))]))
    #:option 'immediate))
 
 (define (ensure-owned-transaction who connection)

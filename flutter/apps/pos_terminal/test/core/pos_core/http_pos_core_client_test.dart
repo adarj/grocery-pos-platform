@@ -453,94 +453,156 @@ void main() {
     'active_transaction_id': null,
   };
 
-  test('register context and active cashier queries use typed GET routes', () async {
-    var requestNumber = 0;
-    final client = HttpPosCoreClient(
-      baseUri: baseUri,
-      httpClient: MockClient((request) async {
-        requestNumber += 1;
-        expect(request.method, 'GET');
-        if (requestNumber == 1) {
-          expect(request.url.path, '/register-context');
+  Map<String, Object?> cashSummaryJson({
+    String status = 'open',
+    int? counted,
+    int? overShort,
+  }) => {
+    'shift_id': 'shift/opaque',
+    'status': status,
+    'opening_cash_minor_units': 10000,
+    'completed_cash_sale_count': 1,
+    'cash_sales_minor_units': 219,
+    'expected_cash_minor_units': 10219,
+    'counted_cash_minor_units': counted,
+    'over_short_minor_units': overShort,
+  };
+
+  test(
+    'register context and active cashier queries use typed GET routes',
+    () async {
+      var requestNumber = 0;
+      final client = HttpPosCoreClient(
+        baseUri: baseUri,
+        httpClient: MockClient((request) async {
+          requestNumber += 1;
+          expect(request.method, 'GET');
+          if (requestNumber == 1) {
+            expect(request.url.path, '/register-context');
+            return http.Response(
+              jsonBody({
+                'ok': true,
+                'register_context': {
+                  'configured': true,
+                  'register': {
+                    'register_id': 'register-one',
+                    'display_name': 'Front Register',
+                  },
+                  'active_shift': null,
+                },
+              }),
+              200,
+            );
+          }
+          expect(request.url.path, '/cashiers');
           return http.Response(
             jsonBody({
               'ok': true,
-              'register_context': {
-                'configured': true,
-                'register': {
-                  'register_id': 'register-one',
-                  'display_name': 'Front Register',
-                },
-                'active_shift': null,
-              },
+              'cashiers': [
+                {'cashier_id': 'cashier-one', 'display_name': 'Alice'},
+              ],
             }),
             200,
           );
-        }
-        expect(request.url.path, '/cashiers');
-        return http.Response(
-          jsonBody({
-            'ok': true,
-            'cashiers': [
-              {'cashier_id': 'cashier-one', 'display_name': 'Alice'},
-            ],
-          }),
-          200,
-        );
-      }),
-    );
-    final context = await client.fetchRegisterContext();
-    final cashiers = await client.fetchActiveCashiers();
-    expect(context.register!.displayName, 'Front Register');
-    expect(cashiers.single.cashierId, 'cashier-one');
-  });
+        }),
+      );
+      final context = await client.fetchRegisterContext();
+      final cashiers = await client.fetchActiveCashiers();
+      expect(context.register!.displayName, 'Front Register');
+      expect(cashiers.single.cashierId, 'cashier-one');
+    },
+  );
 
-  test('open and close shift send exact operational payloads without command IDs', () async {
-    var requestNumber = 0;
-    final client = HttpPosCoreClient(
-      baseUri: baseUri,
-      httpClient: MockClient((request) async {
-        requestNumber += 1;
-        expect(request.method, 'POST');
-        expect(request.headers['content-type'], 'application/json');
-        if (requestNumber == 1) {
-          expect(request.url.path, '/shifts/open');
-          expect(jsonDecode(request.body), {'cashier_id': 'cashier-one'});
+  test(
+    'open close and cash-summary use exact operational money payloads',
+    () async {
+      var requestNumber = 0;
+      final client = HttpPosCoreClient(
+        baseUri: baseUri,
+        httpClient: MockClient((request) async {
+          requestNumber += 1;
+          if (requestNumber == 1) {
+            expect(request.method, 'POST');
+            expect(request.headers['content-type'], 'application/json');
+            expect(request.url.path, '/shifts/open');
+            expect(jsonDecode(request.body), {
+              'cashier_id': 'cashier-one',
+              'opening_cash_minor_units': 10000,
+            });
+            return http.Response(
+              jsonBody({
+                'ok': true,
+                'shift': shiftJson(),
+                'cash_summary': cashSummaryJson(),
+              }),
+              200,
+            );
+          }
+          if (requestNumber == 2) {
+            expect(request.method, 'POST');
+            expect(request.headers['content-type'], 'application/json');
+            expect(request.url.path, '/shifts/shift%2Fopaque/close');
+            expect(jsonDecode(request.body), {
+              'counted_cash_minor_units': 10194,
+            });
+            return http.Response(
+              jsonBody({
+                'ok': true,
+                'shift': shiftJson(closedAt: 2000),
+                'cash_summary': cashSummaryJson(
+                  status: 'closed',
+                  counted: 10194,
+                  overShort: -25,
+                ),
+              }),
+              200,
+            );
+          }
+          expect(request.method, 'GET');
+          expect(request.url.path, '/shifts/shift%2Fopaque/cash-summary');
           return http.Response(
-            jsonBody({'ok': true, 'shift': shiftJson()}),
+            jsonBody({
+              'ok': true,
+              'cash_summary': cashSummaryJson(
+                status: 'closed',
+                counted: 10194,
+                overShort: -25,
+              ),
+            }),
             200,
           );
-        }
-        expect(request.url.path, '/shifts/shift%2Fopaque/close');
-        expect(jsonDecode(request.body), <String, Object?>{});
-        return http.Response(
-          jsonBody({'ok': true, 'shift': shiftJson(closedAt: 2000)}),
-          200,
-        );
-      }),
-    );
-    final opened = await client.openShift('cashier-one');
-    final closed = await client.closeShift(opened.shiftId);
-    expect(opened.closedAtEpochMs, isNull);
-    expect(closed.closedAtEpochMs, 2000);
-  });
+        }),
+      );
+      final opened = await client.openShift('cashier-one', 10000);
+      final closed = await client.closeShift(opened.shift.shiftId, 10194);
+      final fetched = await client.fetchShiftCashSummary(opened.shift.shiftId);
+      expect(opened.shift.closedAtEpochMs, isNull);
+      expect(opened.cashSummary.openingCashMinorUnits, 10000);
+      expect(closed.shift.closedAtEpochMs, 2000);
+      expect(closed.cashSummary.overShortMinorUnits, -25);
+      expect(fetched.overShortMinorUnits, -25);
+    },
+  );
 
-  test('operational write transport failure has no command retry identity', () async {
-    final client = HttpPosCoreClient(
-      baseUri: baseUri,
-      httpClient: MockClient(
-        (_) async => throw http.ClientException('connection lost'),
-      ),
-    );
-    await expectLater(
-      client.openShift('cashier-one'),
-      throwsA(
-        isA<PosCoreTransportFailure>().having(
-          (failure) => failure.retrySameCommandId,
-          'retrySameCommandId',
-          isFalse,
+  test(
+    'operational write transport failure has no command retry identity',
+    () async {
+      final client = HttpPosCoreClient(
+        baseUri: baseUri,
+        httpClient: MockClient(
+          (_) async => throw http.ClientException('connection lost'),
         ),
-      ),
-    );
-  });
+      );
+      await expectLater(
+        client.openShift('cashier-one', 0),
+        throwsA(
+          isA<PosCoreTransportFailure>().having(
+            (failure) => failure.retrySameCommandId,
+            'retrySameCommandId',
+            isFalse,
+          ),
+        ),
+      );
+    },
+  );
 }

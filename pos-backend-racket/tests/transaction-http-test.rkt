@@ -848,7 +848,8 @@ SQL
               seed-connection
               #:current-epoch-ms (lambda () 1000)
               #:generate-shift-id (lambda () "shift-http"))
-             "http-cashier"))
+             "http-cashier"
+             (money 0)))
           (lambda () (db:disconnect seed-connection)))
         (define runtime-A
           (start-pos-runtime

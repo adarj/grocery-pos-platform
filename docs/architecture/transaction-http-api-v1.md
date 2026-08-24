@@ -20,6 +20,7 @@ The implemented routes are:
 | `GET` | `/cashiers` | List active configured cashiers |
 | `POST` | `/shifts/open` | Open or resolve a shift for one cashier |
 | `POST` | `/shifts/{shift_id}/close` | Close or resolve an idle shift |
+| `GET` | `/shifts/{shift_id}/cash-summary` | Read authoritative shift cash accountability |
 
 No command-specific mutation routes exist. The one command endpoint mirrors
 `transaction-service-execute-command` and prevents route handlers from
@@ -346,24 +347,62 @@ selection. These are attribution references, not authentication credentials.
 `POST /shifts/open` requires exactly:
 
 ```json
-{ "cashier_id": "cashier-001" }
+{
+  "cashier_id": "cashier-001",
+  "opening_cash_minor_units": 10000
+}
 ```
 
-POS Core supplies register/name/time/shift ID. Repeating the same-cashier open
-returns the existing shift; a different cashier conflicts. Stable errors
+Opening cash is an exact nonnegative integer. POS Core supplies
+register/name/time/shift ID and atomically records the opening cash movement.
+A successful response contains both `shift` and authoritative `cash_summary`.
+Repeating the same-cashier open returns the existing shift and first opening
+amount; a different cashier conflicts. Stable errors
 include `register_not_configured`, `cashier_not_found`, `cashier_inactive`, and
 `shift_already_open`.
 
-`POST /shifts/{shift_id}/close` requires `{}`. It returns an already-closed
-shift safely, but an open shift with an active transaction returns
+`POST /shifts/{shift_id}/close` requires:
+
+```json
+{ "counted_cash_minor_units": 14194 }
+```
+
+The exact nonnegative physical count is reconciled by POS Core. Success returns
+the closed `shift` and immutable `cash_summary`, including signed
+`over_short_minor_units`. It returns an already-closed
+shift and first reconciliation safely, but an open shift with an active transaction returns
 `409 shift_has_active_transaction`. Other stable errors include
-`shift_not_found`. Unexpected/corrupt operational state fails as the safe
+`shift_not_found` and `cash_accounting_unavailable` for a closed legacy shift.
+Unexpected/corrupt operational state fails as the safe
 generic `500 internal_error` without SQL or internal detail.
+
+`GET /shifts/{shift_id}/cash-summary` returns:
+
+```json
+{
+  "ok": true,
+  "cash_summary": {
+    "shift_id": "shift_...",
+    "status": "open",
+    "opening_cash_minor_units": 10000,
+    "completed_cash_sale_count": 3,
+    "cash_sales_minor_units": 1234,
+    "expected_cash_minor_units": 11234,
+    "counted_cash_minor_units": null,
+    "over_short_minor_units": null
+  }
+}
+```
+
+Closed summaries require counted cash and signed over/short. Ordinary money
+fields remain nonnegative exact integers. The summary is backend-derived;
+clients must not reconstruct expected cash or variance.
 
 Shift writes are not Transaction Command Schema mutations. They have no
 command ID, expected version, `retry_same_command_id`, or Flutter pending
 command record. After transport uncertainty, clients explicitly refresh
-`/register-context`.
+`/register-context` and the exact shift cash summary. They do not automatically
+retry the write.
 
 ## Routing and common errors
 
@@ -380,6 +419,7 @@ Recognized routes with the wrong method return `405 Method Not Allowed` and an
 | `/cashiers` | `GET` |
 | `/shifts/open` | `POST` |
 | `/shifts/{shift_id}/close` | `POST` |
+| `/shifts/{shift_id}/cash-summary` | `GET` |
 
 Unknown paths and malformed transaction query shapes return the common
 structured `404` response:
