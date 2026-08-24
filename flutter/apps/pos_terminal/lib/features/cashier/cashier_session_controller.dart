@@ -119,6 +119,30 @@ final class CashierSessionController extends ChangeNotifier {
     await _persistAndExecuteNewCommand(command);
   }
 
+  Future<void> removeLineItem(int lineIndex) async {
+    final snapshot = _requireAuthoritativeSnapshot();
+    if (lineIndex < 0) {
+      throw ArgumentError.value(lineIndex, 'lineIndex', 'must be nonnegative');
+    }
+    final command = RemoveLineItemCommand(
+      commandId: _idGenerator.nextCommandId(),
+      transactionId: snapshot.transactionId,
+      expectedVersion: snapshot.version,
+      lineIndex: lineIndex,
+    );
+    await _persistAndExecuteNewCommand(command);
+  }
+
+  Future<void> voidTransaction() async {
+    final snapshot = _requireAuthoritativeSnapshot();
+    final command = VoidTransactionCommand(
+      commandId: _idGenerator.nextCommandId(),
+      transactionId: snapshot.transactionId,
+      expectedVersion: snapshot.version,
+    );
+    await _persistAndExecuteNewCommand(command);
+  }
+
   Future<void> retryPendingCommand() async {
     _requireIdle();
     if (!_state.canRetryPendingCommand) {

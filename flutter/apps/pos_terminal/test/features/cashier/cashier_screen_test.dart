@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pos_terminal/core/pos_core/models/command_result.dart';
+import 'package:pos_terminal/core/pos_core/models/canonical_receipt.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_failure.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_health.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_command.dart';
@@ -15,16 +16,33 @@ import 'package:pos_terminal/features/cashier/cashier_screen.dart';
 import 'package:pos_terminal/features/cashier/cashier_session_controller.dart';
 import 'package:pos_terminal/features/cashier/cashier_session_store.dart';
 
+import '../../support/unimplemented_register_operations_client.dart';
+
 typedef CommandHandler =
     Future<PosCommandResult> Function(TransactionCommand command);
 typedef TransactionHandler =
     Future<TransactionSnapshot> Function(String transactionId);
+typedef ReceiptHandler =
+    Future<CanonicalReceipt> Function(String transactionId);
 
-final class FakeCashierClient implements PosCoreClient {
+final class FakeCashierClient
+    with UnimplementedRegisterOperationsClient
+    implements PosCoreClient {
   final Queue<CommandHandler> commandHandlers = Queue();
   final Queue<TransactionHandler> transactionHandlers = Queue();
+  final Queue<ReceiptHandler> receiptHandlers = Queue();
   final List<TransactionCommand> commands = [];
   final List<String> reads = [];
+  final List<String> receiptReads = [];
+
+  @override
+  Future<CanonicalReceipt> fetchReceipt(String transactionId) {
+    receiptReads.add(transactionId);
+    if (receiptHandlers.isEmpty) {
+      throw StateError('No receipt response queued.');
+    }
+    return receiptHandlers.removeFirst()(transactionId);
+  }
 
   @override
   Future<PosCoreHealth> fetchHealth() {
@@ -151,23 +169,49 @@ PosCommandResult resultFor(
 }
 
 TransactionSnapshot snapshot({
+  String transactionId = 'txn-1',
   int version = 1,
   TransactionStatus status = TransactionStatus.open,
   List<TransactionLineItem> lineItems = const [],
   int subtotal = 0,
+  int tax = 0,
   int total = 0,
   int? tenderedCash,
   int? changeDue,
 }) {
   return TransactionSnapshot(
-    transactionId: 'txn-1',
+    transactionId: transactionId,
     version: version,
     status: status,
     lineItems: lineItems,
     subtotalMinorUnits: subtotal,
+    taxMinorUnits: tax,
     totalMinorUnits: total,
     tenderedCashMinorUnits: tenderedCash,
     changeDueMinorUnits: changeDue,
+  );
+}
+
+CanonicalReceipt canonicalReceipt({String transactionId = 'txn-1'}) {
+  return CanonicalReceipt(
+    schemaVersion: 1,
+    transactionId: transactionId,
+    transactionVersion: 6,
+    lineItems: const [
+      CanonicalReceiptLine(
+        barcode: 'receipt-barcode',
+        description: 'Receipt-only Apples',
+        unitPriceMinorUnits: 321,
+        taxCategoryId: 'receipt-tax',
+        taxRateMillionths: 100000,
+        taxAmountMinorUnits: 32,
+      ),
+    ],
+    subtotalMinorUnits: 321,
+    taxMinorUnits: 32,
+    totalMinorUnits: 353,
+    tenderedCashMinorUnits: 500,
+    changeDueMinorUnits: 147,
   );
 }
 
@@ -212,8 +256,12 @@ Future<void> pumpCashier(
   WidgetTester tester,
   CashierSessionController controller, {
   TextScaler? textScaler,
+  PosCoreClient? receiptClient,
 }) async {
-  Widget screen = CashierScreen(controller: controller);
+  Widget screen = CashierScreen(
+    controller: controller,
+    client: receiptClient ?? FakeCashierClient(),
+  );
   if (textScaler != null) {
     screen = MediaQuery(
       data: MediaQueryData(textScaler: textScaler),
@@ -309,6 +357,29 @@ void main() {
     },
   );
 
+  testWidgets('Start Sale without a shift shows safe operational guidance', (
+    tester,
+  ) async {
+    final testFixture = fixture();
+    testFixture.client.enqueueResult(
+      PosCommandOutcomeKind.domainRejected,
+      code: 'shift_required',
+      version: 0,
+    );
+
+    await pumpCashier(tester, testFixture.controller);
+    await tester.tap(find.text('Start Sale'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('Open a cashier shift before starting a sale.'),
+      findsOneWidget,
+    );
+    expect(find.text('Start Sale'), findsOneWidget);
+    expect(testFixture.client.commands, hasLength(1));
+    expect(testFixture.client.reads, isEmpty);
+  });
+
   testWidgets('basket preserves backend order and backend totals exactly', (
     tester,
   ) async {
@@ -330,6 +401,7 @@ void main() {
           ),
         ],
         subtotal: 999,
+        tax: 777,
         total: 1234,
       ),
     );
@@ -342,6 +414,8 @@ void main() {
     expect(find.text('Barcode: second-code'), findsOneWidget);
     expect(find.text(r'$5.00'), findsOneWidget);
     expect(find.text(r'$9.99'), findsOneWidget);
+    expect(find.text('Tax'), findsOneWidget);
+    expect(find.text(r'$7.77'), findsOneWidget);
     expect(find.text(r'$12.34'), findsOneWidget);
     expect(
       tester.getTopLeft(find.text('First item')).dy,
@@ -861,13 +935,8 @@ void main() {
       await pumpCashier(tester, testFixture.controller);
 
       expect(find.text('Payment details unavailable'), findsOneWidget);
-      expect(
-        find.descendant(
-          of: find.byKey(const Key('cashier-payment-controls')),
-          matching: find.text(r'$0.00'),
-        ),
-        findsNothing,
-      );
+      expect(find.text('Cash received'), findsNothing);
+      expect(find.text('Change due'), findsNothing);
       expect(find.text('Complete Sale'), findsOneWidget);
     },
   );
@@ -1364,6 +1433,7 @@ void main() {
         status: TransactionStatus.open,
         lineItems: const [],
         subtotalMinorUnits: 0,
+        taxMinorUnits: 0,
         totalMinorUnits: 0,
         tenderedCashMinorUnits: null,
         changeDueMinorUnits: null,
@@ -1685,10 +1755,31 @@ void main() {
     expectPrimaryAction('Start Sale');
 
     final openFixture = fixture();
-    await establishTransaction(openFixture, snapshot());
+    await establishTransaction(
+      openFixture,
+      snapshot(
+        lineItems: const [
+          TransactionLineItem(
+            barcode: 'A',
+            description: 'Apples',
+            unitPriceMinorUnits: 100,
+          ),
+        ],
+        subtotal: 100,
+        total: 100,
+      ),
+    );
     await pumpCashier(tester, openFixture.controller);
     expectPrimaryAction('Scan Item');
     expectPrimaryAction('Take Cash');
+    expect(
+      tester.getSize(find.byKey(const Key('cashier-remove-line-0'))).height,
+      greaterThanOrEqualTo(48),
+    );
+    expect(
+      tester.getSize(find.byKey(const Key('cashier-void-sale'))).height,
+      greaterThanOrEqualTo(52),
+    );
 
     final paidFixture = fixture();
     await establishTransaction(
@@ -1840,6 +1931,7 @@ void main() {
     (TransactionStatus.open, 'Scan Item'),
     (TransactionStatus.paid, 'Complete Sale'),
     (TransactionStatus.completed, 'Next Sale'),
+    (TransactionStatus.voided, 'Next Sale'),
   ]) {
     testWidgets('${testCase.$1.name} cashier remains usable at 2x text scale', (
       tester,
@@ -1847,13 +1939,16 @@ void main() {
       addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.binding.setSurfaceSize(const Size(1024, 768));
       final testFixture = fixture();
+      final hasPayment =
+          testCase.$1 == TransactionStatus.paid ||
+          testCase.$1 == TransactionStatus.completed;
       await establishTransaction(
         testFixture,
         snapshot(
           status: testCase.$1,
           total: 12345,
-          tenderedCash: testCase.$1 == TransactionStatus.open ? null : 20000,
-          changeDue: testCase.$1 == TransactionStatus.open ? null : 7655,
+          tenderedCash: hasPayment ? 20000 : null,
+          changeDue: hasPayment ? 7655 : null,
         ),
       );
 
@@ -1867,6 +1962,39 @@ void main() {
       expect(find.text(testCase.$2), findsOneWidget);
     });
   }
+
+  testWidgets('correction controls are offered only for open transactions', (
+    tester,
+  ) async {
+    const line = TransactionLineItem(
+      barcode: 'A',
+      description: 'Apples',
+      unitPriceMinorUnits: 100,
+    );
+    for (final status in [
+      TransactionStatus.paid,
+      TransactionStatus.completed,
+      TransactionStatus.voided,
+    ]) {
+      final testFixture = fixture();
+      final hasPayment = status != TransactionStatus.voided;
+      await establishTransaction(
+        testFixture,
+        snapshot(
+          status: status,
+          lineItems: const [line],
+          subtotal: 100,
+          total: 100,
+          tenderedCash: hasPayment ? 100 : null,
+          changeDue: hasPayment ? 0 : null,
+        ),
+      );
+      await pumpCashier(tester, testFixture.controller);
+
+      expect(find.text('Remove'), findsNothing);
+      expect(find.text('Void Sale'), findsNothing);
+    }
+  });
 
   testWidgets('recovery screen remains usable at 2x text scale', (
     tester,
@@ -1964,4 +2092,442 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+
+  testWidgets(
+    'remove confirmation is explicit and waits for authoritative GET',
+    (tester) async {
+      final testFixture = fixture(
+        commandIds: const ['cmd-start', 'cmd-remove'],
+      );
+      const lines = [
+        TransactionLineItem(
+          barcode: 'A',
+          description: 'Apples',
+          unitPriceMinorUnits: 100,
+        ),
+        TransactionLineItem(
+          barcode: 'B',
+          description: 'Bananas',
+          unitPriceMinorUnits: 200,
+        ),
+        TransactionLineItem(
+          barcode: 'C',
+          description: 'Cherries',
+          unitPriceMinorUnits: 300,
+        ),
+      ];
+      await establishTransaction(
+        testFixture,
+        snapshot(
+          version: 4,
+          lineItems: lines,
+          subtotal: 600,
+          tax: 60,
+          total: 660,
+        ),
+      );
+      await pumpCashier(tester, testFixture.controller);
+
+      expect(find.text('Remove'), findsNWidgets(3));
+      expect(find.text('Void Sale'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('cashier-remove-line-1')));
+      await tester.pumpAndSettle();
+      expect(find.text('Remove item?'), findsOneWidget);
+      expect(find.text('Bananas'), findsNWidgets(2));
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(testFixture.client.commands, hasLength(1));
+      expect(testFixture.ids.commandIdCalls, 1);
+
+      final commandCompleter = Completer<PosCommandResult>();
+      final readCompleter = Completer<TransactionSnapshot>();
+      testFixture.client.commandHandlers.add((_) => commandCompleter.future);
+      testFixture.client.transactionHandlers.add((_) => readCompleter.future);
+      await tester.tap(find.byKey(const Key('cashier-remove-line-1')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Remove Item'));
+      await tester.pump();
+
+      final command = testFixture.client.commands.last as RemoveLineItemCommand;
+      expect(command.lineIndex, 1);
+      expect(command.expectedVersion, 4);
+      // The closing dialog may still paint its item label for one route frame,
+      // but the old authoritative basket is already withheld.
+      expect(find.text('Basket'), findsNothing);
+      expect(find.text('Sale Voided'), findsNothing);
+
+      commandCompleter.complete(resultFor(command, version: 5));
+      await tester.pump();
+      expect(find.text('Loading latest transaction state...'), findsOneWidget);
+      expect(find.text('Basket'), findsNothing);
+
+      readCompleter.complete(
+        snapshot(
+          version: 5,
+          lineItems: [lines[0], lines[2]],
+          subtotal: 400,
+          tax: 40,
+          total: 440,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Bananas'), findsNothing);
+      expect(find.text('Apples'), findsOneWidget);
+      expect(find.text('Cherries'), findsOneWidget);
+      expect(find.text(r'$4.00'), findsOneWidget);
+      expect(find.text(r'$0.40'), findsOneWidget);
+      expect(find.text(r'$4.40'), findsOneWidget);
+      expect(
+        tester.widget<TextField>(barcodeField).focusNode!.hasFocus,
+        isTrue,
+      );
+    },
+  );
+
+  testWidgets('stale removal dialog cannot submit against a newer snapshot', (
+    tester,
+  ) async {
+    final testFixture = fixture(commandIds: const ['cmd-start']);
+    const line = TransactionLineItem(
+      barcode: 'A',
+      description: 'Apples',
+      unitPriceMinorUnits: 100,
+    );
+    await establishTransaction(
+      testFixture,
+      snapshot(version: 2, lineItems: const [line], subtotal: 100, total: 100),
+    );
+    await pumpCashier(tester, testFixture.controller);
+    await tester.tap(find.byKey(const Key('cashier-remove-line-0')));
+    await tester.pumpAndSettle();
+
+    testFixture.client.enqueueSnapshot(
+      snapshot(version: 3, lineItems: const [line], subtotal: 100, total: 100),
+    );
+    await testFixture.controller.refreshTransaction();
+    await tester.pump();
+    await tester.tap(find.text('Remove Item'));
+    await tester.pumpAndSettle();
+
+    expect(testFixture.client.commands, hasLength(1));
+    expect(testFixture.ids.commandIdCalls, 1);
+    expect(
+      find.text('Transaction changed. Select the item again.'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('void is authoritative, terminal, and Next Sale starts cleanly', (
+    tester,
+  ) async {
+    final testFixture = fixture(
+      commandIds: const ['cmd-start', 'cmd-void', 'cmd-next'],
+      transactionIds: const ['txn-1', 'txn-2'],
+    );
+    const line = TransactionLineItem(
+      barcode: 'A',
+      description: 'Apples',
+      unitPriceMinorUnits: 199,
+    );
+    await establishTransaction(
+      testFixture,
+      snapshot(
+        version: 2,
+        lineItems: const [line],
+        subtotal: 199,
+        tax: 20,
+        total: 219,
+      ),
+    );
+    await pumpCashier(tester, testFixture.controller);
+
+    await tester.tap(find.text('Void Sale'));
+    await tester.pumpAndSettle();
+    expect(find.text('Void this sale?'), findsOneWidget);
+    await tester.tap(find.text('Keep Sale'));
+    await tester.pumpAndSettle();
+    expect(testFixture.client.commands, hasLength(1));
+
+    final commandCompleter = Completer<PosCommandResult>();
+    final readCompleter = Completer<TransactionSnapshot>();
+    testFixture.client.commandHandlers.add((_) => commandCompleter.future);
+    testFixture.client.transactionHandlers.add((_) => readCompleter.future);
+    await tester.tap(find.text('Void Sale'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Void Sale'));
+    await tester.pump();
+    expect(find.text('Sale Voided'), findsNothing);
+    expect(find.text('Voiding sale...'), findsOneWidget);
+
+    final command = testFixture.client.commands.last as VoidTransactionCommand;
+    expect(command.expectedVersion, 2);
+    commandCompleter.complete(resultFor(command, version: 3));
+    await tester.pump();
+    expect(find.text('Loading latest transaction state...'), findsOneWidget);
+    expect(find.text('Sale Voided'), findsNothing);
+
+    readCompleter.complete(
+      snapshot(
+        version: 3,
+        status: TransactionStatus.voided,
+        lineItems: const [line],
+        subtotal: 199,
+        tax: 20,
+        total: 219,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Sale Voided'), findsOneWidget);
+    expect(find.text('Status: Voided'), findsOneWidget);
+    expect(find.text('Apples'), findsOneWidget);
+    expect(find.text(r'$1.99'), findsWidgets);
+    expect(find.text(r'$0.20'), findsWidgets);
+    expect(find.text(r'$2.19'), findsWidgets);
+    expect(find.text('Next Sale'), findsOneWidget);
+    expect(find.text('Scan Item'), findsNothing);
+    expect(find.text('Take Cash'), findsNothing);
+    expect(find.text('Remove'), findsNothing);
+    expect(find.text('Complete Sale'), findsNothing);
+    expect(find.text('Void Sale'), findsNothing);
+
+    testFixture.client.enqueueResult(
+      PosCommandOutcomeKind.accepted,
+      version: 1,
+    );
+    testFixture.client.enqueueSnapshot(
+      snapshot(transactionId: 'txn-2', version: 1),
+    );
+    await tester.tap(find.text('Next Sale'));
+    await tester.pumpAndSettle();
+    expect(find.text('No items scanned yet.'), findsOneWidget);
+    expect(tester.widget<TextField>(barcodeField).focusNode!.hasFocus, isTrue);
+  });
+
+  testWidgets(
+    'restored pending corrections expose only same-command recovery',
+    (tester) async {
+      final commands = <TransactionCommand>[
+        RemoveLineItemCommand(
+          commandId: 'cmd-pending-remove',
+          transactionId: 'txn-1',
+          expectedVersion: 4,
+          lineIndex: 1,
+        ),
+        VoidTransactionCommand(
+          commandId: 'cmd-pending-void',
+          transactionId: 'txn-1',
+          expectedVersion: 4,
+        ),
+      ];
+      for (final command in commands) {
+        final store = MemoryCashierSessionStore(
+          persisted: PersistedCashierSession(
+            activeTransactionId: 'txn-1',
+            pendingCommand: command,
+          ),
+        );
+        final testFixture = fixture(
+          commandIds: const [],
+          transactionIds: const [],
+          sessionStore: store,
+        );
+        await testFixture.controller.restoreLocalSession();
+        await pumpCashier(tester, testFixture.controller);
+
+        expect(find.text('Command result unknown'), findsOneWidget);
+        expect(find.text('Retry Command'), findsOneWidget);
+        expect(find.text('Start Sale'), findsNothing);
+        expect(find.text('Remove'), findsNothing);
+        expect(find.text('Void Sale'), findsNothing);
+        expect(testFixture.client.commands, isEmpty);
+      }
+    },
+  );
+
+  testWidgets('line-item rejection refreshes without automatic re-removal', (
+    tester,
+  ) async {
+    final testFixture = fixture(commandIds: const ['cmd-start', 'cmd-remove']);
+    const line = TransactionLineItem(
+      barcode: 'A',
+      description: 'Apples',
+      unitPriceMinorUnits: 199,
+    );
+    final refreshed = snapshot(
+      version: 2,
+      lineItems: const [line],
+      subtotal: 199,
+      total: 199,
+    );
+    await establishTransaction(testFixture, refreshed);
+    testFixture.client.enqueueResult(
+      PosCommandOutcomeKind.domainRejected,
+      code: 'line_item_not_found',
+      version: 2,
+    );
+    testFixture.client.enqueueSnapshot(refreshed);
+    await pumpCashier(tester, testFixture.controller);
+
+    await tester.tap(find.byKey(const Key('cashier-remove-line-0')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Remove Item'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('Item could not be removed. Latest transaction state loaded.'),
+      findsOneWidget,
+    );
+    expect(find.text('Apples'), findsOneWidget);
+    expect(testFixture.client.commands, hasLength(2));
+    expect(testFixture.ids.commandIdCalls, 2);
+    expect(tester.widget<TextField>(barcodeField).focusNode!.hasFocus, isTrue);
+  });
+
+  testWidgets('known correction with failed GET offers refresh, not retry', (
+    tester,
+  ) async {
+    final testFixture = fixture(commandIds: const ['cmd-start', 'cmd-void']);
+    await establishTransaction(testFixture, snapshot(version: 1));
+    testFixture.client.enqueueResult(
+      PosCommandOutcomeKind.accepted,
+      version: 2,
+    );
+    testFixture.client.enqueueReadFailure(
+      const PosCoreTransportFailure('read failed'),
+    );
+    await pumpCashier(tester, testFixture.controller);
+
+    await tester.tap(find.text('Void Sale'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Void Sale'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Refresh Transaction'), findsOneWidget);
+    expect(find.text('Retry Command'), findsNothing);
+    expect(find.text('Sale Voided'), findsNothing);
+    expect(testFixture.client.commands, hasLength(2));
+  });
+
+  testWidgets('completed sale loads View Receipt through receipt query', (
+    tester,
+  ) async {
+    final store = MemoryCashierSessionStore();
+    final testFixture = fixture(
+      commandIds: const ['cmd-start'],
+      sessionStore: store,
+    );
+    await establishTransaction(
+      testFixture,
+      snapshot(
+        status: TransactionStatus.completed,
+        version: 6,
+        lineItems: const [
+          TransactionLineItem(
+            barcode: 'snapshot-barcode',
+            description: 'Snapshot Basket Item',
+            unitPriceMinorUnits: 1,
+          ),
+        ],
+        subtotal: 1,
+        tax: 2,
+        total: 3,
+        tenderedCash: 4,
+        changeDue: 5,
+      ),
+    );
+    final persistedBefore = store.persisted;
+    testFixture.client.receiptHandlers.add(
+      (transactionId) async => canonicalReceipt(transactionId: transactionId),
+    );
+    await pumpCashier(
+      tester,
+      testFixture.controller,
+      receiptClient: testFixture.client,
+    );
+
+    expect(find.text('View Receipt'), findsOneWidget);
+    await tester.ensureVisible(find.text('View Receipt'));
+    await tester.tap(find.text('View Receipt'));
+    await tester.pumpAndSettle();
+
+    expect(testFixture.client.receiptReads, ['txn-1']);
+    expect(testFixture.client.commands, hasLength(1));
+    expect(testFixture.ids.commandIdCalls, 1);
+    expect(testFixture.ids.transactionIdCalls, 1);
+    expect(
+      testFixture.controller.state.snapshot!.status,
+      TransactionStatus.completed,
+    );
+    expect(find.text('Receipt-only Apples'), findsOneWidget);
+    expect(find.text('Snapshot Basket Item'), findsNothing);
+    expect(find.text(r'Subtotal $3.21'), findsOneWidget);
+    expect(find.text(r'Total $3.53'), findsOneWidget);
+    expect(
+      store.persisted!.activeTransactionId,
+      persistedBefore!.activeTransactionId,
+    );
+    expect(store.persisted!.pendingCommand, persistedBefore.pendingCommand);
+  });
+
+  testWidgets('receipt query failure leaves completed cashier state intact', (
+    tester,
+  ) async {
+    final testFixture = fixture(commandIds: const ['cmd-start']);
+    await establishTransaction(
+      testFixture,
+      snapshot(
+        status: TransactionStatus.completed,
+        version: 4,
+        tenderedCash: 500,
+        changeDue: 500,
+      ),
+    );
+    testFixture.client.receiptHandlers.add(
+      (_) async => throw const PosCoreTransportFailure('offline'),
+    );
+    await pumpCashier(
+      tester,
+      testFixture.controller,
+      receiptClient: testFixture.client,
+    );
+
+    await tester.ensureVisible(find.text('View Receipt'));
+    await tester.tap(find.text('View Receipt'));
+    await tester.pumpAndSettle();
+    expect(
+      find.text('Unable to load the completed sale receipt.'),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.byTooltip('Back'));
+    await tester.pumpAndSettle();
+    expect(find.text('Sale Complete'), findsOneWidget);
+    expect(find.text('Next Sale'), findsOneWidget);
+    expect(
+      testFixture.controller.state.snapshot!.status,
+      TransactionStatus.completed,
+    );
+    expect(testFixture.client.commands, hasLength(1));
+  });
+
+  testWidgets('voided sale does not offer a completed-sale receipt', (
+    tester,
+  ) async {
+    final testFixture = fixture(commandIds: const ['cmd-start']);
+    await establishTransaction(
+      testFixture,
+      snapshot(status: TransactionStatus.voided, version: 2),
+    );
+    await pumpCashier(
+      tester,
+      testFixture.controller,
+      receiptClient: testFixture.client,
+    );
+
+    expect(find.text('Sale Voided'), findsOneWidget);
+    expect(find.text('View Receipt'), findsNothing);
+    expect(testFixture.client.receiptReads, isEmpty);
+  });
 }

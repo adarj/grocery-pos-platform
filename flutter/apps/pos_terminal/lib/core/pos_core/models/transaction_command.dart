@@ -115,3 +115,38 @@ final class CompleteTransactionCommand extends TransactionCommand {
   @override
   Map<String, Object?> get payload => <String, Object?>{};
 }
+
+final class RemoveLineItemCommand extends TransactionCommand {
+  RemoveLineItemCommand({
+    required super.commandId,
+    required super.transactionId,
+    required super.expectedVersion,
+    required this.lineIndex,
+  }) {
+    if (lineIndex < 0) {
+      throw ArgumentError.value(lineIndex, 'lineIndex', 'must be nonnegative');
+    }
+  }
+
+  final int lineIndex;
+
+  @override
+  String get commandType => 'remove_line_item';
+
+  @override
+  Map<String, Object?> get payload => {'line_index': lineIndex};
+}
+
+final class VoidTransactionCommand extends TransactionCommand {
+  VoidTransactionCommand({
+    required super.commandId,
+    required super.transactionId,
+    required super.expectedVersion,
+  });
+
+  @override
+  String get commandType => 'void_transaction';
+
+  @override
+  Map<String, Object?> get payload => <String, Object?>{};
+}

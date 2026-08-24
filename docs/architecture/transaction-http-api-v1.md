@@ -4,8 +4,9 @@
 
 Transaction HTTP API v1 exposes the implemented durable cash-sale application
 boundary through the local Racket server. It is a transport adapter over the
-existing typed command service and authoritative transaction query; it does not
-implement transaction rules, idempotency, replay, or SQLite persistence.
+existing typed command service, authoritative transaction query, and canonical
+completed-sale receipt query; it does not implement transaction rules,
+idempotency, replay, or SQLite persistence.
 
 The implemented routes are:
 
@@ -14,6 +15,12 @@ The implemented routes are:
 | `GET` | `/health` | Process liveness |
 | `POST` | `/transaction-commands` | Execute or resolve one typed transaction command |
 | `GET` | `/transactions/{transaction_id}` | Read current authoritative transaction state |
+| `GET` | `/receipts/{transaction_id}` | Derive the canonical completed-sale receipt |
+| `GET` | `/register-context` | Read current register and open-shift state |
+| `GET` | `/cashiers` | List active configured cashiers |
+| `POST` | `/shifts/open` | Open or resolve a shift for one cashier |
+| `POST` | `/shifts/{shift_id}/close` | Close or resolve an idle shift |
+| `GET` | `/shifts/{shift_id}/cash-summary` | Read authoritative shift cash accountability |
 
 No command-specific mutation routes exist. The one command endpoint mirrors
 `transaction-service-execute-command` and prevents route handlers from
@@ -66,6 +73,14 @@ Malformed transport data receives `400 Bad Request` and creates no command
 receipt. The response never echoes the invalid body or exposes the codec's
 free-form diagnostic.
 
+The six current Schema v1 command types are `start_transaction`,
+`scan_barcode`, `tender_cash`, `complete_transaction`, `remove_line_item`, and
+`void_transaction`. Removal carries exactly one nonnegative, zero-based
+`line_index`; void carries an empty payload. The expected stream version binds
+a line index to the authoritative line list the caller observed. Structural
+index errors return `400`, while an exact nonnegative index that is not present
+is a durable domain rejection.
+
 ## Durable command result
 
 A resolved command returns only its durable original receipt metadata:
@@ -101,7 +116,15 @@ Durable receipt outcomes map as follows:
 
 `outcome_code` is the stable durable application code, such as
 `unknown_barcode`, `transaction_not_found`, `transaction_already_exists`,
-`stale_expected_version`, or `stream_version_conflict`.
+`line_item_not_found`, `invalid_transaction_state`,
+`stale_expected_version`, `stream_version_conflict`,
+`register_not_configured`, `shift_required`, or
+`shift_has_active_transaction`.
+
+`start_transaction` keeps its existing wire shape. POS Core, not Flutter,
+resolves the configured register and active shift. A new production start
+requires an open idle shift; no operational identity or timestamp is accepted
+from the command body.
 
 The command endpoint uses `200`, not `201`, for every accepted command because
 it represents command processing rather than a command-specific REST resource
@@ -182,23 +205,204 @@ A successful response is:
       }
     ],
     "subtotal_minor_units": 199,
-    "total_minor_units": 199,
+    "tax_minor_units": 20,
+    "total_minor_units": 219,
     "tendered_cash_minor_units": null,
     "change_due_minor_units": null
   }
 }
 ```
 
-Current status values are exactly `open`, `paid`, and `completed`. All currency
-values are exact JSON integer minor units. Tender and change fields remain
-present as JSON null before tender. The response contains no command receipts,
-event history, database row IDs, or journal metadata.
+Current status values are exactly `open`, `paid`, `completed`, and `voided`.
+All currency values are exact JSON integer minor units.
+`subtotal_minor_units` is the sum of stored base line prices,
+`tax_minor_units` is the sum of stored rounded line tax, and
+`total_minor_units` is their authoritative Racket-calculated sum.
+Tender sufficiency and change use that tax-inclusive total. Tender and change
+fields remain present as JSON null before tender. The response contains no
+command receipts, event history, database row IDs, or journal metadata.
+
+An accepted line removal is visible only through a subsequent authoritative
+query. It removes exactly one current line and its stored price/tax
+contribution. A voided projection retains the cancelled line list, subtotal,
+tax, and total, while tender and change remain null. `voided` is terminal; it
+describes a cancelled open basket and is not completed revenue.
 
 A missing transaction returns `404 Not Found` with code
 `transaction_not_found`. A journal or replay recovery failure returns
 `500 Internal Server Error` with code `transaction_recovery_failed`. An
 unexpected query exception returns the generic code `internal_error`. None of
 these responses exposes an internal exception message.
+
+## Canonical completed-sale receipt query
+
+`GET /receipts/{transaction_id}` is a read-only exact lookup. It loads and
+replays the same authoritative journal stream as the transaction query, then
+requires the reconstructed status to be `completed`. It takes no command ID or
+expected version and never reads current catalog/tax data for sale facts.
+
+A successful response is:
+
+```json
+{
+  "ok": true,
+  "receipt": {
+    "schema_version": 1,
+    "transaction_id": "txn_001",
+    "transaction_version": 4,
+    "line_items": [
+      {
+        "barcode": "049000001234",
+        "description": "Test Apples",
+        "unit_price_minor_units": 199,
+        "tax_category_id": "development-standard",
+        "tax_rate_millionths": 100000,
+        "tax_amount_minor_units": 20
+      }
+    ],
+    "subtotal_minor_units": 199,
+    "tax_minor_units": 20,
+    "total_minor_units": 219,
+    "tendered_cash_minor_units": 500,
+    "change_due_minor_units": 281
+  }
+}
+```
+
+Lines are the final retained sale lines after append-only corrections. Legacy
+untaxed lines use JSON null for category/rate and zero line tax. All monetary
+fields are exact integer minor units; Flutter must not reconstruct them.
+
+An unknown stream returns `404 transaction_not_found`. An existing open, paid,
+or voided transaction returns `409 receipt_not_available` with reason
+`transaction_not_completed`. Journal/replay corruption returns the same safe
+`500 transaction_recovery_failed` code as authoritative transaction recovery.
+Receipt Schema v1 contains no status, generated receipt ID, or fabricated
+timestamp. See [Canonical Completed-Sale Receipts](receipts.md).
+
+New transactions with recorded operational context return Receipt Schema v2.
+It retains all v1 line/money fields and adds exact historical values:
+
+```json
+{
+  "schema_version": 2,
+  "transaction_id": "txn_001",
+  "transaction_version": 4,
+  "register": {
+    "register_id": "register-front-01",
+    "display_name": "Front Register 1"
+  },
+  "cashier": {
+    "cashier_id": "cashier-001",
+    "display_name": "Alice"
+  },
+  "shift_id": "shift_...",
+  "started_at_epoch_ms": 1787500000000,
+  "completed_at_epoch_ms": 1787500030000,
+  "line_items": [
+    {
+      "barcode": "049000001234",
+      "description": "Test Apples",
+      "unit_price_minor_units": 199,
+      "tax_category_id": "development-standard",
+      "tax_rate_millionths": 100000,
+      "tax_amount_minor_units": 20
+    }
+  ],
+  "subtotal_minor_units": 199,
+  "tax_minor_units": 20,
+  "total_minor_units": 219,
+  "tendered_cash_minor_units": 500,
+  "change_due_minor_units": 281
+}
+```
+
+Identity and time come from transaction replay, not current configuration or
+query time. Legacy completed streams keep the exact v1 response.
+
+## Register and shift operations
+
+`GET /register-context` returns a legitimate unconfigured state rather than an
+error:
+
+```json
+{
+  "ok": true,
+  "register_context": {
+    "configured": false,
+    "register": null,
+    "active_shift": null
+  }
+}
+```
+
+When configured, `register` contains exact ID/display name. `active_shift` is
+null or contains its snapshotted register/cashier identity,
+`opened_at_epoch_ms`, nullable `closed_at_epoch_ms`, and nullable
+`active_transaction_id`.
+
+`GET /cashiers` returns only current active cashier IDs/display names used for
+selection. These are attribution references, not authentication credentials.
+
+`POST /shifts/open` requires exactly:
+
+```json
+{
+  "cashier_id": "cashier-001",
+  "opening_cash_minor_units": 10000
+}
+```
+
+Opening cash is an exact nonnegative integer. POS Core supplies
+register/name/time/shift ID and atomically records the opening cash movement.
+A successful response contains both `shift` and authoritative `cash_summary`.
+Repeating the same-cashier open returns the existing shift and first opening
+amount; a different cashier conflicts. Stable errors
+include `register_not_configured`, `cashier_not_found`, `cashier_inactive`, and
+`shift_already_open`.
+
+`POST /shifts/{shift_id}/close` requires:
+
+```json
+{ "counted_cash_minor_units": 14194 }
+```
+
+The exact nonnegative physical count is reconciled by POS Core. Success returns
+the closed `shift` and immutable `cash_summary`, including signed
+`over_short_minor_units`. It returns an already-closed
+shift and first reconciliation safely, but an open shift with an active transaction returns
+`409 shift_has_active_transaction`. Other stable errors include
+`shift_not_found` and `cash_accounting_unavailable` for a closed legacy shift.
+Unexpected/corrupt operational state fails as the safe
+generic `500 internal_error` without SQL or internal detail.
+
+`GET /shifts/{shift_id}/cash-summary` returns:
+
+```json
+{
+  "ok": true,
+  "cash_summary": {
+    "shift_id": "shift_...",
+    "status": "open",
+    "opening_cash_minor_units": 10000,
+    "completed_cash_sale_count": 3,
+    "cash_sales_minor_units": 1234,
+    "expected_cash_minor_units": 11234,
+    "counted_cash_minor_units": null,
+    "over_short_minor_units": null
+  }
+}
+```
+
+Closed summaries require counted cash and signed over/short. Ordinary money
+fields remain nonnegative exact integers. The summary is backend-derived;
+clients must not reconstruct expected cash or variance.
+
+Shift writes are not Transaction Command Schema mutations. They have no
+command ID, expected version, `retry_same_command_id`, or Flutter pending
+command record. After transport uncertainty, clients explicitly refresh
+`/register-context` and the exact shift cash summary. They do not automatically
+retry the write.
 
 ## Routing and common errors
 
@@ -210,6 +414,12 @@ Recognized routes with the wrong method return `405 Method Not Allowed` and an
 | `/health` | `GET` |
 | `/transaction-commands` | `POST` |
 | `/transactions/{transaction_id}` | `GET` |
+| `/receipts/{transaction_id}` | `GET` |
+| `/register-context` | `GET` |
+| `/cashiers` | `GET` |
+| `/shifts/open` | `POST` |
+| `/shifts/{shift_id}/close` | `POST` |
+| `/shifts/{shift_id}/cash-summary` | `GET` |
 
 Unknown paths and malformed transaction query shapes return the common
 structured `404` response:
@@ -238,6 +448,12 @@ The server is loopback-bound by default but is still an application trust
 boundary. Transaction HTTP API v1 does not add authentication, actor/session
 authorization, or production security claims. It also does not add a request
 streaming/body-size guarantee, readiness endpoint, automatic SQLite busy
-retry, persistent catalog, payment behavior, or external-effect exactly-once
+retry, payment behavior, or external-effect exactly-once
 semantics. Flutter now has a typed client and the current start, scan, cash
-tender, authoritative change, and completion cashier slice.
+tender, pre-payment line removal/void, authoritative tax/change, completion,
+next-sale cashier slice, and exact completed-sale receipt lookup. Receipt
+printing, timestamps, broad sale search, paid reversal/refund, and manager
+authorization are not part of the current surface. Register/cashier selection
+is persistent attribution only; it is not PIN/password authentication. The current
+single-category line-tax model and on-screen receipt are not claims of
+universal tax or fiscal compliance.

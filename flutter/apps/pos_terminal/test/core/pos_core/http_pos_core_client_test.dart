@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:pos_terminal/core/pos_core/http_pos_core_client.dart';
 import 'package:pos_terminal/core/pos_core/models/command_result.dart';
+import 'package:pos_terminal/core/pos_core/models/canonical_receipt.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_failure.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_command.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_snapshot.dart';
@@ -42,9 +43,25 @@ void main() {
       'status': 'open',
       'line_items': <Object?>[],
       'subtotal_minor_units': 0,
+      'tax_minor_units': 0,
       'total_minor_units': 0,
       'tendered_cash_minor_units': null,
       'change_due_minor_units': null,
+    },
+  };
+
+  Map<String, Object?> receiptEnvelope() => {
+    'ok': true,
+    'receipt': {
+      'schema_version': 1,
+      'transaction_id': 'txn/opaque value?',
+      'transaction_version': 4,
+      'line_items': <Object?>[],
+      'subtotal_minor_units': 199,
+      'tax_minor_units': 777,
+      'total_minor_units': 1234,
+      'tendered_cash_minor_units': 2000,
+      'change_due_minor_units': 999,
     },
   };
 
@@ -310,4 +327,282 @@ void main() {
       ),
     );
   });
+
+  test('fetchReceipt encodes exact ID and parses canonical receipt', () async {
+    final client = HttpPosCoreClient(
+      baseUri: baseUri,
+      httpClient: MockClient((request) async {
+        expect(request.method, 'GET');
+        expect(
+          request.url.toString(),
+          'http://127.0.0.1:7340/receipts/txn%2Fopaque%20value%3F',
+        );
+        return http.Response(jsonBody(receiptEnvelope()), 200);
+      }),
+    );
+
+    final CanonicalReceipt receipt = await client.fetchReceipt(
+      'txn/opaque value?',
+    );
+    expect(receipt.transactionId, 'txn/opaque value?');
+    expect(receipt.transactionVersion, 4);
+    expect(receipt.subtotalMinorUnits, 199);
+    expect(receipt.taxMinorUnits, 777);
+    expect(receipt.totalMinorUnits, 1234);
+  });
+
+  test('receipt query failures retain query-only retry semantics', () async {
+    for (final testCase in [
+      (404, 'transaction_not_found'),
+      (409, 'receipt_not_available'),
+    ]) {
+      final client = HttpPosCoreClient(
+        baseUri: baseUri,
+        httpClient: MockClient(
+          (_) async => http.Response(
+            jsonBody({
+              'ok': false,
+              'error': {
+                'code': testCase.$2,
+                if (testCase.$1 == 409) 'reason': 'transaction_not_completed',
+                'message': 'Safe receipt query failure.',
+                'retry_same_command_id': true,
+              },
+            }),
+            testCase.$1,
+          ),
+        ),
+      );
+
+      await expectLater(
+        client.fetchReceipt('txn-receipt'),
+        throwsA(
+          isA<PosCoreServerFailure>()
+              .having((failure) => failure.code, 'code', testCase.$2)
+              .having(
+                (failure) => failure.retrySameCommandId,
+                'retrySameCommandId',
+                isFalse,
+              ),
+        ),
+      );
+    }
+  });
+
+  test('receipt transport failure has no command retry identity', () async {
+    final client = HttpPosCoreClient(
+      baseUri: baseUri,
+      httpClient: MockClient(
+        (_) async => throw http.ClientException('receipt connection lost'),
+      ),
+    );
+
+    await expectLater(
+      client.fetchReceipt('txn-receipt'),
+      throwsA(
+        isA<PosCoreTransportFailure>().having(
+          (failure) => failure.retrySameCommandId,
+          'retrySameCommandId',
+          isFalse,
+        ),
+      ),
+    );
+  });
+
+  test('receipt response for another ID fails closed', () async {
+    final client = HttpPosCoreClient(
+      baseUri: baseUri,
+      httpClient: MockClient(
+        (_) async => http.Response(jsonBody(receiptEnvelope()), 200),
+      ),
+    );
+
+    await expectLater(
+      client.fetchReceipt('txn-requested'),
+      throwsA(isA<PosCoreInvalidResponseFailure>()),
+    );
+  });
+
+  test('malformed receipt response fails closed', () async {
+    final invalid = receiptEnvelope();
+    final receipt = Map<String, Object?>.from(
+      invalid['receipt']! as Map<String, Object?>,
+    )..remove('total_minor_units');
+    invalid['receipt'] = receipt;
+    final client = HttpPosCoreClient(
+      baseUri: baseUri,
+      httpClient: MockClient(
+        (_) async => http.Response(jsonBody(invalid), 200),
+      ),
+    );
+
+    await expectLater(
+      client.fetchReceipt('txn/opaque value?'),
+      throwsA(isA<PosCoreInvalidResponseFailure>()),
+    );
+  });
+
+  Map<String, Object?> shiftJson({int? closedAt}) => {
+    'shift_id': 'shift/opaque',
+    'register_id': 'register-one',
+    'register_display_name': 'Front Register',
+    'cashier_id': 'cashier-one',
+    'cashier_display_name': 'Alice',
+    'opened_at_epoch_ms': 1000,
+    'closed_at_epoch_ms': closedAt,
+    'active_transaction_id': null,
+  };
+
+  Map<String, Object?> cashSummaryJson({
+    String status = 'open',
+    int? counted,
+    int? overShort,
+  }) => {
+    'shift_id': 'shift/opaque',
+    'status': status,
+    'opening_cash_minor_units': 10000,
+    'completed_cash_sale_count': 1,
+    'cash_sales_minor_units': 219,
+    'expected_cash_minor_units': 10219,
+    'counted_cash_minor_units': counted,
+    'over_short_minor_units': overShort,
+  };
+
+  test(
+    'register context and active cashier queries use typed GET routes',
+    () async {
+      var requestNumber = 0;
+      final client = HttpPosCoreClient(
+        baseUri: baseUri,
+        httpClient: MockClient((request) async {
+          requestNumber += 1;
+          expect(request.method, 'GET');
+          if (requestNumber == 1) {
+            expect(request.url.path, '/register-context');
+            return http.Response(
+              jsonBody({
+                'ok': true,
+                'register_context': {
+                  'configured': true,
+                  'register': {
+                    'register_id': 'register-one',
+                    'display_name': 'Front Register',
+                  },
+                  'active_shift': null,
+                },
+              }),
+              200,
+            );
+          }
+          expect(request.url.path, '/cashiers');
+          return http.Response(
+            jsonBody({
+              'ok': true,
+              'cashiers': [
+                {'cashier_id': 'cashier-one', 'display_name': 'Alice'},
+              ],
+            }),
+            200,
+          );
+        }),
+      );
+      final context = await client.fetchRegisterContext();
+      final cashiers = await client.fetchActiveCashiers();
+      expect(context.register!.displayName, 'Front Register');
+      expect(cashiers.single.cashierId, 'cashier-one');
+    },
+  );
+
+  test(
+    'open close and cash-summary use exact operational money payloads',
+    () async {
+      var requestNumber = 0;
+      final client = HttpPosCoreClient(
+        baseUri: baseUri,
+        httpClient: MockClient((request) async {
+          requestNumber += 1;
+          if (requestNumber == 1) {
+            expect(request.method, 'POST');
+            expect(request.headers['content-type'], 'application/json');
+            expect(request.url.path, '/shifts/open');
+            expect(jsonDecode(request.body), {
+              'cashier_id': 'cashier-one',
+              'opening_cash_minor_units': 10000,
+            });
+            return http.Response(
+              jsonBody({
+                'ok': true,
+                'shift': shiftJson(),
+                'cash_summary': cashSummaryJson(),
+              }),
+              200,
+            );
+          }
+          if (requestNumber == 2) {
+            expect(request.method, 'POST');
+            expect(request.headers['content-type'], 'application/json');
+            expect(request.url.path, '/shifts/shift%2Fopaque/close');
+            expect(jsonDecode(request.body), {
+              'counted_cash_minor_units': 10194,
+            });
+            return http.Response(
+              jsonBody({
+                'ok': true,
+                'shift': shiftJson(closedAt: 2000),
+                'cash_summary': cashSummaryJson(
+                  status: 'closed',
+                  counted: 10194,
+                  overShort: -25,
+                ),
+              }),
+              200,
+            );
+          }
+          expect(request.method, 'GET');
+          expect(request.url.path, '/shifts/shift%2Fopaque/cash-summary');
+          return http.Response(
+            jsonBody({
+              'ok': true,
+              'cash_summary': cashSummaryJson(
+                status: 'closed',
+                counted: 10194,
+                overShort: -25,
+              ),
+            }),
+            200,
+          );
+        }),
+      );
+      final opened = await client.openShift('cashier-one', 10000);
+      final closed = await client.closeShift(opened.shift.shiftId, 10194);
+      final fetched = await client.fetchShiftCashSummary(opened.shift.shiftId);
+      expect(opened.shift.closedAtEpochMs, isNull);
+      expect(opened.cashSummary.openingCashMinorUnits, 10000);
+      expect(closed.shift.closedAtEpochMs, 2000);
+      expect(closed.cashSummary.overShortMinorUnits, -25);
+      expect(fetched.overShortMinorUnits, -25);
+    },
+  );
+
+  test(
+    'operational write transport failure has no command retry identity',
+    () async {
+      final client = HttpPosCoreClient(
+        baseUri: baseUri,
+        httpClient: MockClient(
+          (_) async => throw http.ClientException('connection lost'),
+        ),
+      );
+      await expectLater(
+        client.openShift('cashier-one', 0),
+        throwsA(
+          isA<PosCoreTransportFailure>().having(
+            (failure) => failure.retrySameCommandId,
+            'retrySameCommandId',
+            isFalse,
+          ),
+        ),
+      );
+    },
+  );
 }

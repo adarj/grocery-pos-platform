@@ -2,20 +2,27 @@
 
 (require rackunit
          "../pos/domain/catalog-item.rkt"
-         "../pos/domain/money.rkt")
+         "../pos/domain/money.rkt"
+         "../pos/domain/tax.rkt")
 
 (module+ test
   (test-case "catalog item owns immutable copies of textual facts"
     (define source-barcode (string-copy "049000001234"))
     (define source-description (string-copy "Test Apples"))
     (define item
-      (catalog-item source-barcode source-description (money 199)))
+      (catalog-item source-barcode
+                    source-description
+                    (money 199)
+                    "standard"
+                    (tax-rate 88750)))
 
     (string-set! source-barcode 0 #\9)
     (string-set! source-description 0 #\B)
 
     (check-equal? (catalog-item-barcode item) "049000001234")
     (check-equal? (catalog-item-description item) "Test Apples")
+    (check-equal? (catalog-item-tax-category-id item) "standard")
+    (check-equal? (catalog-item-tax-rate item) (tax-rate 88750))
     (check-true (immutable? (catalog-item-barcode item)))
     (check-true (immutable? (catalog-item-description item))))
 
@@ -24,18 +31,40 @@
                (lambda ()
                  (catalog-item 49000001234
                                "Test Apples"
-                               (money 199)))))
+                               (money 199)
+                               "standard"
+                               (tax-rate 0)))))
 
   (test-case "catalog item requires a string description"
     (check-exn exn:fail:contract?
                (lambda ()
                  (catalog-item "049000001234"
                                'test-apples
-                               (money 199)))))
+                               (money 199)
+                               "standard"
+                               (tax-rate 0)))))
 
   (test-case "catalog item requires a money unit price"
     (check-exn exn:fail:contract?
                (lambda ()
                  (catalog-item "049000001234"
                                "Test Apples"
-                               199)))))
+                               199
+                               "standard"
+                               (tax-rate 0)))))
+
+  (test-case "catalog item requires exact tax metadata"
+    (check-exn exn:fail:contract?
+               (lambda ()
+                 (catalog-item "049000001234"
+                               "Test Apples"
+                               (money 199)
+                               ""
+                               (tax-rate 0))))
+    (check-exn exn:fail:contract?
+               (lambda ()
+                 (catalog-item "049000001234"
+                               "Test Apples"
+                               (money 199)
+                               "standard"
+                               100000)))))

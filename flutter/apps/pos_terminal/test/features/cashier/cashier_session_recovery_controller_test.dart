@@ -3,6 +3,7 @@ import 'dart:collection';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pos_terminal/core/pos_core/models/command_result.dart';
+import 'package:pos_terminal/core/pos_core/models/canonical_receipt.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_failure.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_health.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_command.dart';
@@ -13,12 +14,16 @@ import 'package:pos_terminal/features/cashier/cashier_local_recovery_failure.dar
 import 'package:pos_terminal/features/cashier/cashier_session_controller.dart';
 import 'package:pos_terminal/features/cashier/cashier_session_store.dart';
 
+import '../../support/unimplemented_register_operations_client.dart';
+
 typedef CommandHandler =
     Future<PosCommandResult> Function(TransactionCommand command);
 typedef TransactionHandler =
     Future<TransactionSnapshot> Function(String transactionId);
 
-final class RecordingClient implements PosCoreClient {
+final class RecordingClient
+    with UnimplementedRegisterOperationsClient
+    implements PosCoreClient {
   RecordingClient(this.log);
 
   final List<String> log;
@@ -26,6 +31,11 @@ final class RecordingClient implements PosCoreClient {
   final Queue<TransactionHandler> transactionHandlers = Queue();
   final List<TransactionCommand> commands = [];
   final List<String> reads = [];
+
+  @override
+  Future<CanonicalReceipt> fetchReceipt(String transactionId) {
+    throw UnimplementedError();
+  }
 
   @override
   Future<PosCoreHealth> fetchHealth() => throw UnimplementedError();
@@ -152,15 +162,18 @@ TransactionSnapshot snapshot({
   int version = 1,
   TransactionStatus status = TransactionStatus.open,
 }) {
+  final hasPayment =
+      status == TransactionStatus.paid || status == TransactionStatus.completed;
   return TransactionSnapshot(
     transactionId: transactionId,
     version: version,
     status: status,
     lineItems: const [],
     subtotalMinorUnits: 0,
+    taxMinorUnits: 0,
     totalMinorUnits: 0,
-    tenderedCashMinorUnits: status == TransactionStatus.open ? null : 500,
-    changeDueMinorUnits: status == TransactionStatus.open ? null : 0,
+    tenderedCashMinorUnits: hasPayment ? 500 : null,
+    changeDueMinorUnits: hasPayment ? 0 : null,
   );
 }
 
@@ -215,7 +228,14 @@ Future<void> startOpen(
 void main() {
   test('every new command is persisted before its POST', () async {
     final testFixture = fixture(
-      commandIds: const ['cmd-start', 'cmd-scan', 'cmd-tender', 'cmd-complete'],
+      commandIds: const [
+        'cmd-start',
+        'cmd-scan',
+        'cmd-tender',
+        'cmd-complete',
+        'cmd-remove',
+        'cmd-void',
+      ],
     );
     await startOpen(testFixture, version: 1);
     testFixture.client.enqueueResult();
@@ -231,12 +251,24 @@ void main() {
     );
     testFixture.client.enqueueSnapshot(snapshot(version: 2));
     await testFixture.controller.completeTransaction();
+    testFixture.client.enqueueResult(
+      kind: PosCommandOutcomeKind.domainRejected,
+    );
+    testFixture.client.enqueueSnapshot(snapshot(version: 2));
+    await testFixture.controller.removeLineItem(0);
+    testFixture.client.enqueueResult(
+      kind: PosCommandOutcomeKind.domainRejected,
+    );
+    testFixture.client.enqueueSnapshot(snapshot(version: 2));
+    await testFixture.controller.voidTransaction();
 
     for (final commandType in <String>[
       'start_transaction',
       'scan_barcode',
       'tender_cash',
       'complete_transaction',
+      'remove_line_item',
+      'void_transaction',
     ]) {
       expect(
         testFixture.log.indexOf('save:$commandType'),
@@ -266,6 +298,68 @@ void main() {
       expect(testFixture.controller.state.canExecuteNewMutation, isTrue);
     },
   );
+
+  test(
+    'pre-send correction persistence failure performs zero correction POSTs',
+    () async {
+      for (final action in <String>['remove', 'void']) {
+        final testFixture = fixture(
+          commandIds: const ['cmd-start', 'cmd-correction'],
+        );
+        await startOpen(testFixture, version: 3);
+        final authoritative = testFixture.controller.state.snapshot;
+        testFixture.store.nextSaveFailure =
+            const CashierSessionStoreFailure.storageUnavailable();
+
+        if (action == 'remove') {
+          await testFixture.controller.removeLineItem(0);
+        } else {
+          await testFixture.controller.voidTransaction();
+        }
+
+        expect(testFixture.client.commands, hasLength(1), reason: action);
+        expect(testFixture.controller.state.snapshot, same(authoritative));
+        expect(testFixture.controller.state.pendingCommand, isNull);
+        expect(testFixture.controller.state.canExecuteNewMutation, isTrue);
+      }
+    },
+  );
+
+  test('known correction plus failed GET remains refresh-only', () async {
+    for (final action in <String>['remove', 'void']) {
+      final testFixture = fixture(
+        commandIds: const ['cmd-start', 'cmd-correction'],
+      );
+      await startOpen(testFixture, version: 3);
+      testFixture.client.enqueueResult();
+      testFixture.client.enqueueReadFailure(
+        const PosCoreTransportFailure('read failed'),
+      );
+
+      if (action == 'remove') {
+        await testFixture.controller.removeLineItem(0);
+      } else {
+        await testFixture.controller.voidTransaction();
+      }
+
+      expect(testFixture.controller.state.pendingCommand, isNull);
+      expect(testFixture.controller.state.snapshot, isNull);
+      expect(testFixture.controller.state.canRefresh, isTrue);
+      expect(testFixture.store.persisted!.pendingCommand, isNull);
+      expect(testFixture.client.commands, hasLength(2));
+
+      final restored = snapshot(
+        version: 4,
+        status: action == 'void'
+            ? TransactionStatus.voided
+            : TransactionStatus.open,
+      );
+      testFixture.client.enqueueSnapshot(restored);
+      await testFixture.controller.refreshTransaction();
+      expect(testFixture.client.commands, hasLength(2));
+      expect(testFixture.controller.state.snapshot, same(restored));
+    }
+  });
 
   test(
     'pending command is recoverable while POST is still unresolved',
@@ -574,6 +668,63 @@ void main() {
       expect(testFixture.ids.transactionCalls, 1);
     }
   });
+
+  test('authoritative voided session can begin the next sale', () async {
+    final testFixture = fixture(
+      commandIds: const ['cmd-old', 'cmd-next'],
+      transactionIds: const ['txn-old', 'txn-next'],
+    );
+    testFixture.client.enqueueResult();
+    testFixture.client.enqueueSnapshot(
+      snapshot(transactionId: 'txn-old', status: TransactionStatus.voided),
+    );
+    await testFixture.controller.startTransaction();
+    testFixture.log.clear();
+    testFixture.client.enqueueResult();
+    final nextSnapshot = snapshot(transactionId: 'txn-next');
+    testFixture.client.enqueueSnapshot(nextSnapshot);
+
+    await testFixture.controller.beginNextSale();
+
+    expect(testFixture.log.take(3), [
+      'clear',
+      'save:start_transaction',
+      'post:start_transaction',
+    ]);
+    expect(testFixture.controller.state.snapshot, same(nextSnapshot));
+  });
+
+  test(
+    'restored pending removal retries exact command without generating IDs',
+    () async {
+      final pending = RemoveLineItemCommand(
+        commandId: 'cmd-restored-remove',
+        transactionId: 'txn-restored',
+        expectedVersion: 8,
+        lineIndex: 1,
+      );
+      final testFixture = fixture(
+        persisted: PersistedCashierSession(
+          activeTransactionId: 'txn-restored',
+          pendingCommand: pending,
+        ),
+        commandIds: const [],
+        transactionIds: const [],
+      );
+
+      await testFixture.controller.restoreLocalSession();
+      testFixture.client.enqueueResult();
+      final authoritative = snapshot(transactionId: 'txn-restored', version: 9);
+      testFixture.client.enqueueSnapshot(authoritative);
+      await testFixture.controller.retryPendingCommand();
+
+      expect(testFixture.client.commands, [same(pending)]);
+      expect(testFixture.ids.commandCalls, 0);
+      expect(testFixture.ids.transactionCalls, 0);
+      expect(testFixture.store.persisted!.pendingCommand, isNull);
+      expect(testFixture.controller.state.snapshot, same(authoritative));
+    },
+  );
 
   test(
     'next sale clear failure preserves completed sale and consumes no IDs',

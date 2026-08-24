@@ -12,7 +12,7 @@
                   transaction-status
                   transaction-subtotal)
          "../pos/persistence/sqlite-transaction-event-store.rkt"
-         "../pos/persistence/transaction-journal-migrations.rkt")
+         "../pos/persistence/pos-database-migrations.rkt")
 
 (define (call-with-test-database procedure)
   (define connection
@@ -71,13 +71,17 @@ SQL
 
 (define expected-migration-history
   (list #(1 "create_transaction_events")
-        #(2 "create_transaction_command_receipts")))
+        #(2 "create_transaction_command_receipts")
+        #(3 "create_catalog")
+        #(4 "create_tax_categories")
+        #(5 "create_register_operations")
+        #(6 "create_shift_cash_accountability")))
 
 (module+ test
-  (test-case "fresh database migrates through versions 1 and 2"
+  (test-case "fresh database migrates through versions 1 through 6"
     (call-with-test-database
      (lambda (connection)
-       (migrate-transaction-journal! connection)
+       (migrate-pos-database! connection)
 
        (check-equal?
         (query-list
@@ -89,12 +93,20 @@ WHERE type = 'table'
   AND name IN (
     'pos_schema_migrations',
     'transaction_events',
-    'transaction_command_receipts'
+    'transaction_command_receipts',
+    'catalog_items',
+    'catalog_barcodes',
+    'tax_categories',
+    'catalog_item_tax_categories'
   )
 ORDER BY name
 SQL
          )
-        '("pos_schema_migrations"
+        '("catalog_barcodes"
+          "catalog_item_tax_categories"
+          "catalog_items"
+          "pos_schema_migrations"
+          "tax_categories"
           "transaction_command_receipts"
           "transaction_events"))
        (check-equal?
@@ -132,7 +144,7 @@ SQL
           connection
           "SELECT * FROM transaction_events ORDER BY id"))
 
-       (migrate-transaction-journal! connection)
+       (migrate-pos-database! connection)
 
        (check-equal?
         (query-rows
@@ -166,11 +178,11 @@ SQL
        (check-equal? (transaction-status recovered) 'open)
        (check-equal? (transaction-subtotal recovered) (money 199)))))
 
-  (test-case "valid v2 migration is safe to run again"
+  (test-case "valid v6 migration is safe to run again"
     (call-with-test-database
      (lambda (connection)
-       (migrate-transaction-journal! connection)
-       (migrate-transaction-journal! connection)
+       (migrate-pos-database! connection)
+       (migrate-pos-database! connection)
 
        (check-equal?
         (query-rows
@@ -191,12 +203,12 @@ SQL
   (test-case "migration rejects unknown, missing, or renamed history"
     (call-with-test-database
      (lambda (connection)
-       (migrate-transaction-journal! connection)
+       (migrate-pos-database! connection)
        (query-exec
         connection
-        "INSERT INTO pos_schema_migrations (version, name) VALUES (3, 'unknown')")
+       "INSERT INTO pos_schema_migrations (version, name) VALUES (7, 'unknown')")
        (check-exn exn:fail?
-                  (lambda () (migrate-transaction-journal! connection)))))
+                  (lambda () (migrate-pos-database! connection)))))
 
     (call-with-test-database
      (lambda (connection)
@@ -205,21 +217,21 @@ SQL
         connection
         "INSERT INTO pos_schema_migrations (version, name) VALUES (2, 'create_transaction_command_receipts')")
        (check-exn exn:fail?
-                  (lambda () (migrate-transaction-journal! connection)))))
+                  (lambda () (migrate-pos-database! connection)))))
 
     (call-with-test-database
      (lambda (connection)
-       (migrate-transaction-journal! connection)
+       (migrate-pos-database! connection)
        (query-exec
         connection
         "UPDATE pos_schema_migrations SET name = 'renamed' WHERE version = 2")
        (check-exn exn:fail?
-                  (lambda () (migrate-transaction-journal! connection))))))
+                  (lambda () (migrate-pos-database! connection))))))
 
   (test-case "migration rejects a drifted command-receipt table"
     (call-with-test-database
      (lambda (connection)
-       (migrate-transaction-journal! connection)
+       (migrate-pos-database! connection)
        (query-exec connection "DROP TABLE transaction_command_receipts")
        (query-exec
         connection
@@ -239,12 +251,12 @@ CREATE TABLE transaction_command_receipts (
 SQL
         )
        (check-exn exn:fail?
-                  (lambda () (migrate-transaction-journal! connection))))))
+                  (lambda () (migrate-pos-database! connection))))))
 
   (test-case "migration rejects a same-named non-unique stream index"
     (call-with-test-database
      (lambda (connection)
-       (migrate-transaction-journal! connection)
+       (migrate-pos-database! connection)
        (query-exec
         connection
         "DROP INDEX transaction_events_stream_sequence_unique")
@@ -258,12 +270,12 @@ SQL
 
        (check-exn exn:fail?
                   (lambda ()
-                    (migrate-transaction-journal! connection))))))
+                    (migrate-pos-database! connection))))))
 
   (test-case "migration rejects a stream index over the wrong columns"
     (call-with-test-database
      (lambda (connection)
-       (migrate-transaction-journal! connection)
+       (migrate-pos-database! connection)
        (query-exec
         connection
         "DROP INDEX transaction_events_stream_sequence_unique")
@@ -277,12 +289,12 @@ SQL
 
        (check-exn exn:fail?
                   (lambda ()
-                    (migrate-transaction-journal! connection))))))
+                    (migrate-pos-database! connection))))))
 
   (test-case "database constraints continue to defend stream positions"
     (call-with-test-database
      (lambda (connection)
-       (migrate-transaction-journal! connection)
+       (migrate-pos-database! connection)
        (define insert-sql
          #<<SQL
 INSERT INTO transaction_events

@@ -2,11 +2,13 @@
 
 ## Status
 
-The Flutter `pos_terminal` implements a typed client for the three current
-local POS Core routes, a cashier-session application controller, and the
+The Flutter `pos_terminal` implements a typed client for the current local POS
+Core transaction, receipt, and register-operation routes, a cashier-session
+application controller, and the
 current cash-sale cashier slice: start, scan, cash tender, authoritative paid
-state/change, completion, crash-safe command-intent recovery, and explicit
-next-sale session transition.
+state/change, completion, open-sale line removal/void, crash-safe
+command-intent recovery, explicit next-sale session transition, and read-only
+canonical completed-sale receipt lookup.
 
 The backend wire contract remains authoritative and is documented in
 [Transaction HTTP API v1](transaction-http-api-v1.md). Command retry semantics
@@ -19,7 +21,11 @@ are governed by
 
 - reading process health;
 - executing one typed transaction command;
-- reading current authoritative transaction state.
+- reading current authoritative transaction state;
+- reading a canonical completed-sale receipt by exact transaction ID;
+- reading configured register/active-shift context and active cashier choices;
+- explicitly opening and reconciling/closing a register shift;
+- reading authoritative shift cash summaries.
 
 Widgets do not receive raw `http.Response` values or package HTTP exceptions.
 Flutter owns presentation and cashier intent orchestration; it does not
@@ -35,17 +41,20 @@ lib/
   core/pos_core/                    typed client boundary and HTTP adapter
     models/                         wire-facing immutable values
   features/cashier/                 session state, recovery, orchestration, UI
-  features/status/                  health gateway to the cashier
+  features/receipt/                 read-only receipt lookup and presentation
+  features/status/                  health/register/shift operational home
 ```
 
 ## Commands
 
-The four sealed command variants mirror Transaction Command Schema v1:
+The six sealed command variants mirror Transaction Command Schema v1:
 
 - `StartTransactionCommand`;
 - `ScanBarcodeCommand`;
 - `TenderCashCommand`;
-- `CompleteTransactionCommand`.
+- `CompleteTransactionCommand`;
+- `RemoveLineItemCommand`;
+- `VoidTransactionCommand`.
 
 Every command retains its caller-supplied `commandId`, `transactionId`, and
 `expectedVersion`. Tender amounts are integer minor units. The HTTP client does
@@ -130,7 +139,7 @@ create exact typed command
 
 The versioned record contains exactly an active transaction ID and an optional
 Transaction Command Schema v1 command. It never contains a transaction
-snapshot, line items, totals, status, tender/change, command result, event, or
+snapshot, line items, subtotal/tax/total, status, tender/change, command result, event, or
 backend receipt. This store is client intent/session metadata, not transaction
 truth; POS Core remains the only authority for sale state.
 
@@ -195,10 +204,52 @@ one exists, reports that the command was not sent, and performs no backend
 mutation. A later explicit cashier action may try again after local storage is
 usable.
 
+## Register operational home
+
+After health succeeds, Flutter reads typed `RegisterContext`. An unconfigured
+database shows `Register configuration required`, points to the explicit CLI
+workflow, blocks `Open Register`, and still permits historical receipt lookup.
+Flutter does not create a default identity.
+
+A configured register with no shift loads the active cashier directory,
+accepts exact opening cash through the shared integer-only money parser, and
+offers `Select Cashier` / `Open Shift`. The request sends the exact cashier ID
+and nonnegative opening minor units. While it is pending the action cannot be submitted again. Transport
+uncertainty offers `Refresh Register State`; it never enters transaction
+same-command recovery.
+
+An active shift displays its snapshotted register/cashier names, opaque shift
+ID, explicitly UTC open time, and backend opening cash. It enables
+`Open Register`, receipt lookup, and a close-reconciliation workflow. The
+cashier enters an independent physical count; expected cash is not prefilled.
+An active-sale close rejection tells the operator to finish or void the sale;
+Flutter never abandons transaction state to force closure. Success first shows
+the authoritative opening, sales, expected, counted, and signed over/short
+values, then `Done` returns to cashier selection.
+
+`ShiftCashSummary` strictly parses nonnegative opening/sales/expected/count
+fields, a nonnegative completed-sale count, explicit open/closed status, and a
+signed variance only for a closed reconciliation. Widgets render those values
+independently even if they appear arithmetically surprising. Flutter never
+calculates expected cash or over/short.
+
+An uncertain open or close is recovered through `GET /register-context` and
+`GET /shifts/{shift_id}/cash-summary`; Flutter does not automatically repeat the
+write. A closed summary recovers the durable result after response loss. No
+cash summary or reconciliation is added to `CashierSessionStore`.
+
+The operational models and client parse exact nonnegative epoch milliseconds,
+strict identity fields, and valid configured/shift nullability. Operational
+writes create no transaction command ID and do not touch
+`CashierSessionStore`.
+
+Cashier selection is identity attribution, not authentication. The UI makes no
+PIN, password, authenticated-session, role, or manager-authorization claim.
+
 ## Cashier presentation
 
-The health screen remains the liveness gateway and exposes an explicit
-`Open Register` action only after POS Core reports healthy. The cashier screen
+The health/register home remains the liveness and operational gateway and
+exposes `Open Register` only while an active shift exists. The cashier screen
 then renders `CashierSessionState` and invokes controller intent methods; it
 does not construct commands, generate IDs, choose expected versions, or call
 `PosCoreClient` directly.
@@ -210,13 +261,18 @@ The current presentation supports:
 - barcode entry through a labeled field, button submission, or keyboard-wedge
   scanner Enter submission;
 - backend-order line-item rendering and integer-only USD minor-unit formatting;
-- backend-provided subtotal and total rendering without local calculation;
+- backend-provided subtotal, tax, and total rendering without local
+  calculation;
 - exact human cash-entry parsing into integer minor units without floating
   point;
 - cash-tender submission without locally deciding sufficiency;
 - authoritative paid-state, tendered-cash, and change presentation;
 - sale completion followed by an authoritative completed-state read;
-- an explicit `Next Sale` action after an authoritative completed snapshot;
+- confirmed removal of one selected open-sale line, followed by an
+  authoritative read;
+- confirmed pre-payment void, followed by an authoritative `voided` read;
+- an explicit `Next Sale` action after an authoritative completed or voided
+  snapshot;
 - concise feedback for unknown barcodes and version conflicts;
 - an explicit `Retry Command` recovery panel for an uncertain mutation;
 - a distinct `Refresh Transaction` panel when a command is known but the
@@ -241,6 +297,7 @@ cash or another control is not immediately undone.
 F2 focuses barcode and F4 focuses cash only while an authoritative open sale is
 idle. They are focus-only shortcuts: they never submit a mutation, generate an
 ID, bypass recovery, or operate during busy, paid, completed, or blocked states.
+The shortcuts are also inert in voided state.
 Enter remains the only keyboard-wedge submission mechanism. While one scan is
 unresolved the input controls are unavailable, and no scan queue or buffered
 second intent exists.
@@ -263,15 +320,40 @@ shows a safe unavailable state rather than inventing zero values.
 the retained command identity is preserved. `Refresh Transaction` calls only
 `CashierSessionController.refreshTransaction`, so it cannot accidentally
 resend a command whose durable result is already known. These same recovery
-paths apply to scan, tender, and completion commands.
+paths apply to scan, tender, completion, removal, and void commands. A retry
+uses the exact persisted correction command; it never reconstructs one from
+currently visible line or dialog state.
 
 `Next Sale` is a client-session safety operation, not a Racket lifecycle rule.
-It is available only from an authoritative completed snapshot. One explicit
-press clears the completed local session before creating, persisting, and
-sending a new start intent with new transaction and command IDs. Open and paid
-sessions cannot be abandoned through this operation. Completion does not
-automatically begin another sale. Barcode focus returns only after the new
-start command resolves and its authoritative GET reports an open transaction.
+It is available only from an authoritative completed or voided snapshot. One
+explicit press clears the terminal local session before creating, persisting,
+and sending a new start intent with new transaction and command IDs. Open and
+paid sessions cannot be abandoned through this operation. Completion or void
+does not automatically begin another sale. Barcode focus returns only after
+the new start command resolves and its authoritative GET reports an open
+transaction.
+
+POS Core additionally requires an open idle shift for every new start. A stale
+Flutter home cannot bypass that rule. `shift_required` is rendered as `Open a
+cashier shift before starting a sale.` without inventing an anonymous sale.
+Completion or void atomically frees the backend shift slot, so Next Sale under
+the same still-open shift uses the existing client lifecycle unchanged.
+
+Each authoritative open basket row has a text-labeled Remove action. The
+confirmation captures the exact source snapshot; if the controller's trusted
+snapshot changes while the dialog is open, Flutter submits nothing and asks
+the cashier to select the item again. The controller still derives
+`expectedVersion`; the widget never supplies it. Backend expected-version
+enforcement is the second guard against external concurrent changes. After a
+confirmed command, the old basket is withheld and the row disappears only
+after GET returns the corrected projection.
+
+`Void Sale` is a secondary, confirmed open-sale action, including for an empty
+sale. Flutter does not show `Sale Voided` from an accepted command result. Only
+an authoritative `voided` snapshot establishes that terminal presentation,
+which retains the backend-provided cancelled basket and subtotal/tax/total and
+offers Next Sale. Paid, completed, and voided transactions expose no Remove or
+Void controls; post-payment refund/reversal remains separate.
 
 High-frequency and recovery actions use enlarged text-labeled touch targets.
 Paid and completed presentations give the backend-provided Change Due value the
@@ -297,10 +379,41 @@ original durable command outcome version, not necessarily the transaction's
 current version.
 
 `TransactionSnapshot` mirrors the authoritative transaction query. Status is a
-closed value (`open`, `paid`, or `completed`), line items are backend-provided,
-and all money remains integer minor units. Tender and change are nullable until
-the backend reports them. The client does not derive totals or synthesize an
-empty transaction after a failed read.
+closed value (`open`, `paid`, `completed`, or `voided`), line items are
+backend-provided,
+and subtotal, tax, total, tender, and change remain integer minor units. Tax is
+a required field and is never inferred as `total - subtotal`; the cashier
+renders all three summary values independently. Tender and change are nullable
+until the backend reports them. The client does not derive totals or synthesize
+an empty transaction after a failed read.
+
+## Canonical receipt reads
+
+`CanonicalReceipt` and `CanonicalReceiptLine` strictly parse Receipt Schemas v1
+and v2. Both preserve the backend's final stream version, retained line order,
+sale-time price/tax fields, transaction totals, cash, and change. A legacy line
+retains paired null category/rate metadata and zero stored line tax. Flutter
+does not recalculate consistency: subtotal, tax, total, tender, and change are
+rendered independently from the response.
+
+Receipt v1 remains context-free for legacy transactions. Receipt v2 requires
+exact register/cashier identities, shift ID, and paired start/completion epoch
+milliseconds. The receipt screen presents these snapshots and formats the
+completion time explicitly in UTC; it performs no current-configuration lookup
+and invents no context for v1.
+
+`fetchReceipt(transactionId)` is a query, not a mutation. It generates no
+command ID or expected version, receives no same-command retry semantics, and
+never touches `CashierSessionStore`. Explicitly repeating a failed GET is safe.
+
+An authoritative completed cashier view exposes `View Receipt`, which opens a
+dedicated screen and fetches the receipt from POS Core. It does not copy the
+visible `TransactionSnapshot`. The connected gateway separately exposes
+`Lookup Completed Sale`; lookup sends the exact submitted transaction ID only
+after Enter/button activation and performs no normalization, case folding, or
+search-as-you-type. Unknown and non-completed transactions receive distinct
+safe messages. A failed receipt read leaves the completed cashier session
+unchanged. Voided transactions do not expose View Receipt.
 
 ## Failures and uncertain mutations
 
@@ -341,13 +454,33 @@ or use a test-only route. Readiness is established through bounded polling of
 the real `/health` endpoint, and teardown stops the child process before
 removing its temporary directory.
 
-The suite covers the full cash sale and Next Sale, three sequential scans, ten
-bounded full-sale cycles, active and paid transaction recovery across both
-Flutter-controller and POS Core restart, transport failure with a persisted
-pending command, and GET-only restoration when pending is null. It also models
+Before the first server start, the fixture invokes the production catalog and
+register-configuration activation CLIs against that isolated database.
+Restarts reuse it without reseeding. Sale scenarios open an actual shift
+through the typed HTTP client.
+
+The suite covers the full cash sale and Next Sale, three sequential scans,
+tax-aware line removal, same-ID removal duplicate prevention, void/restart/Next
+Sale, ten bounded full-sale cycles, active and paid transaction recovery across
+both Flutter-controller and POS Core restart, transport failure with a
+persisted pending command, and GET-only restoration when pending is null. It also models
 a real accepted scan whose local pending marker remains stale across POS Core
 restart: retrying that exact restored command resolves through the durable
 backend receipt and the authoritative basket contains the item exactly once.
+It also loads a corrected completed-sale receipt through real HTTP, verifies
+semantic receipt equality after POS Core restart, rejects a voided receipt,
+and proves that replacing the current persistent catalog/tax snapshot cannot
+change an old receipt's sale-time facts.
+
+Operational scenarios additionally prove configured/no-shift startup,
+same-cashier shift open with immutable opening cash, active-transaction close
+protection, exact net sale movements, duplicate-completion defense, correction
+and void cash behavior, exact and shortage reconciliation, close-response read
+recovery, Receipt v2 attribution, shift/transaction binding across POS Core
+restart, and historical identity stability after configuration rename. The
+mixed ten-transaction endurance run uses one shift, reconciles only completed
+sales, records a deliberate overage, and verifies the closed summary after
+restart.
 
 These tests remain outside ordinary `flutter test` discovery. The fast Flutter
 unit/widget suite continues to use deterministic clients, while
@@ -358,9 +491,14 @@ and diagnostics are documented in
 ## Deliberately deferred
 
 This slice does not implement automatic retry, retry timers, cached/offline
-transaction truth, split tender, card/external payment behavior, receipt
-printing, or drawer behavior. The recovery file currently contains only
-barcode and integer-cash command payloads and is never logged.
+transaction truth, quantity editing, post-payment refund/reversal, split
+tender, card/external payment behavior, receipt printing, receipt numbering or
+date/recent-sale search, drawer hardware, cash drops, paid-outs, refunds, or
+general accounting reports. It also does not implement employee authentication,
+PINs/passwords, roles, manager authorization, or variance approval.
+Current recovery payloads may contain an opaque barcode, integer cash amount,
+or nonnegative removal line index; void and lifecycle commands have empty
+payloads. The recovery record is never logged.
 
 Future payment, terminal, and device commands must not reuse this storage
 design automatically. They require separate security analysis and explicit

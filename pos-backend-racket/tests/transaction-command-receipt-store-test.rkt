@@ -9,7 +9,7 @@
          "../pos/domain/money.rkt"
          "../pos/persistence/transaction-command-codec.rkt"
          "../pos/persistence/transaction-command-receipt-store.rkt"
-         "../pos/persistence/transaction-journal-migrations.rkt")
+         "../pos/persistence/pos-database-migrations.rkt")
 
 (define start-command
   (start-transaction-command "cmd-start" "txn-001" 0))
@@ -28,7 +28,7 @@
   (dynamic-wind
     void
     (lambda ()
-      (migrate-transaction-journal! connection)
+      (migrate-pos-database! connection)
       (procedure connection))
     (lambda () (disconnect connection))))
 
@@ -254,7 +254,7 @@ JSON
         (dynamic-wind
           void
           (lambda ()
-            (migrate-transaction-journal! writer)
+            (migrate-pos-database! writer)
             (insert-transaction-command-receipt!
              writer
              (accepted-receipt tender-command 3)))

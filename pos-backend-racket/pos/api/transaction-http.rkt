@@ -61,6 +61,7 @@
     [(invalid-expected-version) "invalid_expected_version"]
     [(invalid-barcode) "invalid_barcode"]
     [(invalid-money) "invalid_money"]
+    [(invalid-line-index) "invalid_line_index"]
     [else
      (error
       'decode-failure-code->reason
@@ -192,6 +193,7 @@
     [(open) "open"]
     [(paid) "paid"]
     [(completed) "completed"]
+    [(voided) "voided"]
     [else
      (error
       'transaction-status->string
@@ -221,6 +223,8 @@
      (line-item->jsexpr line-item))
    'subtotal_minor_units
    (money-minor-units (transaction-subtotal transaction))
+   'tax_minor_units
+   (money-minor-units (transaction-tax transaction))
    'total_minor_units
    (money-minor-units (transaction-total transaction))
    'tendered_cash_minor_units

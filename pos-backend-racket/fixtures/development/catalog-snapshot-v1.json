@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "items": [
+    {
+      "item_id": "item-test-apples",
+      "description": "Test Apples",
+      "unit_price_minor_units": 199,
+      "active": true
+    }
+  ],
+  "barcodes": [
+    {
+      "barcode": "049000001234",
+      "item_id": "item-test-apples"
+    }
+  ]
+}

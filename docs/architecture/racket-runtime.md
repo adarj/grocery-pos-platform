@@ -13,7 +13,7 @@ environment configuration
   -> startup schema initialization
   -> bounded request connection pool
   -> thread-mapped virtual connection
-  -> transaction service
+  -> transaction + register-operations services
   -> HTTP application
 ```
 
@@ -49,7 +49,7 @@ succeeded:
 
 ```text
 open dedicated SQLite connection in create mode
-  -> run and validate transaction-journal migrations through v2
+  -> run and validate POS database migrations through v5
   -> disconnect dedicated startup connection
   -> construct request-time database resources
   -> construct HTTP application
@@ -100,13 +100,37 @@ The pool connector creates physical request connections under the same runtime
 custodian. Shutting down the runtime therefore closes its database resources
 rather than relying on a hidden global connection or process termination.
 
-## Application and catalog composition
+## Application, catalog, and register composition
 
-The runtime passes the shared virtual connection and the current catalog lookup
-to `make-transaction-service`. The only implemented catalog is presently the
-development `fake-catalog-lookup`; a durable catalog subsystem remains future
-work. Historical replay still uses sale-time event snapshots and never queries
-that catalog.
+The runtime passes the shared virtual connection and a SQLite catalog lookup to
+`make-transaction-service`. New scans resolve active merchandise through the
+persistent normalized catalog created by migration 3. The lookup uses the same
+bounded pool/virtual connection and does not open one physical connection per
+scan.
+
+Runtime startup migrates but never seeds or activates catalog data. A fresh
+database has an empty catalog until an operator explicitly activates a strict
+full snapshot. Focused tests can still inject a catalog lookup override, but
+the development fake is no longer a production default. Historical replay
+continues to use sale-time event snapshots and never queries current catalog
+data. See [Local Catalog](catalog.md).
+
+The runtime also constructs `register-operations-service` over the same virtual
+connection. Production composition injects a UTC epoch-millisecond clock and a
+cryptographically random 128-bit `shift_` identifier generator. The same clock
+is injected into transaction service planning so new operational start and
+terminal events record one consistent POS-Core-owned time source. Replay never
+calls it.
+
+Runtime migration creates but does not populate register/cashier tables. New
+transaction starts safely reject until an operator activates configuration and
+opens a shift. Focused tests may inject deterministic clocks/IDs. See
+[Register Operations and Shift Context](register-operations.md).
+
+Migration v6 adds shift cash movements and reconciliation. Runtime uses the
+same virtual connection for cash-summary reads, opening/close writes, and the
+completion unit of work. It never auto-seeds an opening float or rewrites
+drawer state at startup. See [Shift Cash Accountability](cash-accountability.md).
 
 `make-app` requires the constructed transaction service and returns the servlet
 handler. The service is captured explicitly rather than stored in a global.
@@ -121,6 +145,12 @@ The implemented routes are:
 GET /health
 POST /transaction-commands
 GET /transactions/{transaction_id}
+GET /receipts/{transaction_id}
+GET /register-context
+GET /cashiers
+POST /shifts/open
+POST /shifts/{shift_id}/close
+GET /shifts/{shift_id}/cash-summary
 ```
 
 `GET /health` remains a liveness endpoint and does not perform a database or
@@ -132,8 +162,12 @@ future checkout dependency is ready.
 
 Focused file-backed tests establish:
 
-- fresh runtime migration through schema v2;
-- idempotent startup against an existing v2 database without history loss;
+- fresh runtime migration through schema v6;
+- an empty persistent catalog rejecting the former development barcode rather
+  than falling back to a fake;
+- active/inactive/unknown persistent catalog lookup behavior and exact
+  sale-time event values;
+- idempotent startup against an existing v3 database without history loss;
 - migration corruption preventing runtime construction;
 - failure on a missing database parent directory;
 - startup-connection cleanup on success and failure;
@@ -143,17 +177,21 @@ Focused file-backed tests establish:
   receipt recovery without duplicate events;
 - read/write request connections refusing to recreate a missing database;
 - unchanged `/health` and unknown-route behavior through `make-app`.
+- operational configuration/shift composition, active-transaction slot
+  persistence, atomic net cash-sale movement plus slot release on completion,
+  and movement-free slot release on void.
 
 ## Deliberately deferred
 
 This runtime composition and HTTP adapter do not add:
 
 - a readiness endpoint;
-- authentication or authorization;
-- a persistent catalog;
+- employee authentication, PINs/passwords, or authorization;
+- catalog HTTP administration, patch updates, or cloud synchronization;
 - automatic SQLite busy retry or backoff;
 - a generic service container or component framework;
-- payment, device, drawer, or receipt integration;
+- external payment/device integration, physical cash-drawer control, or
+  receipt-printer integration;
 - exactly-once external-effect guarantees.
 
 Future external effects still require persisted intent and explicit

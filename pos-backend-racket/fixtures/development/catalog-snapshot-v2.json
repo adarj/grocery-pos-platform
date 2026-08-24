@@ -1,0 +1,30 @@
+{
+  "schema_version": 2,
+  "tax_categories": [
+    {
+      "tax_category_id": "development-standard",
+      "description": "Development Standard Tax",
+      "rate_millionths": 100000
+    },
+    {
+      "tax_category_id": "development-exempt",
+      "description": "Development Exempt",
+      "rate_millionths": 0
+    }
+  ],
+  "items": [
+    {
+      "item_id": "item-test-apples",
+      "description": "Test Apples",
+      "unit_price_minor_units": 199,
+      "active": true,
+      "tax_category_id": "development-standard"
+    }
+  ],
+  "barcodes": [
+    {
+      "barcode": "049000001234",
+      "item_id": "item-test-apples"
+    }
+  ]
+}

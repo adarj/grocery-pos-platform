@@ -3,7 +3,7 @@
 ## Status
 
 Transaction Command Schema v1 defines the stable JSON representation of the
-four mutating commands supported by the current cash-sale transaction slice.
+six mutating commands supported by the current cash-sale transaction slice.
 
 It defines transport-independent command values and their logical identity. The
 persistent transaction application service accepts these typed values through
@@ -52,7 +52,7 @@ Every Schema v1 command is a JSON object containing exactly these fields:
   local register database.
 - `transaction_id` is a non-empty opaque string naming the target transaction.
 - `expected_version` is an exact nonnegative integer supplied by the caller.
-- `command_type` is one of the four strings defined below.
+- `command_type` is one of the six strings defined below.
 - `payload` has the exact command-specific object shape defined below.
 
 The codec does not trim, case-fold, generate, or otherwise reinterpret command
@@ -124,6 +124,44 @@ values, and numeric strings are invalid.
 }
 ```
 
+### `remove_line_item`
+
+```json
+{
+  "schema_version": 1,
+  "command_id": "cmd-remove",
+  "transaction_id": "txn-001",
+  "expected_version": 4,
+  "command_type": "remove_line_item",
+  "payload": {
+    "line_index": 1
+  }
+}
+```
+
+`line_index` is an exact nonnegative integer and is zero-based in the
+authoritative line list at `expected_version`. An out-of-range index is a
+structurally valid command that receives the durable domain outcome
+`line_item_not_found`. Expected-version enforcement happens before the domain
+interprets the index, so a stale selection is never retargeted against a newer
+line list.
+
+### `void_transaction`
+
+```json
+{
+  "schema_version": 1,
+  "command_id": "cmd-void",
+  "transaction_id": "txn-001",
+  "expected_version": 4,
+  "command_type": "void_transaction",
+  "payload": {}
+}
+```
+
+Voiding is a pre-payment correction accepted only for an open transaction.
+Authorization and post-payment reversal are separate future concerns.
+
 ## Typed request identity
 
 Logical command identity is the fully decoded immutable command value, not the
@@ -157,6 +195,7 @@ Command data is untrusted. The Schema v1 decoder rejects:
 - negative, fractional, inexact, or string expected versions;
 - a non-string or empty scan barcode;
 - negative, fractional, inexact, or string cash amounts;
+- negative, fractional, inexact, or string removal line indices;
 - fields in commands whose payload must be empty.
 
 The decoder performs no coercion and returns either a typed command or a codec
@@ -176,6 +215,7 @@ invalid-transaction-id
 invalid-expected-version
 invalid-barcode
 invalid-money
+invalid-line-index
 ```
 
 Schema evolution must use an explicit new schema version rather than silently

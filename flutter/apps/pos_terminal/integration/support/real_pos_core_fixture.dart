@@ -11,10 +11,14 @@ final class RealPosCoreFixture {
     required this.temporaryDirectory,
   });
 
-  static const _startupTimeout = Duration(seconds: 15);
+  // Racket startup and CLI activation include migration validation. Keep their
+  // bounds generous enough for a loaded development/CI host while polling and
+  // teardown remain independently bounded.
+  static const _startupTimeout = Duration(seconds: 30);
   static const _healthAttemptTimeout = Duration(milliseconds: 400);
   static const _healthPollInterval = Duration(milliseconds: 50);
   static const _shutdownTimeout = Duration(seconds: 5);
+  static const _referenceDataActivationTimeout = Duration(seconds: 30);
 
   static Future<RealPosCoreFixture> create() async {
     final repositoryRoot = await _findRepositoryRoot(Directory.current);
@@ -39,6 +43,8 @@ final class RealPosCoreFixture {
   int? _observedExitCode;
   Uri? _baseUri;
   bool _disposed = false;
+  bool _catalogPrepared = false;
+  bool _operationalConfigurationPrepared = false;
 
   String get databasePath => _join(temporaryDirectory.path, 'pos.db');
 
@@ -62,6 +68,8 @@ final class RealPosCoreFixture {
     if (_process != null) {
       throw StateError('POS Core fixture is already started.');
     }
+
+    await _prepareReferenceDataIfNeeded();
 
     final port = await _allocateLoopbackPort();
     final backendDirectory = _join(repositoryRoot.path, 'pos-backend-racket');
@@ -106,6 +114,26 @@ final class RealPosCoreFixture {
   Future<void> restart() async {
     await stop();
     await start();
+  }
+
+  Future<void> activateCatalogSnapshot(String catalogPath) async {
+    if (_disposed) {
+      throw StateError(
+        'A disposed POS Core fixture cannot activate a catalog.',
+      );
+    }
+    await _runCatalogActivation(catalogPath);
+  }
+
+  Future<void> activateOperationalConfigurationSnapshot(
+    String configurationPath,
+  ) async {
+    if (_disposed) {
+      throw StateError(
+        'A disposed POS Core fixture cannot activate register configuration.',
+      );
+    }
+    await _runOperationalConfigurationActivation(configurationPath);
   }
 
   Future<void> stop() async {
@@ -196,6 +224,100 @@ final class RealPosCoreFixture {
       );
     } finally {
       client.close();
+    }
+  }
+
+  Future<void> _prepareReferenceDataIfNeeded() async {
+    if (!_catalogPrepared) {
+      final catalogPath = _join(
+        repositoryRoot.path,
+        'pos-backend-racket/fixtures/development/catalog-snapshot-v2.json',
+      );
+      await _runCatalogActivation(catalogPath);
+      _catalogPrepared = true;
+    }
+    if (!_operationalConfigurationPrepared) {
+      final configurationPath = _join(
+        repositoryRoot.path,
+        'fixtures/development/register-configuration-v1.json',
+      );
+      await _runOperationalConfigurationActivation(configurationPath);
+      _operationalConfigurationPrepared = true;
+    }
+  }
+
+  Future<void> _runCatalogActivation(String catalogPath) async {
+    final backendDirectory = _join(repositoryRoot.path, 'pos-backend-racket');
+    final process = await Process.start(
+      'racket',
+      ['scripts/catalog.rkt', 'activate', catalogPath, databasePath],
+      workingDirectory: backendDirectory,
+      environment: Platform.environment,
+    );
+    final stdoutFuture = process.stdout.transform(utf8.decoder).join();
+    final stderrFuture = process.stderr.transform(utf8.decoder).join();
+
+    int exitCode;
+    try {
+      exitCode = await process.exitCode.timeout(
+        _referenceDataActivationTimeout,
+      );
+    } on TimeoutException {
+      process.kill(ProcessSignal.sigkill);
+      await process.exitCode.timeout(_shutdownTimeout);
+      throw TimeoutException(
+        'Timed out activating the isolated development catalog.',
+        _referenceDataActivationTimeout,
+      );
+    }
+    final output = await stdoutFuture;
+    final errorOutput = await stderrFuture;
+    if (exitCode != 0) {
+      throw StateError(
+        'Catalog activation for POS Core fixture failed with exit code '
+        '$exitCode.\nstdout:\n$output\nstderr:\n$errorOutput',
+      );
+    }
+  }
+
+  Future<void> _runOperationalConfigurationActivation(
+    String configurationPath,
+  ) async {
+    final backendDirectory = _join(repositoryRoot.path, 'pos-backend-racket');
+    final process = await Process.start(
+      'racket',
+      [
+        'scripts/register-configuration.rkt',
+        'activate',
+        configurationPath,
+        databasePath,
+      ],
+      workingDirectory: backendDirectory,
+      environment: Platform.environment,
+    );
+    final stdoutFuture = process.stdout.transform(utf8.decoder).join();
+    final stderrFuture = process.stderr.transform(utf8.decoder).join();
+
+    int exitCode;
+    try {
+      exitCode = await process.exitCode.timeout(
+        _referenceDataActivationTimeout,
+      );
+    } on TimeoutException {
+      process.kill(ProcessSignal.sigkill);
+      await process.exitCode.timeout(_shutdownTimeout);
+      throw TimeoutException(
+        'Timed out activating isolated register configuration.',
+        _referenceDataActivationTimeout,
+      );
+    }
+    final output = await stdoutFuture;
+    final errorOutput = await stderrFuture;
+    if (exitCode != 0) {
+      throw StateError(
+        'Register configuration activation for POS Core fixture failed with '
+        'exit code $exitCode.\nstdout:\n$output\nstderr:\n$errorOutput',
+      );
     }
   }
 }

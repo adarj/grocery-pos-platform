@@ -8,14 +8,22 @@
          "../pos/application/transaction-service.rkt"
          "../pos/domain/fake-catalog.rkt"
          "../pos/domain/money.rkt"
+         "../pos/domain/tax.rkt"
          "../pos/domain/transaction-event.rkt"
          "../pos/domain/transaction.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt"
          "../pos/persistence/transaction-command-receipt-store.rkt"
          "../pos/persistence/transaction-command-unit-of-work.rkt"
-         "../pos/persistence/transaction-journal-migrations.rkt")
+         "../pos/persistence/pos-database-migrations.rkt")
 
 (define test-barcode "049000001234")
+(define test-sale-item-event
+  (taxed-sale-item-added test-barcode
+                         "Test Apples"
+                         (money 199)
+                         "development-zero-tax"
+                         (tax-rate 0)
+                         (money 0)))
 (define unknown-barcode "000000000000")
 
 (define (call-with-connection database-path mode procedure)
@@ -75,7 +83,7 @@ SQL
          database-path
          'create
          (lambda (connection-A)
-           (migrate-transaction-journal! connection-A)
+           (migrate-pos-database! connection-A)
            (define service-A
              (make-transaction-service
               connection-A
@@ -104,7 +112,7 @@ SQL
          database-path
          'read/write
          (lambda (connection-B)
-           (migrate-transaction-journal! connection-B)
+           (migrate-pos-database! connection-B)
            (define service-B
              (make-transaction-service
               connection-B
@@ -128,7 +136,7 @@ SQL
          database-path
          'read/write
          (lambda (connection-C)
-           (migrate-transaction-journal! connection-C)
+           (migrate-pos-database! connection-C)
            (define service-C
              (make-transaction-service
               connection-C
@@ -154,7 +162,7 @@ SQL
          database-path
          'read/write
          (lambda (connection-D)
-           (migrate-transaction-journal! connection-D)
+           (migrate-pos-database! connection-D)
            (define service-D
              (make-transaction-service
               connection-D
@@ -176,8 +184,7 @@ SQL
            (check-equal?
             (journal-load-succeeded-events loaded)
             (list (transaction-started "txn-001")
-                  (sale-item-added
-                   test-barcode "Test Apples" (money 199))
+                  test-sale-item-event
                   (cash-tendered (money 500))
                   (transaction-completed)))
            (define loaded-receipt
@@ -203,7 +210,7 @@ SQL
          database-path
          'create
          (lambda (connection)
-           (migrate-transaction-journal! connection)
+           (migrate-pos-database! connection)
            (define setup-service
              (make-transaction-service
               connection
@@ -239,8 +246,7 @@ SQL
            (check-equal?
             (journal-events connection "txn-post-commit")
             (list (transaction-started "txn-post-commit")
-                  (sale-item-added
-                   test-barcode "Test Apples" (money 199))))
+                  test-sale-item-event))
            (check-equal? (receipt-count connection "cmd-post-commit") 1)
            (define stored
              (load-transaction-command-receipt
@@ -284,7 +290,7 @@ SQL
          database-path
          'create
          (lambda (connection-A)
-           (migrate-transaction-journal! connection-A)
+           (migrate-pos-database! connection-A)
            (define setup-service
              (make-transaction-service
               connection-A
@@ -325,7 +331,7 @@ SQL
          database-path
          'read/write
          (lambda (connection-B)
-           (migrate-transaction-journal! connection-B)
+           (migrate-pos-database! connection-B)
            (define retry-service
              (make-transaction-service
               connection-B
@@ -343,8 +349,7 @@ SQL
            (check-equal?
             (journal-events connection-B "txn-lost-response")
             (list (transaction-started "txn-lost-response")
-                  (sale-item-added
-                   test-barcode "Test Apples" (money 199)))))))
+                  test-sale-item-event)))))
       (lambda ()
         (when (file-exists? database-path)
           (delete-file database-path)))))
@@ -363,7 +368,7 @@ SQL
          database-path
          'create
          (lambda (connection)
-           (migrate-transaction-journal! connection)
+           (migrate-pos-database! connection)
            (define setup-service
              (make-transaction-service
               connection
@@ -414,8 +419,7 @@ SQL
            (check-equal?
             (journal-events connection "txn-pre-commit")
             (list (transaction-started "txn-pre-commit")
-                  (sale-item-added
-                   test-barcode "Test Apples" (money 199)))))))
+                  test-sale-item-event)))))
       (lambda ()
         (when (file-exists? database-path)
           (delete-file database-path)))))
@@ -438,7 +442,7 @@ SQL
          database-path
          'create
          (lambda (connection-A)
-           (migrate-transaction-journal! connection-A)
+           (migrate-pos-database! connection-A)
            (define service-A
              (make-transaction-service
               connection-A
@@ -471,7 +475,7 @@ SQL
          database-path
          'read/write
          (lambda (connection-B)
-           (migrate-transaction-journal! connection-B)
+           (migrate-pos-database! connection-B)
            (define service-B
              (make-transaction-service
               connection-B

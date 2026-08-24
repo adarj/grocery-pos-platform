@@ -101,8 +101,10 @@ Transaction, tender, payment, receipt, drawer, synchronization, and recovery sta
 
 For the implemented cash-sale slice, SQLite is now the durable local journal
 of accepted transaction facts, and Racket replay reconstructs authoritative
-transaction state. Persistence for the other listed concerns remains future
-work.
+transaction state and canonical completed-sale receipts. A second materialized
+receipt store is not required. SQLite also persists cashier command recovery,
+shift cash movements, and immutable drawer reconciliation. Card-payment,
+synchronization, and external-device recovery remain future work.
 
 ### Specialized Rust Edges
 
@@ -126,28 +128,43 @@ Verified capabilities currently include:
 * RackUnit backend tests;
 * exact-money, immutable cash-sale transaction domain behavior;
 * transaction domain events and deterministic replay;
-* strict, language-independent Transaction Event Schema v1 JSON;
+* strict, language-independent Transaction Event Schema v1/v2 JSON with
+  backward-compatible untaxed history and exact sale-time line-tax snapshots;
 * strict, language-independent Transaction Command Schema v1 with typed logical
-  request identity and caller-supplied expected stream versions;
+  request identity, caller-supplied expected stream versions, and append-only
+  open-sale remove/void corrections;
 * append-only SQLite transaction journal with migration v1, per-stream
   sequencing, atomic batch append, and optimistic stream-version checks;
 * migration v2 durable command receipts with database-global command IDs and
   atomic accepted-event/command-outcome persistence;
+* migration v3/v4 persistent local catalog and tax-reference tables with strict
+  Catalog Snapshot v1/v2 validation, atomic full replacement, SQLite runtime
+  checkout lookup, and sale-time price/tax snapshot isolation;
+* migration v5 current register/cashier configuration and durable shifts with
+  one active-transaction slot, POS-Core-recorded epoch-millisecond times, and
+  historical identity snapshotting;
+* migration v6 append-only opening/completed-sale cash movements and immutable
+  shift close reconciliation with exact signed over/short;
 * idempotent persistent transaction application service with deterministic
   two-connection concurrency and file-backed restart/retry coverage;
 * Racket runtime composition with startup migration, a bounded SQLite pool,
   thread-mapped virtual request connections, and explicit shutdown ownership;
-* Transaction HTTP API v1 with one strict idempotent command route and one
-  authoritative transaction-state query route;
+* Transaction HTTP API v1 with one strict idempotent command route,
+  authoritative transaction-state reads, and exact completed-sale canonical
+  receipt lookup derived from journal replay, plus narrow register/shift
+  operations;
 * Flutter Linux ARM64 POS terminal;
 * typed Flutter POS Core client models for transaction commands, durable command
-  outcomes, authoritative transaction snapshots, and safe failures;
-* Flutter cashier session orchestration and a start/scan/cash-tender/complete
-  interface driven by authoritative transaction reads;
+  outcomes, authoritative transaction snapshots, Receipt Schemas v1/v2,
+  register/shift context, authoritative shift cash summaries, and safe failures;
+* Flutter cashier session orchestration and a
+  start/scan/remove/void/cash-tender/complete interface rendering authoritative
+  basket, subtotal, tax, total, payment, and change;
 * Flutter widget tests;
 * isolated Flutter-to-Racket real-process integration tests covering complete
-  cash sales, restart recovery, uncertain transport, and durable same-command
-  receipt resolution;
+  cash sales, restart recovery, uncertain transport, durable same-command
+  receipt resolution, net drawer movements, shift reconciliation, and mixed
+  one-shift endurance;
 * Flutter-to-Racket local health connection;
 * nixGL-based Flutter GUI launch in the current VM environment;
 * GitHub Actions workflow definitions for scaffold/Nix validation, Racket
@@ -198,6 +215,33 @@ just doctor
 ## Running the Walking Skeleton
 
 Use two terminals.
+
+### Prepare development reference data
+
+For a fresh development database, validate and atomically activate the small
+version-controlled catalog fixture first:
+
+```bash
+just catalog-validate pos-backend-racket/fixtures/development/catalog-snapshot-v2.json
+just catalog-activate pos-backend-racket/fixtures/development/catalog-snapshot-v2.json .local/sqlite/pos-dev.db
+```
+
+Activation replaces the complete current catalog in the explicitly selected
+database. The development shell provisions `.local/sqlite`; other database
+parents must already exist. POS Core startup never seeds or rewrites catalog
+data automatically.
+
+Also validate and activate the development register/cashier attribution
+fixture into the same explicit database:
+
+```bash
+just register-config-validate fixtures/development/register-configuration-v1.json
+just register-config-activate fixtures/development/register-configuration-v1.json .local/sqlite/pos-dev.db
+```
+
+POS Core does not auto-seed identities. After startup, Flutter selects the
+development cashier and opens a shift. This is identity attribution, not
+PIN/password authentication.
 
 ### Terminal 1 — POS Core
 
@@ -383,10 +427,12 @@ that retrying the same command cannot duplicate the current cash-sale facts.
 
 This transaction workflow is exposed through the narrow Transaction HTTP API
 v1 command and query routes. Flutter now implements the current cash-sale
-cashier slice through authoritative completion, persists exact pending command
-identity before mutation POSTs for process-restart recovery, and starts the next
-sale only through an explicit completed-session action. Broader production
-checkout capabilities remain separately scoped work.
+cashier slice through authoritative completion or pre-payment void, persists
+exact pending command identity before mutation POSTs for process-restart
+recovery, and starts the next sale only through an explicit terminal-session
+action. Corrections append durable facts; Flutter never deletes a basket row or
+marks a sale voided optimistically. Post-payment refund/reversal and broader
+production checkout capabilities remain separately scoped work.
 
 ## Status
 

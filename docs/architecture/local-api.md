@@ -9,6 +9,8 @@ This document defines the initial communication boundary between local Flutter a
 The health endpoint and Transaction HTTP API v1 are implemented. The detailed
 transaction command/query contract is documented in
 [Transaction HTTP API v1](transaction-http-api-v1.md).
+That contract also defines exact read-only completed-sale receipt lookup and
+the narrow current register/cashier/shift operational routes.
 
 ## Purpose
 
@@ -86,8 +88,9 @@ Localhost is still treated as an application trust boundary. Backend authorizati
 
 The Racket process now constructs its durable transaction service before the
 HTTP listener starts. Startup resolves `SQLITE_DB_PATH`, migrates and validates
-the journal through schema v2 using a dedicated connection, and then builds a
-bounded SQLite pool plus one thread-mapped virtual connection for request use.
+the POS database through schema v6 using a dedicated connection, and then
+builds a bounded SQLite pool plus one thread-mapped virtual connection for
+request use.
 The service held by the application uses that virtual connection; unrelated
 request threads therefore do not share one physical transaction context.
 
@@ -96,6 +99,26 @@ service as an explicit dependency. Transaction routes delegate through that
 same service rather than reimplementing its idempotency or transaction
 semantics. The detailed ownership and shutdown contract is documented in
 [Racket POS Core Runtime Composition](racket-runtime.md).
+
+Migration 3 includes the persistent local catalog documented in
+[Local Catalog](catalog.md). Live runtime checkout resolves new scans from its
+explicitly activated SQLite catalog through the same virtual connection pool;
+runtime startup never seeds development merchandise. Migration 4 adds current
+tax categories/item mappings; new scans snapshot Racket's exact line-tax
+decision and the transaction query exposes authoritative tax.
+
+Migration 5 adds one current register configuration, a current cashier
+directory, and durable shifts. Production runtime composes a register
+operations service over the same virtual connection and injects one POS Core
+clock and secure shift-ID generator. It never seeds development identities.
+New transaction starts resolve operational context inside POS Core and
+atomically couple their event/receipt with the active shift slot. See
+[Register Operations and Shift Context](register-operations.md).
+
+Migration 6 adds the append-only shift cash ledger and immutable close
+reconciliation. Completed cash-sale movement and shift-slot release participate
+in the same transaction-command writer boundary. See
+[Shift Cash Accountability](cash-accountability.md).
 
 ## Health Endpoint
 
@@ -164,7 +187,10 @@ and strict HTTP adapter. Its command, durable-result, authoritative-snapshot,
 and failure models are documented in
 [Flutter POS Core Client Foundation](flutter-pos-client.md). The implemented
 cashier controller and widgets use that boundary for the current start, scan,
-cash-tender, completion, recovery, and next-sale workflow.
+cash-tender, completion, open-sale removal/void, recovery, and next-sale
+workflow. Completed receipt display and exact historical lookup use the typed
+read-only receipt query rather than adding receipt behavior to cashier mutation
+orchestration.
 
 ### Command IDs and expected versions
 
@@ -197,6 +223,15 @@ This requirement becomes especially important for:
 * voids;
 * drawer operations;
 * remote management commands.
+
+The implemented pre-payment correction commands are `remove_line_item` and
+`void_transaction`. Removal addresses one zero-based line in the authoritative
+state at `expected_version`; the server checks that version before interpreting
+the index. An accepted correction appends a new event, and Flutter waits for a
+new authoritative query rather than editing its basket locally. Void is
+accepted only from open state, produces terminal `voided`, and retains the
+cancelled basket and monetary projection. Paid reversal/refund remains a
+separate future contract.
 
 ### Mutation outcomes and current state
 
@@ -236,7 +271,8 @@ Refunded
 RecoveryRequired
 ```
 
-Not all of these states are implemented yet.
+The current transaction slice implements open, paid, completed, and voided;
+the other listed states remain prospective.
 
 Invalid transitions must be rejected by the backend.
 
@@ -364,10 +400,25 @@ Currently implemented:
 GET /health
 POST /transaction-commands
 GET /transactions/{transaction_id}
+GET /receipts/{transaction_id}
+GET /register-context
+GET /cashiers
+POST /shifts/open
+POST /shifts/{shift_id}/close
+GET /shifts/{shift_id}/cash-summary
 ```
 
-The two transaction routes expose only the implemented durable typed-command
-mutation and authoritative journal-replay query. Command-specific mutation
-routes and speculative transaction operations are deliberately absent.
+The transaction routes expose the durable typed-command mutation,
+authoritative current-state replay query, and canonical completed-sale receipt
+derived from that same replay. Receipt lookup creates no command or cashier
+recovery record. Command-specific mutation routes, broad sale search, and
+speculative transaction operations are deliberately absent.
+
+Shift open/close are operational resource writes, not transaction commands.
+They create no command ID or same-command retry marker; explicit
+`GET /register-context` and exact shift cash-summary reads resolve transport
+uncertainty. Opening and counted cash are exact integer minor units. Flutter
+does not calculate expected cash or over/short. Cashier selection is attribution
+only and provides no authentication claim.
 
 The domain model should drive the interface, not the reverse.

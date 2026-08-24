@@ -3,6 +3,7 @@
 (require json
          rackunit
          "../pos/domain/money.rkt"
+         "../pos/domain/tax.rkt"
          "../pos/domain/transaction-event.rkt"
          "../pos/persistence/transaction-event-codec.rkt")
 
@@ -19,6 +20,20 @@
 
 (define completed-event
   (transaction-completed))
+
+(define removed-event
+  (sale-line-removed 1))
+
+(define voided-event
+  (transaction-voided))
+
+(define taxed-item-added-event
+  (taxed-sale-item-added "049000001234"
+                         "Test Apples"
+                         (money 199)
+                         "standard"
+                         (tax-rate 100000)
+                         (money 20)))
 
 (define expected-started
   (hasheq 'schema_version 1
@@ -40,9 +55,30 @@
           'payload
           (hasheq 'amount_minor_units 500)))
 
+(define expected-taxed-item-added
+  (hasheq 'schema_version 2
+          'event_type "sale_item_added"
+          'payload
+          (hasheq 'barcode "049000001234"
+                  'description "Test Apples"
+                  'unit_price_minor_units 199
+                  'tax_category_id "standard"
+                  'tax_rate_millionths 100000
+                  'tax_amount_minor_units 20)))
+
 (define expected-completed
   (hasheq 'schema_version 1
           'event_type "transaction_completed"
+          'payload (hasheq)))
+
+(define expected-removed
+  (hasheq 'schema_version 1
+          'event_type "sale_line_removed"
+          'payload (hasheq 'line_index 1)))
+
+(define expected-voided
+  (hasheq 'schema_version 1
+          'event_type "transaction_voided"
           'payload (hasheq)))
 
 (define (check-failure value expected-code)
@@ -70,13 +106,64 @@
     (check-equal? (transaction-event->jsexpr tendered-event)
                   expected-tendered)
     (check-equal? (transaction-event->jsexpr completed-event)
-                  expected-completed))
+                  expected-completed)
+    (check-equal? (transaction-event->jsexpr removed-event)
+                  expected-removed)
+    (check-equal? (transaction-event->jsexpr voided-event)
+                  expected-voided))
+
+  (test-case "taxed sale item encodes exact schema v2 golden representation"
+    (check-equal? (transaction-event->jsexpr taxed-item-added-event)
+                  expected-taxed-item-added)
+    (define result
+      (json-bytes->transaction-event
+       (transaction-event->json-bytes taxed-item-added-event)))
+    (check-pred event-decode-success? result)
+    (check-equal? (event-decode-success-event result)
+                  taxed-item-added-event))
+
+  (test-case "schema v2 taxed fields fail closed"
+    (for ([field (in-list
+                  '(barcode
+                    description
+                    unit_price_minor_units
+                    tax_category_id
+                    tax_rate_millionths
+                    tax_amount_minor_units))])
+      (check-failure
+       (hash-set expected-taxed-item-added
+                 'payload
+                 (hash-remove
+                  (hash-ref expected-taxed-item-added 'payload)
+                  field))
+       'missing-field))
+    (check-failure
+     (hash-set expected-taxed-item-added
+               'payload
+               (hash-set (hash-ref expected-taxed-item-added 'payload)
+                         'tax_rate_millionths
+                         1000001))
+     'invalid-tax-rate)
+    (check-failure
+     (hash-set expected-taxed-item-added
+               'payload
+               (hash-set (hash-ref expected-taxed-item-added 'payload)
+                         'tax_amount_minor_units
+                         19))
+     'inconsistent-tax-amount)
+    (check-failure
+     (hash-set expected-taxed-item-added
+               'event_type
+               "cash_tendered")
+     'unsupported-schema-event-type))
 
   (test-case "all schema v1 events round trip through representations and JSON"
     (for ([event (in-list (list started-event
                                 item-added-event
                                 tendered-event
-                                completed-event))])
+                                completed-event
+                                removed-event
+                                voided-event))])
       (define representation (transaction-event->jsexpr event))
       (define string-result
         (json-string->transaction-event
@@ -98,6 +185,27 @@
                     representation)
       (check-equal? (bytes->jsexpr (transaction-event->json-bytes event))
                     representation)))
+
+  (test-case "correction event payloads are strict"
+    (for ([invalid-index (in-list (list -1 1.5 "1"))])
+      (check-failure
+       (hash-set expected-removed
+                 'payload
+                 (hasheq 'line_index invalid-index))
+       'invalid-line-index))
+    (check-failure
+     (hash-set expected-removed 'payload (hasheq))
+     'missing-field)
+    (check-failure
+     (hash-set expected-removed
+               'payload
+               (hasheq 'line_index 1 'unexpected #t))
+     'unexpected-field)
+    (check-failure
+     (hash-set expected-voided
+               'payload
+               (hasheq 'unexpected #t))
+     'unexpected-field))
 
   (test-case "malformed JSON produces a predictable codec failure"
     (define string-result (json-string->transaction-event "{not-json"))
@@ -182,7 +290,7 @@ JSON
 
   (test-case "schema version and event type are validated explicitly"
     (check-failure
-     (hash-set expected-started 'schema_version 2)
+     (hash-set expected-started 'schema_version 3)
      'unsupported-schema-version)
     (check-failure
      (hash-set expected-started 'schema_version 1.0)

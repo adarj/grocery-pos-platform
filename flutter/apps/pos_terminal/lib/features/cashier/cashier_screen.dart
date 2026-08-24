@@ -4,12 +4,14 @@ import 'package:flutter/services.dart';
 import '../../core/pos_core/models/command_result.dart';
 import '../../core/pos_core/models/transaction_command.dart';
 import '../../core/pos_core/models/transaction_snapshot.dart';
+import '../../core/pos_core/pos_core_client.dart';
+import '../receipt/receipt_screen.dart';
 import 'cashier_money_format.dart';
 import 'cashier_money_input.dart';
 import 'cashier_session_controller.dart';
 import 'cashier_session_state.dart';
 
-enum _SubmittedAction { scan, tender, completion }
+enum _SubmittedAction { scan, tender, completion, removal, voidSale }
 
 final class _FocusBarcodeIntent extends Intent {
   const _FocusBarcodeIntent();
@@ -24,9 +26,14 @@ final ButtonStyle _primaryActionStyle = FilledButton.styleFrom(
 );
 
 final class CashierScreen extends StatefulWidget {
-  const CashierScreen({required this.controller, super.key});
+  const CashierScreen({
+    required this.controller,
+    required this.client,
+    super.key,
+  });
 
   final CashierSessionController controller;
+  final PosCoreClient client;
 
   @override
   State<CashierScreen> createState() => _CashierScreenState();
@@ -42,6 +49,7 @@ final class _CashierScreenState extends State<CashierScreen> {
   PosCommandResult? _lastCommandResultBeforeSubmission;
   String? _barcodeValidationMessage;
   String? _cashValidationMessage;
+  String? _interactionFeedback;
 
   @override
   void initState() {
@@ -62,6 +70,7 @@ final class _CashierScreenState extends State<CashierScreen> {
     setState(() {
       _barcodeValidationMessage = null;
       _cashValidationMessage = null;
+      _interactionFeedback = null;
     });
     await widget.controller.startTransaction();
     _requestBarcodeFocus();
@@ -81,6 +90,7 @@ final class _CashierScreenState extends State<CashierScreen> {
       _submittedAction = _SubmittedAction.scan;
       _lastCommandResultBeforeSubmission = state.lastCommandResult;
       _barcodeValidationMessage = null;
+      _interactionFeedback = null;
     });
     await widget.controller.scanBarcode(barcode);
     _restoreInputWorkflowAfterResolution();
@@ -106,6 +116,7 @@ final class _CashierScreenState extends State<CashierScreen> {
       _submittedAction = _SubmittedAction.tender;
       _lastCommandResultBeforeSubmission = state.lastCommandResult;
       _cashValidationMessage = null;
+      _interactionFeedback = null;
     });
     await widget.controller.tenderCash(amountMinorUnits);
     _restoreInputWorkflowAfterResolution();
@@ -120,8 +131,105 @@ final class _CashierScreenState extends State<CashierScreen> {
     setState(() {
       _submittedAction = _SubmittedAction.completion;
       _lastCommandResultBeforeSubmission = state.lastCommandResult;
+      _interactionFeedback = null;
     });
     await widget.controller.completeTransaction();
+    _restoreInputWorkflowAfterResolution();
+  }
+
+  Future<void> _confirmRemoveLine(
+    TransactionSnapshot sourceSnapshot,
+    int lineIndex,
+  ) async {
+    final lineItem = sourceSnapshot.lineItems[lineIndex];
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Remove item?'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(lineItem.description),
+            const SizedBox(height: 8),
+            Text(formatUsdMinorUnits(lineItem.unitPriceMinorUnits)),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Remove Item'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || confirmed != true) {
+      return;
+    }
+
+    final currentState = widget.controller.state;
+    if (!identical(currentState.snapshot, sourceSnapshot) ||
+        !currentState.canExecuteNewMutation) {
+      setState(() {
+        _interactionFeedback = 'Transaction changed. Select the item again.';
+      });
+      return;
+    }
+
+    setState(() {
+      _submittedAction = _SubmittedAction.removal;
+      _lastCommandResultBeforeSubmission = currentState.lastCommandResult;
+      _interactionFeedback = null;
+    });
+    await widget.controller.removeLineItem(lineIndex);
+    _restoreInputWorkflowAfterResolution();
+  }
+
+  Future<void> _confirmVoidSale(TransactionSnapshot sourceSnapshot) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Void this sale?'),
+        content: const Text(
+          'This cancels the current open transaction. '
+          'No payment will be taken.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Keep Sale'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Void Sale'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || confirmed != true) {
+      return;
+    }
+
+    final currentState = widget.controller.state;
+    if (!identical(currentState.snapshot, sourceSnapshot) ||
+        !currentState.canExecuteNewMutation) {
+      setState(() {
+        _interactionFeedback =
+            'Transaction changed. Review the sale and try again.';
+      });
+      return;
+    }
+
+    setState(() {
+      _submittedAction = _SubmittedAction.voidSale;
+      _lastCommandResultBeforeSubmission = currentState.lastCommandResult;
+      _interactionFeedback = null;
+    });
+    await widget.controller.voidTransaction();
     _restoreInputWorkflowAfterResolution();
   }
 
@@ -154,8 +262,18 @@ final class _CashierScreenState extends State<CashierScreen> {
   }
 
   Future<void> _beginNextSale() async {
+    setState(() => _interactionFeedback = null);
     await widget.controller.beginNextSale();
     _requestBarcodeFocus();
+  }
+
+  void _viewReceipt(String transactionId) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) =>
+            ReceiptScreen(client: widget.client, transactionId: transactionId),
+      ),
+    );
   }
 
   void _restorePendingInputContext(TransactionCommand command) {
@@ -177,6 +295,10 @@ final class _CashierScreenState extends State<CashierScreen> {
         }
       case CompleteTransactionCommand():
         _submittedAction = _SubmittedAction.completion;
+      case RemoveLineItemCommand():
+        _submittedAction = _SubmittedAction.removal;
+      case VoidTransactionCommand():
+        _submittedAction = _SubmittedAction.voidSale;
       case StartTransactionCommand():
         break;
     }
@@ -216,6 +338,14 @@ final class _CashierScreenState extends State<CashierScreen> {
         }
       case _SubmittedAction.completion:
         break;
+      case _SubmittedAction.removal:
+        if (snapshot.status == TransactionStatus.open) {
+          _requestBarcodeFocus();
+        }
+      case _SubmittedAction.voidSale:
+        if (!accepted && snapshot.status == TransactionStatus.open) {
+          _requestBarcodeFocus();
+        }
     }
     _submittedAction = null;
     _lastCommandResultBeforeSubmission = null;
@@ -327,13 +457,17 @@ final class _CashierScreenState extends State<CashierScreen> {
                     cashValidationMessage: _cashValidationMessage,
                     feedback:
                         localRecoveryFailure?.message ??
+                        _interactionFeedback ??
                         _resultFeedback(state.lastCommandResult),
                     onScan: () => _submitBarcode(_barcodeController.text),
                     onBarcodeSubmitted: _submitBarcode,
                     onTender: () => _submitTender(_cashController.text),
                     onCashSubmitted: _submitTender,
                     onComplete: _completeSale,
+                    onRemove: _confirmRemoveLine,
+                    onVoid: _confirmVoidSale,
                     onNextSale: _beginNextSale,
+                    onViewReceipt: _viewReceipt,
                   );
                 }
 
@@ -345,6 +479,8 @@ final class _CashierScreenState extends State<CashierScreen> {
                         _SubmittedAction.scan => 'Processing item...',
                         _SubmittedAction.tender => 'Taking cash...',
                         _SubmittedAction.completion => 'Completing sale...',
+                        _SubmittedAction.removal => 'Removing item...',
+                        _SubmittedAction.voidSale => 'Voiding sale...',
                       },
                     CashierSessionActivity.refreshingTransaction =>
                       'Loading latest transaction state...',
@@ -397,11 +533,17 @@ String? _resultFeedback(PosCommandResult? result) {
     'unknown_barcode' => 'Item not found.',
     'insufficient_tender' => 'Cash received is less than the amount due.',
     'empty_transaction' => 'Scan at least one item before taking payment.',
+    'line_item_not_found' =>
+      'Item could not be removed. Latest transaction state loaded.',
     'invalid_transaction_state' =>
       'That action is no longer valid. Latest state loaded.',
     'stale_expected_version' ||
     'stream_version_conflict' => 'Transaction changed. Latest state loaded.',
     'transaction_already_exists' => 'Could not start sale. Please try again.',
+    'register_not_configured' => 'Register configuration is required.',
+    'shift_required' => 'Open a cashier shift before starting a sale.',
+    'shift_has_active_transaction' =>
+      'Another transaction is already active on this shift.',
     'transaction_not_found' => 'Transaction not found.',
     _ => 'Action could not be completed.',
   };
@@ -412,6 +554,7 @@ String _transactionStatusLabel(TransactionStatus status) {
     TransactionStatus.open => 'Open',
     TransactionStatus.paid => 'Paid',
     TransactionStatus.completed => 'Completed',
+    TransactionStatus.voided => 'Voided',
   };
 }
 
@@ -578,7 +721,10 @@ final class _ActiveTransactionView extends StatelessWidget {
     required this.onTender,
     required this.onCashSubmitted,
     required this.onComplete,
+    required this.onRemove,
+    required this.onVoid,
     required this.onNextSale,
+    required this.onViewReceipt,
   });
 
   final CashierSessionState state;
@@ -595,14 +741,26 @@ final class _ActiveTransactionView extends StatelessWidget {
   final VoidCallback onTender;
   final ValueChanged<String> onCashSubmitted;
   final VoidCallback onComplete;
+  final Future<void> Function(TransactionSnapshot snapshot, int lineIndex)
+  onRemove;
+  final Future<void> Function(TransactionSnapshot snapshot) onVoid;
   final VoidCallback onNextSale;
+  final ValueChanged<String> onViewReceipt;
 
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
         final wide = constraints.maxWidth >= 760;
-        final basket = _BasketPanel(snapshot: snapshot, compact: !wide);
+        final basket = _BasketPanel(
+          snapshot: snapshot,
+          compact: !wide,
+          onRemove:
+              snapshot.status == TransactionStatus.open &&
+                  state.canExecuteNewMutation
+              ? (lineIndex) => onRemove(snapshot, lineIndex)
+              : null,
+        );
         final controls = switch (snapshot.status) {
           TransactionStatus.open => _OpenTransactionControls(
             state: state,
@@ -617,6 +775,7 @@ final class _ActiveTransactionView extends StatelessWidget {
             onBarcodeSubmitted: onBarcodeSubmitted,
             onTender: onTender,
             onCashSubmitted: onCashSubmitted,
+            onVoid: state.canExecuteNewMutation ? () => onVoid(snapshot) : null,
           ),
           TransactionStatus.paid => _PaymentControls(
             snapshot: snapshot,
@@ -624,6 +783,12 @@ final class _ActiveTransactionView extends StatelessWidget {
             onComplete: state.canExecuteNewMutation ? onComplete : null,
           ),
           TransactionStatus.completed => _PaymentControls(
+            snapshot: snapshot,
+            feedback: feedback,
+            onNextSale: state.canBeginNextSale ? onNextSale : null,
+            onViewReceipt: () => onViewReceipt(snapshot.transactionId),
+          ),
+          TransactionStatus.voided => _VoidedControls(
             snapshot: snapshot,
             feedback: feedback,
             onNextSale: state.canBeginNextSale ? onNextSale : null,
@@ -654,10 +819,15 @@ final class _ActiveTransactionView extends StatelessWidget {
 }
 
 final class _BasketPanel extends StatelessWidget {
-  const _BasketPanel({required this.snapshot, required this.compact});
+  const _BasketPanel({
+    required this.snapshot,
+    required this.compact,
+    this.onRemove,
+  });
 
   final TransactionSnapshot snapshot;
   final bool compact;
+  final Future<void> Function(int lineIndex)? onRemove;
 
   @override
   Widget build(BuildContext context) {
@@ -669,14 +839,13 @@ final class _BasketPanel extends StatelessWidget {
             ),
           ]
         : snapshot.lineItems
+              .asMap()
+              .entries
               .map(
-                (lineItem) => ListTile(
-                  title: Text(lineItem.description),
-                  subtitle: Text('Barcode: ${lineItem.barcode}'),
-                  trailing: Text(
-                    formatUsdMinorUnits(lineItem.unitPriceMinorUnits),
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
+                (entry) => _BasketLineRow(
+                  lineIndex: entry.key,
+                  lineItem: entry.value,
+                  onRemove: onRemove,
                 ),
               )
               .toList(growable: false);
@@ -721,6 +890,8 @@ final class _BasketPanel extends StatelessWidget {
               minorUnits: snapshot.subtotalMinorUnits,
             ),
             const SizedBox(height: 10),
+            _MoneyRow(label: 'Tax', minorUnits: snapshot.taxMinorUnits),
+            const SizedBox(height: 10),
             _MoneyRow(
               label: 'Total',
               minorUnits: snapshot.totalMinorUnits,
@@ -728,6 +899,73 @@ final class _BasketPanel extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+final class _BasketLineRow extends StatelessWidget {
+  const _BasketLineRow({
+    required this.lineIndex,
+    required this.lineItem,
+    required this.onRemove,
+  });
+
+  final int lineIndex;
+  final TransactionLineItem lineItem;
+  final Future<void> Function(int lineIndex)? onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final remove = onRemove;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    lineItem.description,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 4),
+                  Text('Barcode: ${lineItem.barcode}'),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Text(
+                  formatUsdMinorUnits(lineItem.unitPriceMinorUnits),
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+              ),
+              if (remove != null)
+                Semantics(
+                  button: true,
+                  label: 'Remove ${lineItem.description}',
+                  excludeSemantics: true,
+                  child: TextButton.icon(
+                    key: Key('cashier-remove-line-$lineIndex'),
+                    style: TextButton.styleFrom(minimumSize: const Size(0, 48)),
+                    onPressed: () => remove(lineIndex),
+                    icon: const Icon(Icons.remove_circle_outline),
+                    label: const Text('Remove'),
+                  ),
+                ),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -805,6 +1043,7 @@ final class _OpenTransactionControls extends StatelessWidget {
     required this.onBarcodeSubmitted,
     required this.onTender,
     required this.onCashSubmitted,
+    required this.onVoid,
   });
 
   final CashierSessionState state;
@@ -819,6 +1058,7 @@ final class _OpenTransactionControls extends StatelessWidget {
   final ValueChanged<String> onBarcodeSubmitted;
   final VoidCallback onTender;
   final ValueChanged<String> onCashSubmitted;
+  final VoidCallback? onVoid;
 
   @override
   Widget build(BuildContext context) {
@@ -892,6 +1132,14 @@ final class _OpenTransactionControls extends StatelessWidget {
               const SizedBox(height: 20),
               _FeedbackBanner(message: feedback!),
             ],
+            const Divider(height: 36),
+            OutlinedButton.icon(
+              key: const Key('cashier-void-sale'),
+              style: OutlinedButton.styleFrom(minimumSize: const Size(0, 52)),
+              onPressed: onVoid,
+              icon: const Icon(Icons.cancel_outlined),
+              label: const Text('Void Sale'),
+            ),
           ],
         ),
       ),
@@ -905,12 +1153,14 @@ final class _PaymentControls extends StatelessWidget {
     required this.feedback,
     this.onComplete,
     this.onNextSale,
+    this.onViewReceipt,
   });
 
   final TransactionSnapshot snapshot;
   final String? feedback;
   final VoidCallback? onComplete;
   final VoidCallback? onNextSale;
+  final VoidCallback? onViewReceipt;
 
   @override
   Widget build(BuildContext context) {
@@ -942,6 +1192,13 @@ final class _PaymentControls extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 24),
+            _MoneyRow(
+              label: 'Subtotal',
+              minorUnits: snapshot.subtotalMinorUnits,
+            ),
+            const SizedBox(height: 12),
+            _MoneyRow(label: 'Tax', minorUnits: snapshot.taxMinorUnits),
+            const SizedBox(height: 12),
             _MoneyRow(label: 'Total', minorUnits: snapshot.totalMinorUnits),
             if (paymentDetailsAvailable) ...[
               const SizedBox(height: 12),
@@ -976,7 +1233,79 @@ final class _PaymentControls extends StatelessWidget {
                 icon: const Icon(Icons.add_shopping_cart),
                 label: const Text('Next Sale'),
               ),
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(minimumSize: const Size(0, 52)),
+                onPressed: onViewReceipt,
+                icon: const Icon(Icons.receipt_long_outlined),
+                label: const Text('View Receipt'),
+              ),
             ],
+            if (feedback != null) ...[
+              const SizedBox(height: 20),
+              _FeedbackBanner(message: feedback!),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+final class _VoidedControls extends StatelessWidget {
+  const _VoidedControls({
+    required this.snapshot,
+    required this.feedback,
+    required this.onNextSale,
+  });
+
+  final TransactionSnapshot snapshot;
+  final String? feedback;
+  final VoidCallback? onNextSale;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      key: const Key('cashier-voided-controls'),
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Icon(Icons.cancel_outlined, size: 52),
+            const SizedBox(height: 14),
+            Semantics(
+              container: true,
+              header: true,
+              label: 'Transaction status: Voided',
+              excludeSemantics: true,
+              child: Text(
+                'Sale Voided',
+                style: Theme.of(context).textTheme.headlineSmall,
+                textAlign: TextAlign.center,
+              ),
+            ),
+            const SizedBox(height: 24),
+            _MoneyRow(
+              label: 'Subtotal',
+              minorUnits: snapshot.subtotalMinorUnits,
+            ),
+            const SizedBox(height: 12),
+            _MoneyRow(label: 'Tax', minorUnits: snapshot.taxMinorUnits),
+            const SizedBox(height: 12),
+            _MoneyRow(
+              label: 'Total',
+              minorUnits: snapshot.totalMinorUnits,
+              prominent: true,
+            ),
+            const SizedBox(height: 28),
+            FilledButton.icon(
+              style: _primaryActionStyle,
+              onPressed: onNextSale,
+              icon: const Icon(Icons.add_shopping_cart),
+              label: const Text('Next Sale'),
+            ),
             if (feedback != null) ...[
               const SizedBox(height: 20),
               _FeedbackBanner(message: feedback!),

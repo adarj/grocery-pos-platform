@@ -4,7 +4,8 @@ import 'pos_core_failure.dart';
 enum TransactionStatus {
   open('open'),
   paid('paid'),
-  completed('completed');
+  completed('completed'),
+  voided('voided');
 
   const TransactionStatus(this.wireName);
 
@@ -15,6 +16,7 @@ enum TransactionStatus {
       'open' => TransactionStatus.open,
       'paid' => TransactionStatus.paid,
       'completed' => TransactionStatus.completed,
+      'voided' => TransactionStatus.voided,
       _ => throw const PosCoreInvalidResponseFailure(
         'Unknown transaction status.',
       ),
@@ -54,6 +56,7 @@ final class TransactionSnapshot {
     required this.status,
     required List<TransactionLineItem> lineItems,
     required this.subtotalMinorUnits,
+    required this.taxMinorUnits,
     required this.totalMinorUnits,
     required this.tenderedCashMinorUnits,
     required this.changeDueMinorUnits,
@@ -64,6 +67,7 @@ final class TransactionSnapshot {
   final TransactionStatus status;
   final List<TransactionLineItem> lineItems;
   final int subtotalMinorUnits;
+  final int taxMinorUnits;
   final int totalMinorUnits;
   final int? tenderedCashMinorUnits;
   final int? changeDueMinorUnits;
@@ -93,6 +97,11 @@ final class TransactionSnapshot {
       subtotalMinorUnits: requireJsonNonnegativeInt(
         json,
         'subtotal_minor_units',
+        context,
+      ),
+      taxMinorUnits: requireJsonNonnegativeInt(
+        json,
+        'tax_minor_units',
         context,
       ),
       totalMinorUnits: requireJsonNonnegativeInt(

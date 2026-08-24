@@ -36,6 +36,20 @@ test-pos-integration:
 analyze-flutter:
     cd flutter/apps/pos_terminal && flutter analyze
 
+catalog-validate FILE:
+    racket pos-backend-racket/scripts/catalog.rkt validate {{quote(FILE)}}
+
+# Replaces the complete current catalog in the explicitly selected database.
+catalog-activate FILE DB:
+    racket pos-backend-racket/scripts/catalog.rkt activate {{quote(FILE)}} {{quote(DB)}}
+
+register-config-validate FILE:
+    racket pos-backend-racket/scripts/register-configuration.rkt validate {{quote(FILE)}}
+
+# Replaces current register/cashier configuration only when no shift is open.
+register-config-activate FILE DB:
+    racket pos-backend-racket/scripts/register-configuration.rkt activate {{quote(FILE)}} {{quote(DB)}}
+
 supabase-start:
     @echo "TODO: start local Supabase"
 

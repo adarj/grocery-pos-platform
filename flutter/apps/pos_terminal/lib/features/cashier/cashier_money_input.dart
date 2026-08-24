@@ -1,23 +1,3 @@
-final RegExp _cashInputPattern = RegExp(r'^(\d+)(?:\.(\d{1,2}))?$');
+import '../../core/money/money_input.dart';
 
-int? parseCashInputMinorUnits(String input) {
-  final match = _cashInputPattern.firstMatch(input.trim());
-  if (match == null) {
-    return null;
-  }
-
-  final wholeUnits = int.tryParse(match.group(1)!);
-  if (wholeUnits == null) {
-    return null;
-  }
-
-  final fraction = match.group(2);
-  final minorFraction = switch (fraction?.length) {
-    null => 0,
-    1 => int.parse(fraction!) * 10,
-    2 => int.parse(fraction!),
-    _ => throw StateError('Cash input regex admitted an invalid fraction.'),
-  };
-
-  return wholeUnits * 100 + minorFraction;
-}
+int? parseCashInputMinorUnits(String input) => parseMoneyInputMinorUnits(input);

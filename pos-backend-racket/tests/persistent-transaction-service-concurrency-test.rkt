@@ -8,14 +8,22 @@
          "../pos/application/transaction-service.rkt"
          "../pos/domain/fake-catalog.rkt"
          "../pos/domain/money.rkt"
+         "../pos/domain/tax.rkt"
          "../pos/domain/transaction-event.rkt"
          "../pos/domain/transaction.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt"
          "../pos/persistence/transaction-command-receipt-store.rkt"
          "../pos/persistence/transaction-command-unit-of-work.rkt"
-         "../pos/persistence/transaction-journal-migrations.rkt")
+         "../pos/persistence/pos-database-migrations.rkt")
 
 (define test-barcode "049000001234")
+(define test-sale-item-event
+  (taxed-sale-item-added test-barcode
+                         "Test Apples"
+                         (money 199)
+                         "development-zero-tax"
+                         (tax-rate 0)
+                         (money 0)))
 
 (define (call-with-connection database-path mode procedure)
   (define connection
@@ -37,12 +45,12 @@
             (db:sqlite3-connect
              #:database database-path
              #:mode 'create))
-      (migrate-transaction-journal! connection-A)
+      (migrate-pos-database! connection-A)
       (set! connection-B
             (db:sqlite3-connect
              #:database database-path
              #:mode 'read/write))
-      (migrate-transaction-journal! connection-B)
+      (migrate-pos-database! connection-B)
       (procedure database-path connection-A connection-B))
     (lambda ()
       (when (and connection-B (db:connected? connection-B))
@@ -228,8 +236,7 @@ SQL
           (check-equal?
            (loaded-events connection-A "txn-same")
            (list (transaction-started "txn-same")
-                 (sale-item-added
-                  test-barcode "Test Apples" (money 199))))
+                 test-sale-item-event))
           (define recovered
             (transaction-service-load-transaction
              service-A "txn-same"))
@@ -351,8 +358,7 @@ SQL
           (check-equal?
            (loaded-events connection-A "txn-version-race")
            (list (transaction-started "txn-version-race")
-                 (sale-item-added
-                  test-barcode "Test Apples" (money 199))))
+                 test-sale-item-event))
 
           (define lookups-before-retry lookup-count)
           (check-equal?
@@ -367,15 +373,14 @@ SQL
         database-path
         'read/write
         (lambda (verification-connection)
-          (migrate-transaction-journal! verification-connection)
+          (migrate-pos-database! verification-connection)
           (check-equal?
            (loaded-receipt verification-connection "cmd-race-B")
            conflict-receipt)
           (check-equal?
            (loaded-events verification-connection "txn-version-race")
            (list (transaction-started "txn-version-race")
-                 (sale-item-added
-                  test-barcode "Test Apples" (money 199))))
+                 test-sale-item-event))
           (define retry-service
             (make-service verification-connection quiet-catalog))
           (check-equal?
@@ -432,8 +437,7 @@ SQL
           (check-equal?
            (loaded-events connection-A "txn-rejection-race")
            (list (transaction-started "txn-rejection-race")
-                 (sale-item-added
-                  test-barcode "Test Apples" (money 199))))
+                 test-sale-item-event))
           (check-equal? (receipt-count connection-A "cmd-reject-loser") 1))))))
 
   (test-case "SQLite writer contention cannot produce false durable success"

@@ -32,12 +32,12 @@ The implementation deliberately separates three related representations:
 
 1. A **domain event** is an immutable Racket business fact such as
    `sale-item-added`.
-2. **Transaction Event Schema v1 JSON** is the stable, language-independent
-   encoding of that domain event. Its exact schema is documented in
-   [Transaction Event Schema v1](transaction-event-schema.md).
+2. A versioned **Transaction Event Schema JSON** value is the stable,
+   language-independent encoding. Its exact schemas are documented in
+   [Transaction Event Schemas](transaction-event-schema.md).
 3. A **journal record** is a SQLite persistence envelope. It adds database row
-   identity, transaction stream identity, and per-stream sequence to the Schema
-   v1 JSON.
+   identity, transaction stream identity, and per-stream sequence to the event
+   JSON.
 
 `schema_version` and `event_type` appear both in the journal envelope and the
 encoded JSON. This deliberate duplication supports database diagnostics and
@@ -46,7 +46,7 @@ load rejects a record if the copies disagree.
 
 ## Schema and Migration
 
-Schema migration is explicit. `migrate-transaction-journal!` creates and uses:
+Database migration is explicit. `migrate-pos-database!` creates and uses:
 
 ```sql
 CREATE TABLE pos_schema_migrations (
@@ -82,20 +82,46 @@ full schema and persistence contract are documented in
 receipts are not transaction facts and are never replayed as transaction
 state.
 
+Migration version 3, `create_catalog`, creates the persistent local catalog
+item and barcode-assignment tables. The catalog answers new-scan lookup
+questions; it is not transaction truth and is never consulted during replay.
+Its schema and read contract are documented in
+[Local Catalog](catalog.md).
+
+Migration version 4, `create_tax_categories`, adds current tax categories and
+exactly one item-category mapping per catalog item. Existing v3 items receive
+an explicit zero-tax compatibility mapping. Migration-3-owned table definitions
+and existing event/receipt rows remain unchanged.
+
+Migration version 5, `create_register_operations`, adds current singleton
+register configuration, the current cashier directory, and durable shift rows.
+It creates no default identities. Shift rows snapshot register/cashier display
+values and hold the single-register active-transaction coordination slot; they
+are operational durability, not transaction truth. See
+[Register Operations and Shift Context](register-operations.md).
+
+Migration version 6, `create_shift_cash_accountability`, adds append-only shift
+cash movements and immutable close reconciliation. It does not change
+transaction events, command receipts, catalog/tax tables, or migration-5 shift
+DDL. A v5 open shift blocks upgrade rather than receiving fabricated opening
+cash; closed v5 shifts remain explicitly untracked. See
+[Shift Cash Accountability](cash-accountability.md).
+
 The migration runner treats recorded history as an exact prefix of the known
-ordered migration list. A fresh database applies versions 1 and 2. A real v1
-database validates and preserves its event schema and rows before applying only
-version 2. A correct v2 database is validated without schema mutation. Unknown,
-skipped, reordered, renamed, or drifted migration state fails rather than being
-silently repaired. This ordered-prefix mechanism can extend to migration 3
-without adding another historical-version conditional.
+ordered migration list. A fresh database applies versions 1 through 6. Real
+v1/v2 databases upgrade through the remaining sequence, while a real v3
+database preserves its merchandise rows and receives zero-tax mappings. A
+correct v4 database gains empty operational tables, and a correct v5 database
+with no open shift gains empty cash-accountability tables. Unknown, skipped, reordered,
+renamed, or drifted migration state fails rather than being silently repaired.
 
 Table creation is not hidden inside append or load. Application composition is
 responsible for running migrations explicitly before using the store.
 
-No recorded timestamp is present in either current table. A future timestamp
-would be persistence metadata only; it must never determine event order or
-affect replay.
+The journal envelope has no generic recorded timestamp, and event order remains
+the per-stream sequence. New operational event payloads explicitly record
+start/completion/void epoch milliseconds as business facts; legacy events have
+no time. Those payload values never determine stream order.
 
 ## Stream Sequence and Identity
 
@@ -144,7 +170,9 @@ If the versions differ, append returns a stable `stream-version-conflict`
 result with the actual version and writes nothing. The caller must reload and
 make a new domain decision; it must not blindly overwrite or infer a merge.
 
-All events are encoded with Transaction Event Schema v1 before writes begin.
+All events are encoded with their declared Transaction Event Schema before
+writes begin. Existing lifecycle events and legacy sale lines remain v1; new
+taxed sale lines use v2.
 The batch is then inserted at consecutive sequence numbers in one SQLite
 transaction. If any insert fails, SQLite rolls back every insert from that
 batch and preserves the earlier stream unchanged.
@@ -181,10 +209,13 @@ inside a larger caller-owned transaction.
 The transaction-command unit of work now uses that composition seam. It
 serializes accepted events before reserving the writer, then uses one
 `BEGIN IMMEDIATE` for the final command-ID lookup, stream-version check, event
-append, and receipt insertion. A receipt-only deterministic outcome uses the
+append, receipt insertion, and any required shift-slot claim/release or
+completed-sale cash movement. A
+receipt-only deterministic outcome uses the
 same writer transaction without appending a transaction fact. If the receipt
-cannot be inserted after events were written, the callback aborts so the event
-inserts roll back rather than committing alone.
+cannot be inserted after events were written, or an operational effect fails,
+the callback aborts so event, receipt, cash movement, and shift state roll back
+together.
 
 `transaction-stream-version/in-transaction` exposes the same current-version
 query to this persistence composition and requires an active caller-owned
@@ -220,8 +251,8 @@ higher service layer may later translate an empty stream into a not-found API
 response.
 
 A successful non-empty load contains only the requested stream's ordered domain
-events and its final stream version. Each row is decoded through the existing
-strict Schema v1 codec. Load validates:
+events and its final stream version. Each row is decoded through the strict
+version-aware event codec. Load validates:
 
 - consecutive sequences beginning at 1;
 - envelope `schema_version` agreement with `event_json`;
@@ -267,8 +298,9 @@ resources.
 
 The service provides operations to:
 
-- execute one of the four typed mutating transaction commands;
-- load/recover current authoritative transaction state.
+- execute one of the six typed mutating transaction commands;
+- load/recover current authoritative transaction state;
+- derive a canonical receipt from a completed replay.
 
 ### Duplicate, Recover, Decide, Commit
 
@@ -327,14 +359,39 @@ domain lifecycle fails at the replay stage. Neither failure path invokes the
 requested domain command or returns partial state as success. Genuine SQLite
 operational exceptions continue to propagate as infrastructure failures.
 
+### Append-only Cashier Corrections
+
+Open-sale corrections use the same command/receipt/unit-of-work boundary as
+the other mutations. `remove_line_item` appends `sale_line_removed`; it never
+deletes the earlier `sale_item_added` fact. The zero-based line index is
+interpreted only after the caller's expected version matches, preventing a
+stale selection from being applied to a newer basket. Replay removes exactly
+that line's already-stored base-price and tax contribution and performs no
+catalog lookup.
+
+`void_transaction` appends `transaction_voided` only from open state. The
+terminal voided projection retains the cancelled basket and its descriptive
+subtotal, tax, and total. It is not completed revenue. Same-ID retries resolve
+the original durable receipt, so a lost removal response cannot remove a
+second line and a lost void response cannot append another void event. These
+decisions are recorded in
+[ADR-0014](../adr/0014-represent-cashier-corrections-as-append-only-transaction-events.md).
+
 ### Catalog Boundary and Restart Recovery
 
 The service does not hard-code a catalog. Composition injects the current
 catalog lookup when constructing the service. A fresh, version-matched scan
-uses it through the live domain decision; an accepted `sale-item-added` event
-persists the sale-time barcode, description, and exact unit price snapshot.
+uses it through the live domain decision; an accepted Schema v2
+`sale-item-added` event persists the sale-time barcode, description, exact unit
+price, tax category, rate millionths, and calculated line-tax snapshot.
 Known retries, command-ID reuse, missing transactions, stale commands, and
 historical replay do not consult the catalog.
+
+Schema v1 sale lines replay with zero tax. Schema v2 replay uses the stored tax
+amount and never current tax reference data. Mixed v1/v2 streams are valid:
+subtotal sums base prices, tax sums stored line tax, and total is their exact
+sum. See
+[ADR-0013](../adr/0013-snapshot-exact-line-tax-in-transaction-events.md).
 
 Process restart recovery opens the same SQLite database using a new connection,
 loads and decodes the stream, and replays it from the first event. No mutable
@@ -350,19 +407,61 @@ before the unit of work leaves no event or receipt, so retrying that same ID can
 execute normally. This is a retry-based recovery protocol for uncertain caller
 observation; it is not a claim of arbitrary distributed exactly-once execution.
 
+### Operational context and shift coupling
+
+Production transaction starts now require a configured register and one open,
+idle shift. The service snapshots that shift's register/cashier identity and a
+POS-Core-recorded start epoch millisecond in `transaction_started` Schema v2.
+The final writer transaction rechecks and claims
+`shift.active_transaction_id`; a two-connection race therefore permits only one
+accepted start.
+
+For a context-bearing transaction, completion or void appends its timestamped
+Schema v2 event and clears only the slot that points back to that exact
+transaction. Event, command receipt, and slot change share one
+`BEGIN IMMEDIATE` boundary. Duplicate receipt lookup occurs before current
+shift validation, so a delayed same-ID retry recovers its original result after
+completion or shift close.
+
+Schema v1 start/completion/void events continue to replay with absent context
+and time. Existing legacy open/paid transactions may finish without invented
+operational attribution. Replay never queries current register/cashier/shift
+tables. See [ADR-0016](../adr/0016-snapshot-register-cashier-shift-and-operational-time.md).
+
+### Canonical completed-sale receipts
+
+A completed transaction replay plus its final stream version contains every
+fact needed for a canonical receipt. POS Core maps final retained lines and the
+transaction projection into an immutable canonical receipt. It does not query
+current catalog/tax data or reconstruct merchandise through command receipts.
+Open, paid, and voided streams are explicitly ineligible.
+
+Legacy context-free streams derive the unchanged Receipt Schema v1. New
+context-bearing streams with a recorded completion time derive Receipt Schema
+v2 containing their historical register, cashier, shift, start, and completion
+facts.
+
+No materialized receipt table is added. This avoids a second historical sale
+authority and projection-synchronization boundary. Exact lookup is exposed by
+`GET /receipts/{transaction_id}` and remains deterministic after process
+restart and current reference-data replacement. See
+[Canonical Completed-Sale Receipts](receipts.md) and
+[ADR-0015](../adr/0015-derive-canonical-receipts-from-completed-transaction-replay.md).
+
 ## Deliberately Deferred
 
 The persistent service is exposed through the narrow command/query routes in
-[Transaction HTTP API v1](transaction-http-api-v1.md), but not yet through a
-Flutter transaction workflow. The journal milestone also does not add:
+[Transaction HTTP API v1](transaction-http-api-v1.md), and the Flutter cashier
+uses those routes for the current cash-sale workflow. The journal design still
+does not add:
 
 - authoritative snapshots or projections;
-- timestamps or event UUIDs;
+- a generic journal-record timestamp or event UUIDs;
 - hash chaining or integrity signatures;
 - outbox or cloud synchronization tables;
-- sale-receipt, tender, inventory, or card-payment tables;
+- materialized sale-receipt, tender, inventory, or card-payment tables;
 - partial/split tender or other new transaction behavior;
-- Flutter transaction integration.
+- post-payment refund/reversal behavior.
 
 Persistence code does not hard-code `SQLITE_DB_PATH` and does not hide a global
 mutable database connection. The runtime resolves the configured path once,

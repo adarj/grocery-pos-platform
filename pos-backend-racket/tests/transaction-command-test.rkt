@@ -22,18 +22,23 @@
       (tender-cash-command "cmd-002" "txn-001" 2 (money 500)))
     (define completion
       (complete-transaction-command "cmd-003" "txn-001" 3))
+    (define removal
+      (remove-line-item-command "cmd-004" "txn-001" 4 1))
+    (define void
+      (void-transaction-command "cmd-005" "txn-001" 5))
 
     (string-set! mutable-command-id 0 #\X)
     (string-set! mutable-transaction-id 0 #\X)
     (string-set! mutable-barcode 0 #\X)
 
-    (for ([command (in-list (list start scan tender completion))])
+    (for ([command (in-list (list start scan tender completion removal void))])
       (check-pred transaction-command? command))
     (check-equal? (transaction-command-command-id start) "cmd-001")
     (check-equal? (transaction-command-transaction-id start) "txn-001")
     (check-equal? (transaction-command-expected-version start) 0)
     (check-equal? (scan-barcode-command-barcode scan) "049000001234")
-    (check-equal? (tender-cash-command-amount tender) (money 500)))
+    (check-equal? (tender-cash-command-amount tender) (money 500))
+    (check-equal? (remove-line-item-command-line-index removal) 1))
 
   (test-case "independently constructed equivalent commands compare equal"
     (check-equal?
@@ -47,7 +52,13 @@
      (tender-cash-command "cmd-tender" "txn-001" 2 (money 500)))
     (check-equal?
      (complete-transaction-command "cmd-complete" "txn-001" 3)
-     (complete-transaction-command "cmd-complete" "txn-001" 3)))
+     (complete-transaction-command "cmd-complete" "txn-001" 3))
+    (check-equal?
+     (remove-line-item-command "cmd-remove" "txn-001" 4 1)
+     (remove-line-item-command "cmd-remove" "txn-001" 4 1))
+    (check-equal?
+     (void-transaction-command "cmd-void" "txn-001" 5)
+     (void-transaction-command "cmd-void" "txn-001" 5)))
 
   (test-case "any typed request difference changes command identity"
     (define scan
@@ -67,7 +78,13 @@
      (scan-barcode-command "cmd-001" "txn-001" 1 "049000001235"))
     (check-not-equal?
      (tender-cash-command "cmd-001" "txn-001" 1 (money 500))
-     (tender-cash-command "cmd-001" "txn-001" 1 (money 501))))
+     (tender-cash-command "cmd-001" "txn-001" 1 (money 501)))
+    (check-not-equal?
+     (remove-line-item-command "cmd-001" "txn-001" 1 0)
+     (remove-line-item-command "cmd-001" "txn-001" 1 1))
+    (check-not-equal?
+     (remove-line-item-command "cmd-001" "txn-001" 1 0)
+     (void-transaction-command "cmd-001" "txn-001" 1)))
 
   (test-case "command constructors enforce application-boundary invariants"
     (for ([make-invalid
@@ -81,5 +98,9 @@
              (lambda () (start-transaction-command "cmd-001" "txn-001" 1.0))
              (lambda () (scan-barcode-command "cmd-001" "txn-001" 0 ""))
              (lambda () (scan-barcode-command "cmd-001" "txn-001" 0 490))
-             (lambda () (tender-cash-command "cmd-001" "txn-001" 0 500))))])
+             (lambda () (tender-cash-command "cmd-001" "txn-001" 0 500))
+             (lambda ()
+               (remove-line-item-command "cmd-001" "txn-001" 0 -1))
+             (lambda ()
+               (remove-line-item-command "cmd-001" "txn-001" 0 1.0))))])
       (check-exn exn:fail:contract? make-invalid))))

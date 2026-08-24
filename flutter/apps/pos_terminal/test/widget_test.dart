@@ -4,8 +4,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pos_terminal/app/pos_terminal_app.dart';
 import 'package:pos_terminal/core/pos_core/models/command_result.dart';
+import 'package:pos_terminal/core/pos_core/models/canonical_receipt.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_failure.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_health.dart';
+import 'package:pos_terminal/core/pos_core/models/register_operations.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_command.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_snapshot.dart';
 import 'package:pos_terminal/core/pos_core/pos_core_client.dart';
@@ -38,7 +40,58 @@ final class FixedCashierIds implements CashierIdGenerator {
   String nextTransactionId() => 'txn-widget';
 }
 
-class FakeConnectedPosCoreClient implements PosCoreClient {
+mixin FakeRegisterOperations {
+  Future<RegisterContext> fetchRegisterContext() async => const RegisterContext(
+    configured: true,
+    register: RegisterIdentity(
+      registerId: 'register-test',
+      displayName: 'Test Register',
+    ),
+    activeShift: RegisterShift(
+      shiftId: 'shift-test',
+      registerId: 'register-test',
+      registerDisplayName: 'Test Register',
+      cashierId: 'cashier-test',
+      cashierDisplayName: 'Test Cashier',
+      openedAtEpochMs: 0,
+      closedAtEpochMs: null,
+      activeTransactionId: null,
+    ),
+  );
+
+  Future<List<CashierIdentity>> fetchActiveCashiers() async => const [];
+
+  Future<ShiftOperationResult> openShift(
+    String cashierId,
+    int openingCashMinorUnits,
+  ) => throw UnimplementedError();
+
+  Future<ShiftOperationResult> closeShift(
+    String shiftId,
+    int countedCashMinorUnits,
+  ) => throw UnimplementedError();
+
+  Future<ShiftCashSummary> fetchShiftCashSummary(String shiftId) async =>
+      const ShiftCashSummary(
+        shiftId: 'shift-test',
+        status: ShiftCashStatus.open,
+        openingCashMinorUnits: 0,
+        completedCashSaleCount: 0,
+        cashSalesMinorUnits: 0,
+        expectedCashMinorUnits: 0,
+        countedCashMinorUnits: null,
+        overShortMinorUnits: null,
+      );
+}
+
+class FakeConnectedPosCoreClient
+    with FakeRegisterOperations
+    implements PosCoreClient {
+  @override
+  Future<CanonicalReceipt> fetchReceipt(String transactionId) {
+    throw UnimplementedError();
+  }
+
   @override
   Future<PosCoreHealth> fetchHealth() async {
     return const PosCoreHealth(
@@ -60,7 +113,14 @@ class FakeConnectedPosCoreClient implements PosCoreClient {
   }
 }
 
-class FakeUnavailablePosCoreClient implements PosCoreClient {
+class FakeUnavailablePosCoreClient
+    with FakeRegisterOperations
+    implements PosCoreClient {
+  @override
+  Future<CanonicalReceipt> fetchReceipt(String transactionId) {
+    throw UnimplementedError();
+  }
+
   @override
   Future<PosCoreHealth> fetchHealth() async {
     throw const PosCoreTransportFailure('Connection refused.');
@@ -77,7 +137,14 @@ class FakeUnavailablePosCoreClient implements PosCoreClient {
   }
 }
 
-final class FakeConnectingPosCoreClient implements PosCoreClient {
+final class FakeConnectingPosCoreClient
+    with FakeRegisterOperations
+    implements PosCoreClient {
+  @override
+  Future<CanonicalReceipt> fetchReceipt(String transactionId) {
+    throw UnimplementedError();
+  }
+
   final Completer<PosCoreHealth> health = Completer();
 
   @override
@@ -111,11 +178,12 @@ void main() {
 
     await tester.pumpAndSettle();
 
-    expect(find.text('Grocery POS Terminal'), findsOneWidget);
-    expect(find.text('POS Core Connected'), findsOneWidget);
-    expect(find.text('grocery-pos-core 0.0.0-dev (dev)'), findsOneWidget);
+    expect(find.text('Test Register'), findsOneWidget);
+    expect(find.text('Shift Open'), findsOneWidget);
+    expect(find.textContaining('Cashier: Test Cashier'), findsOneWidget);
     expect(find.text('Open Register'), findsOneWidget);
-    expect(find.text('Refresh'), findsOneWidget);
+    expect(find.text('Lookup Completed Sale'), findsOneWidget);
+    expect(find.text('Refresh Register State'), findsOneWidget);
     expect(
       tester.getSize(find.widgetWithText(FilledButton, 'Open Register')).height,
       greaterThanOrEqualTo(52),
@@ -142,7 +210,11 @@ void main() {
 
     expect(find.text('Grocery POS Terminal'), findsOneWidget);
     expect(find.text('POS Core Unavailable'), findsOneWidget);
-    expect(find.text('Connection refused.'), findsOneWidget);
+    expect(
+      find.text('Check that POS Core is running, then retry.'),
+      findsOneWidget,
+    );
+    expect(find.text('Connection refused.'), findsNothing);
     expect(find.text('Retry'), findsOneWidget);
     expect(find.text('Open Register'), findsNothing);
   });
@@ -158,5 +230,22 @@ void main() {
 
     expect(find.text('Grocery POS'), findsOneWidget);
     expect(find.text('Start Sale'), findsOneWidget);
+  });
+
+  testWidgets('connected gateway opens exact completed-sale lookup', (
+    tester,
+  ) async {
+    await tester.pumpWidget(testApp(FakeConnectedPosCoreClient()));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Lookup Completed Sale'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Lookup Completed Sale'), findsOneWidget);
+    expect(
+      find.byKey(const Key('receipt-transaction-id-field')),
+      findsOneWidget,
+    );
+    expect(find.text('Find Receipt'), findsOneWidget);
   });
 }

@@ -83,6 +83,34 @@ void main() {
     expectCommonCommandFields(restored, command);
   });
 
+  test('pending removal round-trips exact index and identity', () {
+    final command = RemoveLineItemCommand(
+      commandId: 'cmd-remove',
+      transactionId: 'txn-1',
+      expectedVersion: 7,
+      lineIndex: 2,
+    );
+
+    final restored = roundTrip(command).pendingCommand!;
+
+    expect(restored, isA<RemoveLineItemCommand>());
+    expectCommonCommandFields(restored, command);
+    expect((restored as RemoveLineItemCommand).lineIndex, 2);
+  });
+
+  test('pending void round-trips exact identity', () {
+    final command = VoidTransactionCommand(
+      commandId: 'cmd-void',
+      transactionId: 'txn-1',
+      expectedVersion: 8,
+    );
+
+    final restored = roundTrip(command).pendingCommand!;
+
+    expect(restored, isA<VoidTransactionCommand>());
+    expectCommonCommandFields(restored, command);
+  });
+
   test('known active session round-trips with null pending command', () {
     final restored = PersistedCashierSession.fromJson(
       jsonDecode(
@@ -112,6 +140,7 @@ void main() {
     for (final forbidden in <String>[
       'line_items',
       'subtotal_minor_units',
+      'tax_minor_units',
       'total_minor_units',
       'tendered_cash_minor_units',
       'change_due_minor_units',
@@ -234,6 +263,14 @@ void main() {
         'expected_version': 1,
         'command_type': 'tender_cash',
         'payload': {'amount_minor_units': 1.5},
+      },
+      {
+        'schema_version': 1,
+        'command_id': 'cmd-1',
+        'transaction_id': 'txn-1',
+        'expected_version': 1,
+        'command_type': 'remove_line_item',
+        'payload': {'line_index': -1},
       },
     ];
 

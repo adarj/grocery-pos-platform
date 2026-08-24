@@ -31,7 +31,11 @@ not re-execute catalog lookups, commands, or external effects.
 
 Persisted sale-item events contain the accepted sale-time barcode, description,
 and exact unit price needed for reconstruction without consulting the current
-catalog.
+catalog. Transaction Event Schema v2 additionally snapshots the sale-time tax
+category, exact rate, and exact calculated line tax; historical Schema v1 sale
+items retain their original zero-tax meaning. The detailed tax decision is
+recorded in
+[ADR-0013](0013-snapshot-exact-line-tax-in-transaction-events.md).
 
 Mutable projections or snapshots may be introduced later for query or
 performance needs, but they are derived data and are not authoritative

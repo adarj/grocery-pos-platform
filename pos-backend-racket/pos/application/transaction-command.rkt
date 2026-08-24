@@ -9,13 +9,15 @@
          (struct-out start-transaction-command)
          (struct-out scan-barcode-command)
          (struct-out tender-cash-command)
-         (struct-out complete-transaction-command))
+         (struct-out complete-transaction-command)
+         (struct-out remove-line-item-command)
+         (struct-out void-transaction-command))
 
 (define (non-empty-string? value)
   (and (string? value)
        (positive? (string-length value))))
 
-;; The base constructor is deliberately private. Only one of the four concrete
+;; The base constructor is deliberately private. Only concrete
 ;; Schema v1 command variants can cross the application boundary.
 (struct transaction-command (command-id transaction-id expected-version)
   #:transparent
@@ -58,4 +60,19 @@
     (values command-id transaction-id expected-version amount)))
 
 (struct complete-transaction-command transaction-command ()
+  #:transparent)
+
+(struct remove-line-item-command transaction-command (line-index)
+  #:transparent
+  #:guard
+  (lambda (command-id transaction-id expected-version line-index type-name)
+    (unless (and (exact-integer? line-index)
+                 (>= line-index 0))
+      (raise-argument-error
+       type-name
+       "exact nonnegative integer"
+       line-index))
+    (values command-id transaction-id expected-version line-index)))
+
+(struct void-transaction-command transaction-command ()
   #:transparent)

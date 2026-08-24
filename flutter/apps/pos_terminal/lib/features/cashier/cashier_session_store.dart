@@ -139,6 +139,18 @@ TransactionCommand _decodeCommand(Object? value) {
       expectedVersion,
       payload,
     ),
+    'remove_line_item' => _decodeRemoveLineItemCommand(
+      commandId,
+      transactionId,
+      expectedVersion,
+      payload,
+    ),
+    'void_transaction' => _decodeVoidTransactionCommand(
+      commandId,
+      transactionId,
+      expectedVersion,
+      payload,
+    ),
     _ => throw const CashierSessionStoreFailure.corruptData(),
   };
 }
@@ -195,6 +207,35 @@ CompleteTransactionCommand _decodeCompleteCommand(
 ) {
   _requireExactObject(payload, const {});
   return CompleteTransactionCommand(
+    commandId: commandId,
+    transactionId: transactionId,
+    expectedVersion: expectedVersion,
+  );
+}
+
+RemoveLineItemCommand _decodeRemoveLineItemCommand(
+  String commandId,
+  String transactionId,
+  int expectedVersion,
+  Object? payload,
+) {
+  final fields = _requireExactObject(payload, const {'line_index'});
+  return RemoveLineItemCommand(
+    commandId: commandId,
+    transactionId: transactionId,
+    expectedVersion: expectedVersion,
+    lineIndex: _requireNonnegativeInt(fields['line_index']),
+  );
+}
+
+VoidTransactionCommand _decodeVoidTransactionCommand(
+  String commandId,
+  String transactionId,
+  int expectedVersion,
+  Object? payload,
+) {
+  _requireExactObject(payload, const {});
+  return VoidTransactionCommand(
     commandId: commandId,
     transactionId: transactionId,
     expectedVersion: expectedVersion,

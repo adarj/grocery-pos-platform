@@ -1,9 +1,12 @@
-# Transaction Event Schema v1
+# Transaction Event Schemas
 
 ## Status
 
-Transaction Event Schema v1 defines the stable JSON representation of the
-currently implemented cash-sale transaction domain events.
+Transaction Event Schemas v1 and v2 define stable JSON representations for the
+implemented cash-sale transaction domain events. Existing lifecycle and
+correction events and legacy untaxed sale lines use v1. New taxed sale lines
+use v2, and new operationally bound starts/completion/voids use their explicit
+v2 forms.
 
 It covers event payload serialization only. It does not define a SQLite
 journal table or persisted journal-record envelope.
@@ -19,7 +22,7 @@ The boundary is:
 
 ```text
 Racket transaction domain event
-    -> Transaction Event Schema v1 JSON
+    -> versioned Transaction Event Schema JSON
     -> SQLite persisted journal record
 ```
 
@@ -47,7 +50,7 @@ The implemented envelope contains a SQLite row identifier, transaction stream
 key, per-stream sequence, and duplicated schema-version and event-type fields.
 Event identifiers, recording timestamps, command identifiers, and integrity
 information remain deferred. Envelope values are not domain-event payload
-fields and are not part of Schema v1.
+fields.
 
 The `transaction_started` payload contains `transaction_id` because the domain
 fact needs it to reconstruct transaction identity. The journal envelope also
@@ -67,7 +70,7 @@ Every Schema v1 event is a JSON object with exactly these fields:
 ```
 
 - `schema_version` is the exact JSON integer `1`.
-- `event_type` is one of the four strings defined below.
+- `event_type` is one of the six Schema v1 strings defined below.
 - `payload` is an object with the exact shape defined for that event type.
 - Persisted names use `snake_case`; Racket domain identifiers use hyphens.
 
@@ -90,6 +93,33 @@ Payload fields:
 - `transaction_id`: string containing the externally supplied transaction
   identifier.
 
+Schema v1 means that operational register/cashier/shift context and start time
+are absent. It remains the exact replay form for legacy transactions.
+
+### Schema v2 `transaction_started`
+
+New production starts use:
+
+```json
+{
+  "schema_version": 2,
+  "event_type": "transaction_started",
+  "payload": {
+    "transaction_id": "txn-001",
+    "register_id": "register-front-01",
+    "register_display_name": "Front Register 1",
+    "cashier_id": "cashier-001",
+    "cashier_display_name": "Alice",
+    "shift_id": "shift_...",
+    "started_at_epoch_ms": 1787500000000
+  }
+}
+```
+
+The IDs and names are exact non-empty sale-start snapshots. The time is an
+exact nonnegative UTC Unix epoch millisecond recorded by POS Core. Replay uses
+these values directly and never joins current configuration or calls a clock.
+
 ### `sale_item_added`
 
 ```json
@@ -111,6 +141,39 @@ Payload fields:
 - `unit_price_minor_units`: exact nonnegative integer sale-time unit price.
 
 The sale-time snapshot makes replay independent of the current catalog.
+For compatibility, a Schema v1 sale line has tax zero.
+
+## Schema v2 taxed sale item
+
+Schema v2 is currently defined only for `sale_item_added`:
+
+```json
+{
+  "schema_version": 2,
+  "event_type": "sale_item_added",
+  "payload": {
+    "barcode": "049000001234",
+    "description": "Test Apples",
+    "unit_price_minor_units": 199,
+    "tax_category_id": "development-standard",
+    "tax_rate_millionths": 100000,
+    "tax_amount_minor_units": 20
+  }
+}
+```
+
+The category ID is opaque non-empty text. The rate is an exact integer from
+`0` through `1,000,000` representing a fraction of one. The tax amount is exact
+nonnegative minor units calculated per line using Schema v2's permanent
+half-up rule:
+
+```text
+quotient(unit_price_minor_units * tax_rate_millionths + 500000, 1000000)
+```
+
+The decoder verifies that the stored amount matches that formula. Replay uses
+the stored amount and never current catalog/tax data. A future different tax
+algorithm requires another schema version.
 
 ### `cash_tendered`
 
@@ -144,6 +207,69 @@ values during replay.
 The payload must be empty. Completion status is derived by applying this event
 to a paid transaction.
 
+For a context-bearing new transaction, completion uses:
+
+```json
+{
+  "schema_version": 2,
+  "event_type": "transaction_completed",
+  "payload": {
+    "completed_at_epoch_ms": 1787500030000
+  }
+}
+```
+
+The exact nonnegative epoch millisecond must not precede the stored transaction
+start time. Schema v1 completion keeps completion time absent.
+
+### `sale_line_removed`
+
+```json
+{
+  "schema_version": 1,
+  "event_type": "sale_line_removed",
+  "payload": {
+    "line_index": 1
+  }
+}
+```
+
+`line_index` is an exact nonnegative zero-based index into the authoritative
+open transaction state immediately before this event. Replay requires that the
+index exist and removes exactly that one position while preserving remaining
+order. The earlier sale-item event already contains the removed line's exact
+sale-time price and tax facts, so the correction event does not duplicate or
+recalculate them.
+
+### `transaction_voided`
+
+```json
+{
+  "schema_version": 1,
+  "event_type": "transaction_voided",
+  "payload": {}
+}
+```
+
+The payload must be empty. Applying the event changes an open transaction to
+the terminal `voided` state while retaining its cancelled basket and monetary
+projection for inspection.
+
+For a context-bearing new transaction, void uses:
+
+```json
+{
+  "schema_version": 2,
+  "event_type": "transaction_voided",
+  "payload": {
+    "voided_at_epoch_ms": 1787500020000
+  }
+}
+```
+
+The same exact time and start-order rules apply. Schema v1 void keeps terminal
+time absent.
+
 ## Money representation
 
 All money uses exact integer minor units:
@@ -156,12 +282,11 @@ $5.00 -> 500
 Binary floating-point values, decimal major-unit values, negative amounts,
 fractional minor units, numeric strings, and implicit coercions are invalid.
 
-Schema v1 does not introduce currency conversion or multiple-currency
-semantics.
+Neither schema introduces currency conversion or multiple-currency semantics.
 
 ## Strict decoding
 
-Persisted event data is untrusted. The Schema v1 decoder rejects:
+Persisted event data is untrusted. The version-aware decoder rejects:
 
 - malformed or invalid UTF-8 JSON;
 - duplicate object member names at any nesting level, including names with
@@ -174,7 +299,13 @@ Persisted event data is untrusted. The Schema v1 decoder rejects:
 - missing or extra event-specific payload fields;
 - non-string transaction IDs, barcodes, or descriptions;
 - negative, inexact, fractional, or incorrectly typed money fields;
-- a non-empty `transaction_completed` payload.
+- invalid Schema v2 category/rate fields or a tax amount inconsistent with the
+  v2 algorithm;
+- a negative, fractional, inexact, or incorrectly typed removal line index;
+- event types or v2 payload combinations not explicitly defined above;
+- empty or incorrectly typed operational identities;
+- negative, fractional, or incorrectly typed epoch milliseconds;
+- a non-empty `transaction_completed` or `transaction_voided` payload.
 
 The decoder does not ignore unknown fields or coerce values. Semantic evolution
 must use an explicit schema version instead of changing the meaning of Schema
@@ -193,6 +324,11 @@ unsupported-schema-version
 unknown-event-type
 invalid-field-type
 invalid-money
+invalid-line-index
+invalid-tax-category-id
+invalid-tax-rate
+inconsistent-tax-amount
+unsupported-schema-event-type
 ```
 
 Low-level JSON parser or hash exceptions are not exposed as persisted-data
@@ -200,13 +336,24 @@ diagnostics.
 
 ## Compatibility and versioning
 
-Schema v1 field names, event-type strings, required fields, and value types are
-durable compatibility commitments.
+Schema v1 and v2 field names, event-type strings, required fields, value types,
+and the v2 line-tax formula are durable compatibility commitments.
 
 A reader that does not support a record's `schema_version` must reject it. A
 future incompatible payload change requires a new schema version and an
 explicit decoding or migration strategy. Existing Schema v1 records must remain
 decodable according to the rules in this document.
+
+Mixed streams containing v1 and v2 sale lines are valid. V1 lines contribute
+zero tax; v2 lines contribute their stored tax. Removal events subtract the
+selected line's already-stored base-price and tax contribution without catalog
+lookup. No correction deletes or rewrites an earlier journal event.
+
+A Schema v1 start with Schema v1 terminal event represents a legacy
+transaction with absent operational context/time. A Schema v2 start requires a
+matching Schema v2 completion or void time for canonical Receipt v2. Invalid
+context/time combinations fail closed. Existing legacy open/paid transactions
+can still finish without invented attribution.
 
 ## Deliberately deferred metadata
 
@@ -216,7 +363,8 @@ Schema v1 does not contain:
 - transaction stream keys;
 - stream sequence numbers;
 - event IDs;
-- recorded timestamps;
+- a generic journal-recorded timestamp (only the explicit operational event
+  times above exist);
 - previous or current hashes;
 - command IDs;
 - filesystem paths or other storage locations.
