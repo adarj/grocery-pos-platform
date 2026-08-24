@@ -190,7 +190,8 @@ This runtime composition and HTTP adapter do not add:
 - catalog HTTP administration, patch updates, or cloud synchronization;
 - automatic SQLite busy retry or backoff;
 - a generic service container or component framework;
-- payment, device, drawer, or receipt integration;
+- external payment/device integration, physical cash-drawer control, or
+  receipt-printer integration;
 - exactly-once external-effect guarantees.
 
 Future external effects still require persisted intent and explicit

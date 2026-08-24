@@ -102,8 +102,9 @@ Transaction, tender, payment, receipt, drawer, synchronization, and recovery sta
 For the implemented cash-sale slice, SQLite is now the durable local journal
 of accepted transaction facts, and Racket replay reconstructs authoritative
 transaction state and canonical completed-sale receipts. A second materialized
-receipt store is not required. Persistence for the other listed concerns
-remains future work.
+receipt store is not required. SQLite also persists cashier command recovery,
+shift cash movements, and immutable drawer reconciliation. Card-payment,
+synchronization, and external-device recovery remain future work.
 
 ### Specialized Rust Edges
 

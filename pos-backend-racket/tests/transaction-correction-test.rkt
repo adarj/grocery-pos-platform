@@ -170,4 +170,3 @@
                   'invalid-transaction-state)
     (check-equal? (void-rejected-code (void-transaction voided))
                   'invalid-transaction-state)))
-
