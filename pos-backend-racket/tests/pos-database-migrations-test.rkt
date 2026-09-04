@@ -78,6 +78,75 @@ SQL
         #(6 "create_shift_cash_accountability")))
 
 (module+ test
+  (test-case "migration history and schema validation are reusable without migrating"
+    (call-with-test-database
+     (lambda (connection)
+       (install-frozen-v1! connection)
+
+       (check-equal? current-pos-database-schema-version 6)
+       (check-equal?
+        (read-pos-database-migration-history connection)
+        (list #(1 "create_transaction_events")))
+       (check-equal?
+        (classify-pos-database-migration-history
+         (read-pos-database-migration-history connection))
+        'supported-prefix)
+       (check-not-exn
+        (lambda () (validate-pos-database-schema! connection)))
+       (check-exn
+        exn:fail?
+        (lambda ()
+          (validate-pos-database-schema!
+           connection
+           #:require-current? #t)))
+
+       ;; Inspection/validation must not advance a historical database.
+       (check-equal?
+        (read-pos-database-migration-history connection)
+        (list #(1 "create_transaction_events")))
+       (check-equal?
+        (query-value
+         connection
+         #<<SQL
+SELECT COUNT(*)
+FROM sqlite_schema
+WHERE type = 'table' AND name = 'transaction_command_receipts'
+SQL
+         )
+        0))))
+
+  (test-case "current schema validates non-mutatingly and unknown history is rejected"
+    (call-with-test-database
+     (lambda (connection)
+       (migrate-pos-database! connection)
+       (define history-before
+         (read-pos-database-migration-history connection))
+
+       (check-equal? history-before expected-migration-history)
+       (check-equal?
+        (classify-pos-database-migration-history history-before)
+        'current)
+       (check-not-exn
+        (lambda ()
+          (validate-pos-database-schema!
+           connection
+           #:require-current? #t)))
+       (check-equal?
+        (read-pos-database-migration-history connection)
+        history-before)
+
+       (query-exec
+        connection
+        "INSERT INTO pos_schema_migrations (version, name) VALUES (7, 'unknown')")
+       (define unsupported-history
+         (read-pos-database-migration-history connection))
+       (check-equal?
+        (classify-pos-database-migration-history unsupported-history)
+        'unsupported)
+       (check-exn
+        exn:fail?
+        (lambda () (validate-pos-database-schema! connection))))))
+
   (test-case "fresh database migrates through versions 1 through 6"
     (call-with-test-database
      (lambda (connection)

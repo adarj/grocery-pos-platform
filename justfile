@@ -50,6 +50,23 @@ register-config-validate FILE:
 register-config-activate FILE DB:
     racket pos-backend-racket/scripts/register-configuration.rkt activate {{quote(FILE)}} {{quote(DB)}}
 
+# Reports structural SQLite, migration, and WAL/file metadata without mutation.
+db-info DB:
+    racket pos-backend-racket/scripts/database-maintenance.rkt info {{quote(DB)}}
+
+db-quick-check DB:
+    racket pos-backend-racket/scripts/database-maintenance.rkt quick-check {{quote(DB)}}
+
+db-integrity-check DB:
+    racket pos-backend-racket/scripts/database-maintenance.rkt integrity-check {{quote(DB)}}
+
+# Publishes OUTPUT only after a live VACUUM INTO snapshot validates read-only.
+db-backup DB OUTPUT:
+    racket pos-backend-racket/scripts/database-maintenance.rkt backup {{quote(DB)}} {{quote(OUTPUT)}}
+
+db-backup-validate BACKUP:
+    racket pos-backend-racket/scripts/database-maintenance.rkt backup-validate {{quote(BACKUP)}}
+
 supabase-start:
     @echo "TODO: start local Supabase"
 

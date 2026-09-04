@@ -93,6 +93,41 @@ SQLite `read/write` mode. Each physical pool connection verifies WAL and its
 per-connection policy before use. If the initialized file disappears, request
 handling fails instead of silently creating an empty replacement database.
 
+Startup migration/schema validation remains distinct from whole-file integrity
+scanning. Normal startup does not run `quick_check` or `integrity_check`; those
+are explicit technician operations described under
+[Database Maintenance](../operations/database-maintenance.md).
+
+## Inspection and backup connection boundaries
+
+Maintenance code deliberately separates two connection categories:
+
+```text
+authoritative live source requiring writable access
+  -> production SQLite connection policy
+
+inspection target or backup candidate
+  -> existing-file SQLite read-only connection
+```
+
+Read-only inspection never creates or migrates a database, establishes WAL,
+changes synchronous/checkpoint policy, forces a checkpoint, repairs data, or
+requires an offline backup artifact to report WAL mode. It can therefore report
+on a historical, non-WAL, drifted, malformed, or otherwise suspect target
+without normalizing the evidence under examination.
+
+The initial live backup path verifies the source through the production policy,
+uses a dedicated parameter-bound `VACUUM INTO` operation, then releases that
+source connection before independently validating the standalone candidate
+read-only. A same-directory `.partial` candidate is published with a
+non-overwriting atomic rename only after full SQLite integrity,
+foreign-key, exact-current-migration, and Grocery POS schema/application checks
+pass. See [ADR-0019](../adr/0019-use-validated-vacuum-into-snapshots.md).
+
+Maintenance is not part of request handling or the transaction-command Unit of
+Work. The runtime never automatically opens a backup when the authoritative
+database is missing or damaged.
+
 ## Request connection ownership
 
 The runtime builds one Racket `connection-pool` with:
@@ -219,7 +254,11 @@ Focused file-backed tests establish:
 - unchanged `/health` and unknown-route behavior through `make-app`;
 - operational configuration/shift composition, active-transaction slot
   persistence, atomic net cash-sale movement plus slot release on completion,
-  and movement-free slot release on void.
+  and movement-free slot release on void;
+- non-mutating read-only inspection and migration/schema reporting;
+- explicit quick/full integrity checks with foreign-key checking; and
+- validated live `VACUUM INTO` backup with partial-file isolation,
+  non-overwriting atomic publication, and continued source usability.
 
 ## Deliberately deferred
 
@@ -230,7 +269,8 @@ This runtime composition and HTTP adapter do not add:
 - catalog HTTP administration, patch updates, or cloud synchronization;
 - application-level busy retry/backoff or whole-command retry;
 - custom checkpoint scheduling, manual checkpoint tooling, or WAL metrics;
-- backup, restore, corruption-recovery tooling, or integrity-check commands;
+- restore, automatic backup fallback, repair, scheduled backup retention,
+  encryption, remote replication, or power-loss qualification;
 - a generic service container or component framework;
 - external payment/device integration, physical cash-drawer control, or
   receipt-printer integration;

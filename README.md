@@ -150,6 +150,9 @@ Verified capabilities currently include:
 * explicit SQLite WAL/FULL connection policy with foreign-key enforcement,
   bounded connector busy handling, a bounded SQLite pool, thread-mapped virtual
   request connections, and explicit shutdown ownership;
+* read-only SQLite inspection and migration/schema reporting, explicit quick
+  and full integrity checks, and validated live `VACUUM INTO` backups with
+  same-directory partial staging and atomic non-overwriting publication;
 * Transaction HTTP API v1 with one strict idempotent command route,
   authoritative transaction-state reads, and exact completed-sale canonical
   receipt lookup derived from journal replay, plus narrow register/shift
@@ -349,6 +352,10 @@ fast Racket/Flutter suites, and the real-process POS integration suite:
 just check
 ```
 
+Canonical database inspection, integrity-check, and live-backup commands are
+documented in [Local POS Database Maintenance](docs/operations/database-maintenance.md).
+Restore and automatic backup fallback are intentionally not implemented.
+
 The canonical development command surface is the repository `justfile`; prefer adding reusable commands there rather than relying on undocumented shell invocations.
 
 ## Repository Layout
@@ -358,7 +365,8 @@ The canonical development command surface is the repository `justfile`; prefer a
 ├── docs/
 │   ├── adr/
 │   ├── architecture/
-│   └── development/
+│   ├── development/
+│   └── operations/
 ├── flutter/
 │   └── apps/
 │       └── pos_terminal/
@@ -393,6 +401,12 @@ Architecture and interface contracts are stored under:
 
 ```text
 docs/architecture/
+```
+
+Operational procedures are stored under:
+
+```text
+docs/operations/
 ```
 
 Documentation should evolve in the same change as the behavior or architectural decision it describes.
