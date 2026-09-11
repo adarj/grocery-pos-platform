@@ -32,7 +32,7 @@ fi
   fail "unexpected RPM package name"
 [[ "$(rpm -qp --queryformat '%{VERSION}' "$rpm_path")" == "0.0.0" ]] ||
   fail "unexpected internal RPM version"
-[[ "$(rpm -qp --queryformat '%{RELEASE}' "$rpm_path")" == "0.1.dev" ]] ||
+[[ "$(rpm -qp --queryformat '%{RELEASE}' "$rpm_path")" == "0.2.dev" ]] ||
   fail "unexpected internal RPM release"
 [[ "$(rpm -qp --queryformat '%{ARCH}' "$rpm_path")" == "noarch" ]] ||
   fail "RPM architecture is not noarch"
@@ -42,6 +42,10 @@ fi
 rpm_requires="$(rpm -qp --requires "$rpm_path")"
 grep -Eq '^racket([[:space:]]|$)' <<<"$rpm_requires" ||
   fail "RPM does not require Fedora's racket package"
+grep -Eq '^coreutils([[:space:]]|$)' <<<"$rpm_requires" ||
+  fail "RPM does not require the file utilities used by recovery diagnostics"
+grep -Eq '^systemd([[:space:]]|$)' <<<"$rpm_requires" ||
+  fail "RPM does not require the service manager used by appliance recovery"
 if grep -Eqi '(^|[[:space:]])(nix|nix-daemon)([[:space:]]|$)|/nix/store' <<<"$rpm_requires"; then
   fail "RPM has a Nix runtime dependency"
 fi
@@ -74,7 +78,13 @@ required_files=(
   "$payload_root/pos/api/server.rkt"
   "$payload_root/pos/persistence/sqlite-connection.rkt"
   "$payload_root/pos/persistence/sqlite-maintenance.rkt"
+  "$payload_root/pos/persistence/atomic-file.rkt"
+  "$payload_root/pos/persistence/sqlite-restore.rkt"
+  "$payload_root/pos/support/appliance-recovery.rkt"
+  "$payload_root/pos/support/support-bundle.rkt"
   "$payload_root/scripts/database-maintenance.rkt"
+  "$payload_root/scripts/database-recovery.rkt"
+  "$payload_root/scripts/support-diagnostics.rkt"
   "$payload_root/scripts/catalog.rkt"
   "$payload_root/scripts/register-configuration.rkt"
   "$payload_root/run-pos-core"
@@ -84,6 +94,8 @@ required_files=(
   "$extract_root/usr/bin/grocery-pos-db"
   "$extract_root/usr/bin/grocery-pos-catalog"
   "$extract_root/usr/bin/grocery-pos-register-config"
+  "$extract_root/usr/bin/grocery-pos-recovery"
+  "$extract_root/usr/bin/grocery-pos-support"
 )
 for path in "${required_files[@]}"; do
   [[ -f "$path" ]] || fail "required packaged file is missing: $path"
@@ -206,6 +218,22 @@ for launcher in \
   [[ "$(stat -c '%a' "$launcher")" == "755" ]] ||
     fail "launcher mode is not 0755: $launcher"
 done
+
+for launcher in \
+  "$extract_root/usr/bin/grocery-pos-recovery" \
+  "$extract_root/usr/bin/grocery-pos-support"; do
+  [[ "$(stat -c '%a' "$launcher")" == "755" ]] ||
+    fail "recovery/support launcher mode is not 0755: $launcher"
+done
+
+grep -Fq '/usr/libexec/grocery-pos-core/scripts/database-recovery.rkt' \
+  "$extract_root/usr/bin/grocery-pos-recovery" ||
+  fail "recovery launcher does not use packaged Racket recovery code"
+grep -Fq 'restore-offline' "$extract_root/usr/bin/grocery-pos-recovery" &&
+  fail "privileged appliance recovery launcher exposes an arbitrary target"
+grep -Fq '/usr/libexec/grocery-pos-core/scripts/support-diagnostics.rkt' \
+  "$extract_root/usr/bin/grocery-pos-support" ||
+  fail "support launcher does not use packaged Racket diagnostic code"
 
 rpm_scripts="$(rpm -qp --scripts "$rpm_path")"
 if grep -Eqi 'systemctl|preset|enable|start|migrate|sqlite' <<<"$rpm_scripts"; then

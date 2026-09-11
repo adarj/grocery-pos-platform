@@ -159,6 +159,9 @@ Verified capabilities currently include:
 * an internal noarch Fedora RPM for POS Core source, systemd/sysusers policy,
   isolated persistent state, rootless package inspection, and extracted-package
   SIGTERM/restart durability testing without an appliance Nix dependency;
+* explicit double-validated offline database restore with displaced
+  DB/WAL/SHM/journal evidence preservation, plus privacy-minimized local support
+  bundles built from allowlisted operational metadata;
 * Transaction HTTP API v1 with one strict idempotent command route,
   authoritative transaction-state reads, and exact completed-sale canonical
   receipt lookup derived from journal replay, plus narrow register/shift
@@ -371,7 +374,11 @@ just check
 
 Canonical database inspection, integrity-check, and live-backup commands are
 documented in [Local POS Database Maintenance](docs/operations/database-maintenance.md).
-Restore and automatic backup fallback are intentionally not implemented.
+Explicit recovery is documented in the
+[Offline POS Database Restore](docs/operations/database-restore.md) runbook;
+automatic backup selection/fallback remains intentionally absent. See
+[POS Support Diagnostics](docs/operations/support-diagnostics.md) for the local,
+non-uploading diagnostic bundle contract.
 
 On Linux, build and validate the internal Fedora POS Core artifact with:
 

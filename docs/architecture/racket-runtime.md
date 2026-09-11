@@ -303,6 +303,26 @@ aggressive syscall filters, and custom SELinux policy remain unqualified and
 absent. See [ADR-0021](../adr/0021-package-pos-core-as-a-fedora-native-service.md)
 and [POS Core Fedora Service](../operations/pos-core-service.md).
 
+## Recovery and support boundaries
+
+Offline restore reuses the exact Checkpoint 2 backup validator twice: once on
+the selected source and again after a private same-directory copy. Only the
+service-aware layer stops systemd and confirms inactivity. The persistence
+layer then atomically displaces regular canonical DB/WAL/SHM/journal files into
+root-only evidence and publishes the staged database without overwrite. It
+does not inspect the displaced state, write a restore transaction event, or
+choose a recovery point. See [ADR-0022](../adr/0022-restore-pos-databases-offline-while-preserving-displaced-state.md)
+and the [restore runbook](../operations/database-restore.md).
+
+Support collection is a separate observational path. It opens SQLite only
+through non-mutating structural inspection and serializes fixed metadata fields
+from the platform, package, service, database, local API, and state filesystem.
+It neither exports database/log/environment contents nor invokes integrity
+scans. Individual unavailable providers produce sanitized availability states,
+so an unhealthy register can still yield a useful local archive. See
+[ADR-0023](../adr/0023-build-support-bundles-from-allowlisted-operational-metadata.md)
+and [Support Diagnostics](../operations/support-diagnostics.md).
+
 ## Tested lifecycle
 
 Focused file-backed tests establish:
@@ -344,7 +364,11 @@ Focused file-backed tests establish:
 - noarch RPM payload/dependency/service contract validation without root; and
 - execution from an extracted package tree with explicit DB provisioning,
   liveness/readiness, durable API activity, SIGTERM, restart recovery, and
-  packaged maintenance commands.
+  packaged maintenance commands;
+- double-validated offline restoration with no-overwrite installation and
+  DB/WAL/SHM/journal evidence preservation; and
+- an exact-allowlist support archive whose privacy regression embeds a sentinel
+  in authoritative transaction data and proves it is absent from every member.
 
 ## Deliberately deferred
 
@@ -355,8 +379,10 @@ This runtime composition and HTTP adapter do not add:
 - catalog HTTP administration, patch updates, or cloud synchronization;
 - application-level busy retry/backoff or whole-command retry;
 - custom checkpoint scheduling, manual checkpoint tooling, or WAL metrics;
-- restore, automatic backup fallback, repair, scheduled backup retention,
-  encryption, remote replication, or power-loss qualification;
+- automatic backup fallback/rollback, repair, scheduled recovery retention,
+  backup encryption, remote replication, or power-loss qualification;
+- raw-log support export, automatic support upload, remote support transport,
+  or a dedicated support-agent identity;
 - full Kinoite/rpm-ostree installation, service provisioning/enablement,
   graphical kiosk lifecycle, or live-systemd/SELinux qualification;
 - a generic service container or component framework;

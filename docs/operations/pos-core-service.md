@@ -124,12 +124,18 @@ grocery-pos-catalog validate SNAPSHOT
 grocery-pos-catalog activate SNAPSHOT /var/lib/grocery-pos/pos.db
 grocery-pos-register-config validate SNAPSHOT
 grocery-pos-register-config activate SNAPSHOT /var/lib/grocery-pos/pos.db
+grocery-pos-recovery restore SELECTED-BACKUP.sqlite
+grocery-pos-support collect OUTPUT.tar.gz
 ```
 
 These launchers contain no maintenance or business logic. State-changing
 operations require a deliberate technician procedure and correct filesystem
-authority. Technician authentication/authorization, restore, scheduled backup,
-retention, encryption, and replication are not implemented here.
+authority. Recovery is explicitly offline and preserves displaced DB/WAL/SHM/
+journal evidence; support export contains allowlisted metadata rather than POS
+data. See the [restore runbook](database-restore.md) and
+[support diagnostics runbook](support-diagnostics.md). Technician application
+authentication/authorization, scheduled backup, retention, encryption, and
+replication remain unimplemented.
 
 ## Provisioning prerequisite
 
@@ -144,9 +150,8 @@ install package/image while service remains disabled
   -> enable and start grocery-pos-core
 ```
 
-Checkpoint 6 will implement and qualify that lifecycle. Checkpoint 5 defines
-offline restore and support diagnostics. Flutter/KDE kiosk startup and the full
-Kinoite image are also outside this package.
+Checkpoint 6 will implement and qualify that lifecycle. Flutter/KDE kiosk
+startup and the full Kinoite image are outside this package.
 
 ## Build and test
 
@@ -162,7 +167,8 @@ dependencies, permissions, service directives, and absence of Nix store
 references. It then explicitly provisions a temporary database, runs packaged
 code, checks `/health` and `/ready`, commits a start and scan, sends SIGTERM,
 restarts against the same DB, verifies recovered state, and exercises packaged
-inspection/integrity/backup commands.
+inspection/integrity/backup, offline restore, and privacy-minimized support
+commands.
 
 This is artifact evidence, not final booted-appliance qualification. Installed
 systemd, SELinux, rpm-ostree upgrades, sudden power loss, and endurance remain

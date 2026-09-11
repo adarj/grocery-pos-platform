@@ -21,6 +21,9 @@ payload_root="$extract_root/usr/libexec/grocery-pos-core"
 work_root="$(mktemp -d)"
 database_path="$work_root/pos.db"
 backup_path="$work_root/pos-backup.db"
+restore_target_path="$work_root/restored-pos.db"
+support_bundle_path="$work_root/support.tar.gz"
+support_extract_path="$work_root/support-extracted"
 core_log="$work_root/pos-core.log"
 core_pid=''
 base_url=''
@@ -162,4 +165,50 @@ jq -e '.ok == true and .valid == true and .migration_status == "current"' \
   <<<"$validation" >/dev/null ||
   fail "packaged backup validation failed"
 
-printf '%s\n' 'Packaged POS Core startup, SIGTERM, restart, recovery, and maintenance checks passed.'
+# The packaged low-level recovery path operates on temporary state and does
+# not pretend to coordinate the host systemd service.
+run_packaged_script catalog.rkt activate \
+  "$repository_root/pos-backend-racket/fixtures/development/catalog-snapshot-v2.json" \
+  "$restore_target_path" >/dev/null
+restore_result="$(run_packaged_script database-recovery.rkt restore-offline \
+  "$backup_path" "$restore_target_path")"
+jq -e '.ok == true and .operation == "restore_offline" and .restored_schema_version == 6' \
+  <<<"$restore_result" >/dev/null ||
+  fail "packaged offline restore failed"
+recovery_directory="$(jq -r '.recovery_evidence_directory' <<<"$restore_result")"
+[[ -f "$recovery_directory/restored-pos.db" ]] ||
+  fail "packaged offline restore did not preserve displaced state"
+
+database_path="$restore_target_path"
+start_core
+restored_transaction="$(curl --silent --show-error --fail \
+  "$base_url/transactions/txn-package-restart")"
+jq -e '.ok == true and .transaction.status == "open" and .transaction.version == 2' \
+  <<<"$restored_transaction" >/dev/null ||
+  fail "packaged POS Core did not recover restored durable state"
+stop_core_with_sigterm
+
+support_result="$(run_packaged_script support-diagnostics.rkt collect \
+  "$database_path" "$support_bundle_path")"
+jq -e '.ok == true and .support_bundle_schema_version == 1' \
+  <<<"$support_result" >/dev/null ||
+  fail "packaged support bundle collection failed"
+mkdir -p "$support_extract_path"
+tar -xzf "$support_bundle_path" -C "$support_extract_path"
+mapfile -t support_members < <(find "$support_extract_path" -maxdepth 1 -type f \
+  -printf '%f\n' | sort)
+expected_support_members=(
+  api.json database.json manifest.json package.json platform.json service.json storage.json
+)
+[[ "${support_members[*]}" == "${expected_support_members[*]}" ]] ||
+  fail "packaged support bundle contains an unexpected member set"
+if grep -R -a -F 'txn-package-restart' "$support_extract_path" >/dev/null; then
+  fail "packaged support bundle leaked authoritative transaction data"
+fi
+if find "$support_extract_path" -type f \
+  \( -name '*.db' -o -name '*.sqlite' -o -name '*-wal' -o -name '*-shm' -o -name '*-journal' \) \
+  -print -quit | grep -q .; then
+  fail "packaged support bundle contains SQLite state"
+fi
+
+printf '%s\n' 'Packaged POS Core startup, restart, maintenance, restore, and privacy checks passed.'

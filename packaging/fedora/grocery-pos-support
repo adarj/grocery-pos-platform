@@ -1,0 +1,10 @@
+#!/bin/sh
+
+if [ "$#" -ne 2 ] || [ "$1" != "collect" ]; then
+  printf '%s\n' 'Usage: grocery-pos-support collect OUTPUT.tar.gz' >&2
+  exit 2
+fi
+
+exec /usr/bin/racket \
+  /usr/libexec/grocery-pos-core/scripts/support-diagnostics.rkt \
+  collect-appliance "$2"

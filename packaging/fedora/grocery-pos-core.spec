@@ -1,6 +1,6 @@
 Name:           grocery-pos-core
 Version:        0.0.0
-Release:        0.1.dev%{?dist}
+Release:        0.2.dev%{?dist}
 Summary:        Local-first Grocery POS transaction core
 License:        LicenseRef-Project-Undecided
 URL:            https://github.com/adarj/grocery-pos-platform
@@ -8,6 +8,8 @@ Source0:        %{name}-%{version}.tar.gz
 
 BuildArch:      noarch
 Requires:       racket
+Requires:       coreutils
+Requires:       systemd
 
 %description
 Grocery POS Core is the local Racket authority for transaction, catalog,
@@ -38,6 +40,10 @@ install -D -m 0755 packaging/fedora/grocery-pos-catalog \
   %{buildroot}/usr/bin/grocery-pos-catalog
 install -D -m 0755 packaging/fedora/grocery-pos-register-config \
   %{buildroot}/usr/bin/grocery-pos-register-config
+install -D -m 0755 packaging/fedora/grocery-pos-recovery \
+  %{buildroot}/usr/bin/grocery-pos-recovery
+install -D -m 0755 packaging/fedora/grocery-pos-support \
+  %{buildroot}/usr/bin/grocery-pos-support
 
 install -D -m 0644 packaging/fedora/grocery-pos-core.service \
   %{buildroot}/usr/lib/systemd/system/grocery-pos-core.service
@@ -56,11 +62,16 @@ install -D -m 0644 packaging/fedora/pos-core.env \
 /usr/bin/grocery-pos-db
 /usr/bin/grocery-pos-catalog
 /usr/bin/grocery-pos-register-config
+/usr/bin/grocery-pos-recovery
+/usr/bin/grocery-pos-support
 /usr/lib/systemd/system/grocery-pos-core.service
 /usr/lib/sysusers.d/grocery-pos.conf
 %dir /etc/grocery-pos
 %config(noreplace) /etc/grocery-pos/pos-core.env
 
 %changelog
+* Fri Sep 11 2026 Grocery POS Platform <internal@invalid> - 0.0.0-0.2.dev
+- Add explicit offline recovery and allowlisted support diagnostics.
+
 * Thu Sep 10 2026 Grocery POS Platform <internal@invalid> - 0.0.0-0.1.dev
 - Establish the initial internal Fedora-native POS Core service package.

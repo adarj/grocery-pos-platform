@@ -75,6 +75,14 @@ db-backup DB OUTPUT:
 db-backup-validate BACKUP:
     racket pos-backend-racket/scripts/database-maintenance.rkt backup-validate {{quote(BACKUP)}}
 
+# Restores a selected backup; the caller must first ensure DB is offline.
+db-restore-offline BACKUP DB:
+    racket pos-backend-racket/scripts/database-recovery.rkt restore-offline {{quote(BACKUP)}} {{quote(DB)}}
+
+# Creates a local, allowlisted diagnostic archive without stopping POS Core.
+support-bundle DB OUTPUT:
+    racket pos-backend-racket/scripts/support-diagnostics.rkt collect {{quote(DB)}} {{quote(OUTPUT)}}
+
 supabase-start:
     @echo "TODO: start local Supabase"
 

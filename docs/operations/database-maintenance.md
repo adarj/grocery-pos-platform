@@ -130,9 +130,9 @@ zero foreign-key violations, exact current migration history through v6, and
 all current Grocery POS schema/application validators. It is strictly
 read-only: no migration, WAL conversion, repair, or restore is attempted.
 
-An offline backup is not required to report WAL journal mode. If it is later
-restored through the future explicit restore workflow, the authoritative
-database will again be placed under the production connection policy.
+An offline backup is not required to report WAL journal mode. Explicit
+restoration places it back under the production connection policy; see the
+[offline restore runbook](database-restore.md).
 
 ## Partial and publication semantics
 
@@ -155,11 +155,13 @@ belongs to later Milestone 6 testing.
 
 The runtime never falls back to a backup. A valid older snapshot may still omit
 legitimate later sales, so a missing or damaged authoritative database fails
-closed. Restore and recovery-point selection will be explicit offline
-technician operations in a later checkpoint.
+closed. Restore and recovery-point selection are explicit offline technician
+operations; they are never automatic.
 
 Backup files contain store operational and financial data and must be protected
 like the live database. Encryption at rest, technician authorization,
-production filesystem ownership/permissions, retention and pruning,
-off-machine replication, and cloud upload are not yet defined. Do not include
-database or backup contents in ordinary logs or support bundles.
+retention and pruning, off-machine replication, and cloud upload are not yet
+defined. Do not include database or backup contents in ordinary logs or
+support bundles. Appliance restore and support output use restrictive
+root-controlled/mode-`0600` boundaries, but future technician authorization and
+transfer policy remain separate work.

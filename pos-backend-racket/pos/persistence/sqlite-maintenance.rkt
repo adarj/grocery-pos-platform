@@ -1,10 +1,10 @@
 #lang racket
 
 (require (prefix-in db: db)
-         ffi/unsafe
          file/sha1
          racket/file
          racket/random
+         "atomic-file.rkt"
          "pos-database-migrations.rkt"
          "sqlite-connection.rkt")
 
@@ -62,42 +62,6 @@
 
 (struct sqlite-backup-created (path validation)
   #:transparent)
-
-;; Racket's rename-file-or-directory documents that its destination-existence
-;; check is not atomic with rename on Unix. The target POS appliance is Linux,
-;; where renameat2 with RENAME_NOREPLACE provides the required single atomic
-;; "publish only if absent" operation.
-(define renameat2
-  (get-ffi-obj
-   "renameat2"
-   #f
-   (_fun #:save-errno 'posix
-         _int
-         _bytes/nul-terminated
-         _int
-         _bytes/nul-terminated
-         _uint
-         ->
-         _int)
-   (lambda () #f)))
-(define at-fdcwd -100)
-(define rename-noreplace #x1)
-
-(define (atomically-publish-file-no-replace! candidate-path final-path)
-  (define who 'create-pos-sqlite-backup!)
-  (unless renameat2
-    (error who
-           "atomic non-overwriting backup publication is unsupported on this platform"))
-  (define result
-    (renameat2 at-fdcwd
-               (path->bytes candidate-path)
-               at-fdcwd
-               (path->bytes final-path)
-               rename-noreplace))
-  (unless (zero? result)
-    (error who
-           "atomic non-overwriting backup publication failed (errno ~a)"
-           (saved-errno))))
 
 (define (check-database-path who label value)
   (unless (path-string? value)
@@ -521,6 +485,9 @@ SQL
     ;; The candidate and final name share a directory. Linux RENAME_NOREPLACE
     ;; makes destination absence part of the atomic rename, so a final path
     ;; that appears after initial validation is never overwritten.
-    (atomically-publish-file-no-replace! candidate-path resolved-final)
+    (atomic-rename-file-no-replace!
+     candidate-path
+     resolved-final
+     #:who who)
     (set! candidate-path #f)
     (sqlite-backup-created resolved-final validation)))
