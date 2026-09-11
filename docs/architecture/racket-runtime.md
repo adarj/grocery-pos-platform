@@ -44,6 +44,11 @@ directory must already exist; runtime startup does not silently create an
 arbitrary directory hierarchy for a mistyped storage path. The development
 shell provisions the normal `.local/sqlite` directory.
 
+That default describes source-tree development. The Fedora service fixes the
+authoritative installed database at `/var/lib/grocery-pos/pos.db`; its
+root-controlled launcher overrides `SQLITE_DB_PATH` so the editable API
+environment file cannot redirect it.
+
 ## SQLite connection operating policy
 
 All production runtime and administrative database connections are constructed
@@ -264,6 +269,40 @@ use HTTP 503 and only the stable sanitized reasons `runtime_stopped`,
 `database_schema_not_current`. No SQLite diagnostics or paths cross the HTTP
 boundary.
 
+## Fedora package and service boundary
+
+The Linux flake exposes an internal noarch RPM named `grocery-pos-core`.
+Fedora's `/usr/bin/racket` executes packaged source from
+`/usr/libexec/grocery-pos-core`; neither Nix nor the repository checkout is an
+appliance runtime dependency. The RPM also installs the existing catalog,
+register-configuration, and database-maintenance scripts behind thin
+`/usr/bin` launchers.
+
+systemd runs the process as the stable `grocery-pos` sysusers identity. Root
+owns the application tree and `/etc/grocery-pos/pos-core.env`; systemd manages
+`/var/lib/grocery-pos` and `/run/grocery-pos` through `StateDirectory=` and
+`RuntimeDirectory=`. Logs remain stdout/stderr records in journald.
+
+The service boundary is stricter than source-mode bootstrap:
+
+```text
+AssertFileNotEmpty=/var/lib/grocery-pos/pos.db
+  -> force SQLITE_DB_PATH=/var/lib/grocery-pos/pos.db
+  -> execute packaged main.rkt
+```
+
+A missing or empty operational database therefore fails before POS Core's
+create-capable initialization connection can run. RPM installation creates no
+database/business state and does not enable or start the service. Provisioning
+must explicitly create/migrate the initial database, activate reference and
+operational configuration, establish ownership, and only then enable the unit.
+
+The unit retains literal-loopback HTTP, bounded on-failure restart, and SIGTERM
+shutdown behavior. `PrivateNetwork=yes`, `MemoryDenyWriteExecute=yes`,
+aggressive syscall filters, and custom SELinux policy remain unqualified and
+absent. See [ADR-0021](../adr/0021-package-pos-core-as-a-fedora-native-service.md)
+and [POS Core Fedora Service](../operations/pos-core-service.md).
+
 ## Tested lifecycle
 
 Focused file-backed tests establish:
@@ -301,7 +340,11 @@ Focused file-backed tests establish:
 - non-mutating read-only inspection and migration/schema reporting;
 - explicit quick/full integrity checks with foreign-key checking; and
 - validated live `VACUUM INTO` backup with partial-file isolation,
-  non-overwriting atomic publication, and continued source usability.
+  non-overwriting atomic publication, and continued source usability;
+- noarch RPM payload/dependency/service contract validation without root; and
+- execution from an extracted package tree with explicit DB provisioning,
+  liveness/readiness, durable API activity, SIGTERM, restart recovery, and
+  packaged maintenance commands.
 
 ## Deliberately deferred
 
@@ -314,6 +357,8 @@ This runtime composition and HTTP adapter do not add:
 - custom checkpoint scheduling, manual checkpoint tooling, or WAL metrics;
 - restore, automatic backup fallback, repair, scheduled backup retention,
   encryption, remote replication, or power-loss qualification;
+- full Kinoite/rpm-ostree installation, service provisioning/enablement,
+  graphical kiosk lifecycle, or live-systemd/SELinux qualification;
 - a generic service container or component framework;
 - external payment/device integration, physical cash-drawer control, or
   receipt-printer integration;

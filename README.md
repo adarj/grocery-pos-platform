@@ -156,6 +156,9 @@ Verified capabilities currently include:
 * read-only SQLite inspection and migration/schema reporting, explicit quick
   and full integrity checks, and validated live `VACUUM INTO` backups with
   same-directory partial staging and atomic non-overwriting publication;
+* an internal noarch Fedora RPM for POS Core source, systemd/sysusers policy,
+  isolated persistent state, rootless package inspection, and extracted-package
+  SIGTERM/restart durability testing without an appliance Nix dependency;
 * Transaction HTTP API v1 with one strict idempotent command route,
   authoritative transaction-state reads, and exact completed-sale canonical
   receipt lookup derived from journal replay, plus narrow register/shift
@@ -370,6 +373,18 @@ Canonical database inspection, integrity-check, and live-backup commands are
 documented in [Local POS Database Maintenance](docs/operations/database-maintenance.md).
 Restore and automatic backup fallback are intentionally not implemented.
 
+On Linux, build and validate the internal Fedora POS Core artifact with:
+
+```bash
+just build-pos-core-rpm
+just check-pos-core-package
+```
+
+These rootless commands do not install, enable, or start the package. See
+[POS Core Fedora Service](docs/operations/pos-core-service.md) for its
+filesystem/service contract and provisioning prerequisite. Complete Kinoite
+and Flutter kiosk integration remain future work.
+
 The canonical development command surface is the repository `justfile`; prefer adding reusable commands there rather than relying on undocumented shell invocations.
 
 ## Repository Layout
@@ -385,6 +400,9 @@ The canonical development command surface is the repository `justfile`; prefer a
 │   └── apps/
 │       └── pos_terminal/
 ├── pos-backend-racket/
+├── packaging/
+│   ├── fedora/
+│   └── tests/
 ├── scripts/
 │   └── dev/
 ├── .github/

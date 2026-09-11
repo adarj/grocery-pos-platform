@@ -116,5 +116,69 @@
             echo "Run: just --list"
           '';
         };
-      });
+      }
+      // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
+        let
+          posCoreRpm = pkgs.stdenvNoCC.mkDerivation {
+            pname = "grocery-pos-core-rpm";
+            version = "0.0.0-dev";
+            src = ./.;
+
+            nativeBuildInputs = with pkgs; [
+              coreutils
+              findutils
+              gzip
+              gnutar
+              rpm
+            ];
+
+            dontConfigure = true;
+
+            buildPhase = ''
+              runHook preBuild
+              bash packaging/fedora/build-rpm.sh "$PWD" "$PWD/rpm-output"
+              runHook postBuild
+            '';
+
+            installPhase = ''
+              runHook preInstall
+              mkdir -p "$out"
+              install -m 0644 "$PWD"/rpm-output/*.rpm "$out/"
+              runHook postInstall
+            '';
+
+            meta = {
+              description = "Internal Fedora RPM for Grocery POS Core";
+              platforms = pkgs.lib.platforms.linux;
+            };
+          };
+
+          posCorePackageCheck = pkgs.runCommand
+            "grocery-pos-core-package-check"
+            {
+              nativeBuildInputs = with pkgs; [
+                coreutils
+                cpio
+                curl
+                findutils
+                gawk
+                gnugrep
+                jq
+                racket
+                rpm
+              ];
+            }
+            ''
+              export HOME="$TMPDIR/home"
+              export PLTUSERHOME="$TMPDIR/plt-user"
+              mkdir -p "$HOME" "$PLTUSERHOME"
+              bash ${./packaging/tests/check-pos-core-package.sh} \
+                ${posCoreRpm} ${./.}
+              touch "$out"
+            '';
+        in
+        {
+          packages.pos-core-rpm = posCoreRpm;
+          checks.pos-core-package = posCorePackageCheck;
+        }));
 }

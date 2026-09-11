@@ -26,3 +26,4 @@ ADRs document important architectural decisions, their context, and their conseq
 - [ADR-0018: Use WAL with FULL synchronous durability for the local POS database](0018-use-wal-with-full-synchronous-durability.md)
 - [ADR-0019: Use validated VACUUM INTO snapshots for local POS database backups](0019-use-validated-vacuum-into-snapshots.md)
 - [ADR-0020: Keep the POS Core API loopback-only and separate liveness from readiness](0020-keep-pos-core-api-loopback-only-and-separate-liveness-from-readiness.md)
+- [ADR-0021: Package POS Core as a Fedora-native service with isolated persistent state](0021-package-pos-core-as-a-fedora-native-service.md)

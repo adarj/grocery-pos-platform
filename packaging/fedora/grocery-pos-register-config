@@ -1,0 +1,3 @@
+#!/bin/sh
+
+exec /usr/bin/racket /usr/libexec/grocery-pos-core/scripts/register-configuration.rkt "$@"

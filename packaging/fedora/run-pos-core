@@ -1,0 +1,7 @@
+#!/bin/sh
+
+# Do not allow the editable environment file to redirect authoritative state.
+SQLITE_DB_PATH=/var/lib/grocery-pos/pos.db
+export SQLITE_DB_PATH
+
+exec /usr/bin/racket /usr/libexec/grocery-pos-core/main.rkt "$@"

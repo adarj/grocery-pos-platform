@@ -15,6 +15,12 @@ in [ADR-0018](../adr/0018-use-wal-with-full-synchronous-durability.md).
 All commands emit small structural JSON documents. They do not dump tables,
 events, command payloads, customer data, or other database contents.
 
+On an installed Fedora POS Core system, the same implementation is available
+through `grocery-pos-db`; for example,
+`grocery-pos-db info /var/lib/grocery-pos/pos.db`. Source development uses the
+`just db-*` forms below. Installed state-changing maintenance requires a
+deliberate technician procedure and correct database-file ownership.
+
 ## Database information
 
 Run:

@@ -36,6 +36,14 @@ test-pos-integration:
 analyze-flutter:
     cd flutter/apps/pos_terminal && flutter analyze
 
+# Builds the internal noarch Fedora POS Core RPM without installing it.
+build-pos-core-rpm:
+    nix build path:.#pos-core-rpm
+
+# Builds, extracts, inspects, and lifecycle-tests the Fedora POS Core package.
+check-pos-core-package:
+    nix flake check path:. --print-build-logs
+
 catalog-validate FILE:
     racket pos-backend-racket/scripts/catalog.rkt validate {{quote(FILE)}}
 
