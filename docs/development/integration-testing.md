@@ -32,7 +32,7 @@ Each test fixture:
   production CLI before first startup;
 - starts `pos-backend-racket/main.rkt` with an absolute temporary
   `SQLITE_DB_PATH`;
-- waits for the real `GET /health` response with a bounded deadline;
+- waits for a real ready `GET /ready` response with a bounded deadline;
 - uses a `FileCashierSessionStore` under the same temporary root;
 - consumes bounded stdout/stderr tails for failure diagnostics;
 - stops POS Core with bounded SIGTERM/SIGKILL handling; and
@@ -80,6 +80,12 @@ register/cashier names are replaced. The mixed ten-transaction cycle uses one
 shift, includes repeated scans/correction/void, reconciles only completed
 sales, closes with a deliberate overage, and verifies the immutable summary
 after restart.
+
+Reliability scenarios prove an unsafe `0.0.0.0` process configuration fails
+before creating its database and that a live process continues answering
+`/health` while `/ready` reports `database_missing` after its authoritative
+temporary database path becomes unavailable. Liveness remains tested
+separately even though fixture startup orchestration now waits for readiness.
 
 If catalog activation fails, the fixture fails before starting the server and
 reports bounded CLI output. The fixture activates Catalog Snapshot Schema v2,

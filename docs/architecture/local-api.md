@@ -6,8 +6,8 @@
 
 This document defines the initial communication boundary between local Flutter applications and the Racket POS Core.
 
-The health endpoint and Transaction HTTP API v1 are implemented. The detailed
-transaction command/query contract is documented in
+The liveness/readiness endpoints and Transaction HTTP API v1 are implemented.
+The detailed transaction command/query contract is documented in
 [Transaction HTTP API v1](transaction-http-api-v1.md).
 That contract also defines exact read-only completed-sale receipt lookup and
 the narrow current register/cashier/shift operational routes.
@@ -80,9 +80,22 @@ Development base URL:
 http://127.0.0.1:7340
 ```
 
-The service should remain bound to loopback by default unless a future architecture decision intentionally establishes another trusted transport boundary.
+Ordinary POS Core configuration accepts only the literal loopback addresses
+`127.0.0.1` and `::1`. It rejects wildcard, LAN/public, and hostname values,
+including `0.0.0.0`, `::`, and `localhost`, before database startup. DNS is not
+used to infer trust, and there is no remote-listener mode. A future remote API
+requires an explicitly authenticated and authorized architecture.
 
-Localhost is still treated as an application trust boundary. Backend authorization and business rules must never rely solely on a Flutter UI hiding a control.
+The server enforces a native Racket safety policy of at most 64 concurrent and
+64 waiting connections, a 10-second request-read timeout, a 64 KiB request-body
+ceiling, a 30-second response timeout, and a 10-second response-send timeout.
+Racket's safe defaults remain in force for request lines, headers, multipart
+data, and other limits. The body ceiling is enforced by the HTTP request reader
+before a POS handler can decode a body.
+
+Loopback is still treated as an application trust boundary. Backend
+authorization and business rules must never rely solely on a Flutter UI hiding
+a control.
 
 ## Runtime Composition
 
@@ -98,9 +111,10 @@ The service held by the application uses that virtual connection; unrelated
 request threads therefore do not share one physical transaction context.
 
 The server application is created through `make-app` with the transaction
-service as an explicit dependency. Transaction routes delegate through that
-same service rather than reimplementing its idempotency or transaction
-semantics. The detailed ownership and shutdown contract is documented in
+service and runtime readiness probe as explicit dependencies. Transaction
+routes delegate through that same service rather than reimplementing its
+idempotency or transaction semantics. The detailed ownership and shutdown
+contract is documented in
 [Racket POS Core Runtime Composition](racket-runtime.md).
 
 Migration 3 includes the persistent local catalog documented in
@@ -142,9 +156,58 @@ Example:
 
 The health endpoint confirms that the service is reachable and able to construct its health response.
 
-It does not by itself guarantee that every checkout dependency or peripheral is operational.
-It remains a liveness endpoint rather than a full database or peripheral
-readiness probe.
+It does not open SQLite or inspect migrations, catalog, register/cashier/shift
+state, peripherals, or cloud services. It remains a process/listener liveness
+endpoint.
+
+Unsupported methods return 405 with `Allow: GET`.
+
+## Readiness Endpoint
+
+### `GET /ready`
+
+Reports whether the active runtime can currently establish the authoritative
+production SQLite boundary. A ready response is HTTP 200:
+
+```json
+{
+  "database_schema_version": 6,
+  "ok": true,
+  "service": "grocery-pos-core",
+  "status": "ready"
+}
+```
+
+A live listener whose runtime or database boundary is unavailable returns HTTP
+503:
+
+```json
+{
+  "ok": false,
+  "reason": "database_unavailable",
+  "service": "grocery-pos-core",
+  "status": "not_ready"
+}
+```
+
+Stable reasons are:
+
+- `runtime_stopped`;
+- `database_missing`;
+- `database_unavailable`; and
+- `database_schema_not_current`.
+
+The probe requires an active runtime, an existing regular database file, a
+fresh production-policy `read/write` connection, a lightweight SQLite query,
+and exact-current canonical migration history. The connection is closed after
+the probe. Readiness does not create or migrate a database, establish WAL,
+inspect business workflow state, run full schema/application validation,
+perform `quick_check` or `integrity_check`, or restore a backup.
+
+Readiness is stronger than liveness but weaker than whole-file integrity
+certification. Use the explicit Checkpoint 2 maintenance commands in
+[Local POS Database Maintenance](../operations/database-maintenance.md) for
+deeper checks. `POST /ready` returns 405 with `Allow: GET`.
 
 ## JSON Conventions
 
@@ -329,6 +392,10 @@ Where practical:
 * `409` indicates a valid request that conflicts with current domain state;
 * `5xx` indicates an internal service failure.
 
+HTTP 503 is reserved here for a functioning `/ready` endpoint reporting that
+the runtime/persistence boundary is not ready. It does not replace existing
+domain statuses or transaction-command uncertainty semantics.
+
 Domain-specific error codes remain necessary even when an HTTP status code is supplied.
 
 ## Security
@@ -401,6 +468,7 @@ Currently implemented:
 
 ```text
 GET /health
+GET /ready
 POST /transaction-commands
 GET /transactions/{transaction_id}
 GET /receipts/{transaction_id}

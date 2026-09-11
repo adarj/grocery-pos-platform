@@ -8,6 +8,7 @@ import 'package:pos_terminal/core/pos_core/models/command_result.dart';
 import 'package:pos_terminal/core/pos_core/models/canonical_receipt.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_failure.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_health.dart';
+import 'package:pos_terminal/core/pos_core/models/pos_core_readiness.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_command.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_snapshot.dart';
 import 'package:pos_terminal/core/pos_core/pos_core_client.dart';
@@ -48,6 +49,9 @@ final class FakeCashierClient
   Future<PosCoreHealth> fetchHealth() {
     throw UnimplementedError();
   }
+
+  @override
+  Future<PosCoreReadiness> fetchReadiness() => throw UnimplementedError();
 
   @override
   Future<PosCommandResult> executeCommand(TransactionCommand command) {

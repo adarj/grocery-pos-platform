@@ -20,6 +20,8 @@ are governed by
 `PosCoreClient` is the Flutter application boundary for:
 
 - reading process health;
+- reading structured runtime/persistence readiness, including expected 503
+  states;
 - executing one typed transaction command;
 - reading current authoritative transaction state;
 - reading a canonical completed-sale receipt by exact transaction ID;
@@ -451,7 +453,8 @@ Each scenario owns a child POS Core process, a dynamically allocated loopback
 port, a temporary SQLite file, and a temporary Flutter recovery record. POS
 Core performs its normal startup migration; the harness does not create schema
 or use a test-only route. Readiness is established through bounded polling of
-the real `/health` endpoint, and teardown stops the child process before
+the real `/ready` endpoint, while `/health` remains the independent liveness
+contract. Teardown stops the child process before
 removing its temporary directory.
 
 Before the first server start, the fixture invokes the production catalog and

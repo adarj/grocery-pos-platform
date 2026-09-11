@@ -8,6 +8,7 @@ import 'models/canonical_receipt.dart';
 import 'models/json_fields.dart';
 import 'models/pos_core_failure.dart';
 import 'models/pos_core_health.dart';
+import 'models/pos_core_readiness.dart';
 import 'models/register_operations.dart';
 import 'models/transaction_command.dart';
 import 'models/transaction_snapshot.dart';
@@ -36,6 +37,29 @@ final class HttpPosCoreClient implements PosCoreClient {
     }
 
     return PosCoreHealth.fromJson(body);
+  }
+
+  @override
+  Future<PosCoreReadiness> fetchReadiness() async {
+    final response = await _get(baseUri.resolve('/ready'));
+    final body = _decodeObject(response);
+
+    if (response.statusCode == 200 || response.statusCode == 503) {
+      final readiness = PosCoreReadiness.fromJson(body);
+      if ((response.statusCode == 200) != readiness.ready) {
+        throw const PosCoreInvalidResponseFailure(
+          'POS Core readiness HTTP status and state disagree.',
+        );
+      }
+      return readiness;
+    }
+
+    if (body.containsKey('error')) {
+      throw _serverFailureFrom(body, response.statusCode);
+    }
+    throw const PosCoreInvalidResponseFailure(
+      'POS Core readiness response has an unsupported HTTP status.',
+    );
   }
 
   @override

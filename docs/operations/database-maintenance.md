@@ -42,6 +42,12 @@ it does not checkpoint WAL merely to make file sizes look smaller.
 
 ## Integrity checks
 
+`GET /ready` is a lightweight runtime/persistence probe, not an integrity
+check. It proves that the current production connection contract and exact
+migration history can be reached at that moment; it does not scan untouched
+database pages. Use the explicit commands below when deeper database health
+evidence is required.
+
 For SQLite's lower-cost check, run:
 
 ```text

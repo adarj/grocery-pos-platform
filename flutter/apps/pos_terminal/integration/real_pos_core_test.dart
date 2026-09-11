@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:pos_terminal/core/pos_core/http_pos_core_client.dart';
 import 'package:pos_terminal/core/pos_core/models/command_result.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_failure.dart';
+import 'package:pos_terminal/core/pos_core/models/pos_core_readiness.dart';
 import 'package:pos_terminal/core/pos_core/models/register_operations.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_command.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_snapshot.dart';
@@ -185,6 +186,51 @@ void main() {
   tearDownAll(() {
     HttpOverrides.global = ordinaryTestHttpOverrides;
   });
+
+  test('real process rejects unsafe host before database startup', () async {
+    final fixture = await RealPosCoreFixture.create();
+    addTearDown(fixture.dispose);
+    final result = await Process.run(
+      'racket',
+      const ['main.rkt'],
+      workingDirectory: fixture.posBackendDirectoryPath,
+      environment: {
+        ...Platform.environment,
+        'RACKET_API_HOST': '0.0.0.0',
+        'RACKET_API_PORT': '7340',
+        'SQLITE_DB_PATH': fixture.databasePath,
+      },
+    ).timeout(const Duration(seconds: 30));
+
+    expect(result.exitCode, isNot(0));
+    expect(await File(fixture.databasePath).exists(), isFalse);
+  });
+
+  test(
+    'live process remains healthy when authoritative DB becomes unavailable',
+    () async {
+      final fixture = await _startFixture(openShift: false);
+      final client = HttpPosCoreClient(
+        baseUri: fixture.baseUri,
+        timeout: const Duration(seconds: 3),
+      );
+      addTearDown(client.close);
+
+      final initiallyReady = await client.fetchReadiness();
+      expect(initiallyReady.ready, isTrue);
+      expect(initiallyReady.databaseSchemaVersion, 6);
+
+      await File(
+        fixture.databasePath,
+      ).rename('${fixture.databasePath}.offline');
+
+      final health = await client.fetchHealth();
+      expect(health.ok, isTrue);
+      final unavailable = await client.fetchReadiness();
+      expect(unavailable.ready, isFalse);
+      expect(unavailable.reason, PosCoreReadinessReason.databaseMissing);
+    },
+  );
 
   test(
     'real operational startup exposes configuration and opens one shift',

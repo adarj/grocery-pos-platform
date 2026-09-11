@@ -32,8 +32,10 @@ SQLITE_DB_PATH
 ```
 
 The default host is `127.0.0.1`, the default port is `7340`, and the default
-database path is `.local/sqlite/pos-dev.db`. Host and database path must be
-non-empty. The port must be an exact integer from 1 through 65535.
+database path is `.local/sqlite/pos-dev.db`. The host must be exactly the
+literal loopback address `127.0.0.1` or `::1`; wildcard, LAN/public, and DNS
+hostname values are rejected before runtime startup. The database path must be
+non-empty, and the port must be an exact integer from 1 through 65535.
 
 `main.rkt` resolves a relative database path against the repository root once
 at startup. All later connections use that complete path, so request behavior
@@ -201,10 +203,30 @@ same virtual connection for cash-summary reads, opening/close writes, and the
 completion unit of work. It never auto-seeds an opening float or rewrites
 drawer state at startup. See [Shift Cash Accountability](cash-accountability.md).
 
-`make-app` requires the constructed transaction service and returns the servlet
-handler. The service is captured explicitly rather than stored in a global.
+`make-app` requires the constructed transaction service and an explicit runtime
+readiness probe, then returns the servlet handler. The service and probe are
+captured explicitly rather than stored in globals.
 Transaction routes delegate to that service through the transport-only adapter
 documented in [Transaction HTTP API v1](transaction-http-api-v1.md).
+
+## HTTP safety policy
+
+The composition root starts `serve/servlet` through one shared native Racket
+`make-safety-limits` policy:
+
+```text
+maximum concurrent connections: 64
+maximum waiting connections:    64
+request-read timeout:            10 seconds
+maximum request body:            65,536 bytes (64 KiB)
+response timeout:                30 seconds
+response-send timeout:           10 seconds
+```
+
+Racket's safe defaults govern request lines, headers, multipart data, and
+unlisted safety fields. Because `serve/servlet` receives this value through
+`#:safety-limits`, its request reader rejects an oversized body before
+`request-post-data/raw` and POS command decoding execute.
 
 ## Current HTTP surface
 
@@ -212,6 +234,7 @@ The implemented routes are:
 
 ```text
 GET /health
+GET /ready
 POST /transaction-commands
 GET /transactions/{transaction_id}
 GET /receipts/{transaction_id}
@@ -222,10 +245,24 @@ POST /shifts/{shift_id}/close
 GET /shifts/{shift_id}/cash-summary
 ```
 
-`GET /health` remains a liveness endpoint and does not perform a database or
-peripheral readiness probe. Startup proves that the configured database could
-be opened and migrated before the listener began; it does not imply that every
-future checkout dependency is ready.
+`GET /health` remains cheap process/listener liveness. It performs no SQLite,
+business-state, peripheral, or network checks.
+
+`GET /ready` opens a short-lived fresh production-policy connection rather than
+using the request pool or the forensic read-only inspection helper. It requires
+the runtime to be active, the authoritative path to remain a regular file, a
+lightweight SQLite query to succeed, and canonical migration history to be
+exactly current. This checks the actual WAL/FULL/foreign-key/autocheckpoint
+connection contract without creating, converting, or migrating the database.
+The probe always closes its connection.
+
+Readiness does not run `quick_check`, `integrity_check`, backup validation, or
+the deeper schema/application validators on each request. Consequently, a 200
+readiness result is not whole-file integrity certification. Not-ready results
+use HTTP 503 and only the stable sanitized reasons `runtime_stopped`,
+`database_missing`, `database_unavailable`, and
+`database_schema_not_current`. No SQLite diagnostics or paths cross the HTTP
+boundary.
 
 ## Tested lifecycle
 
@@ -252,6 +289,12 @@ Focused file-backed tests establish:
   receipt recovery without duplicate events;
 - read/write request connections refusing to recreate a missing database;
 - unchanged `/health` and unknown-route behavior through `make-app`;
+- strict literal-loopback configuration before database startup;
+- separate 200/503 liveness/readiness behavior under live database loss;
+- current, historical-prefix, missing, stopped, and non-WAL readiness states
+  without database creation or migration;
+- native bounded HTTP safety-policy wiring and request-reader rejection of an
+  oversized command before any event or command receipt is stored;
 - operational configuration/shift composition, active-transaction slot
   persistence, atomic net cash-sale movement plus slot release on completion,
   and movement-free slot release on void;
@@ -264,7 +307,7 @@ Focused file-backed tests establish:
 
 This runtime composition and HTTP adapter do not add:
 
-- a readiness endpoint;
+- authenticated or remote API access;
 - employee authentication, PINs/passwords, or authorization;
 - catalog HTTP administration, patch updates, or cloud synchronization;
 - application-level busy retry/backoff or whole-command retry;

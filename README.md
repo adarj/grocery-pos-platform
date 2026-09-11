@@ -124,7 +124,10 @@ Verified capabilities currently include:
 * Nix flakes with `direnv` / `nix-direnv`;
 * `just` as the canonical development command interface;
 * Racket POS Core process;
-* `GET /health` local API endpoint;
+* separate `GET /health` process liveness and `GET /ready` authoritative
+  SQLite readiness endpoints;
+* strict literal-loopback API binding and native bounded HTTP request/resource
+  safety limits, including a 64 KiB request-body ceiling;
 * RackUnit backend tests;
 * exact-money, immutable cash-sale transaction domain behavior;
 * transaction domain events and deterministic replay;
@@ -283,6 +286,17 @@ A healthy development response currently resembles:
   "version": "0.0.0-dev"
 }
 ```
+
+Operational readiness is separate:
+
+```text
+GET http://127.0.0.1:7340/ready
+```
+
+`/ready` returns 200 only while POS Core can establish its current production
+SQLite contract; a live process returns a sanitized 503 state when that
+boundary is unavailable. The ordinary API accepts only literal `127.0.0.1` or
+`::1` listener configuration and does not support remote access.
 
 ### Terminal 2 — Flutter POS Terminal
 

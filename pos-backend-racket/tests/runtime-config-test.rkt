@@ -39,11 +39,11 @@
           (load-pos-runtime-config
            #:getenv
            (environment
-            (hash "RACKET_API_HOST" "0.0.0.0"
+            (hash "RACKET_API_HOST" "::1"
                   "RACKET_API_PORT" "8123"
                   "SQLITE_DB_PATH" "data/pos.db"))
            #:base-directory base-directory))
-        (check-equal? (pos-runtime-config-host config) "0.0.0.0")
+        (check-equal? (pos-runtime-config-host config) "::1")
         (check-equal? (pos-runtime-config-port config) 8123)
         (check-equal?
          (pos-runtime-config-sqlite-db-path config)
@@ -52,14 +52,28 @@
       (lambda ()
         (delete-directory/files base-directory))))
 
-  (test-case "runtime configuration rejects invalid host, port, and database path"
+  (test-case "runtime configuration accepts only literal loopback hosts"
+    (for ([host (in-list '("127.0.0.1" "::1"))])
+      (check-equal?
+       (pos-runtime-config-host
+        (pos-runtime-config host 7340 "pos.db"))
+       host))
+
+    (for ([host (in-list '("" "0.0.0.0" "::" "192.168.1.10"
+                           "203.0.113.10" "localhost" "arbitrary"))])
+      (check-exn exn:fail:contract?
+                 (lambda ()
+                   (pos-runtime-config host 7340 "pos.db")))
+      (check-exn exn:fail:contract?
+                 (lambda ()
+                   (load-pos-runtime-config
+                    #:getenv (environment (hash "RACKET_API_HOST" host)))))))
+
+  (test-case "runtime configuration rejects invalid port and database path"
     (define (load-with values)
       (load-pos-runtime-config
        #:getenv (environment values)))
 
-    (check-exn exn:fail:contract?
-               (lambda ()
-                 (load-with (hash "RACKET_API_HOST" ""))))
     (for ([port (in-list '("not-a-port" "0" "65536" "1.5"))])
       (check-exn exn:fail:contract?
                  (lambda ()

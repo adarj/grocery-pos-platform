@@ -1,12 +1,15 @@
 import 'models/command_result.dart';
 import 'models/canonical_receipt.dart';
 import 'models/pos_core_health.dart';
+import 'models/pos_core_readiness.dart';
 import 'models/register_operations.dart';
 import 'models/transaction_command.dart';
 import 'models/transaction_snapshot.dart';
 
 abstract interface class PosCoreClient {
   Future<PosCoreHealth> fetchHealth();
+
+  Future<PosCoreReadiness> fetchReadiness();
 
   Future<PosCommandResult> executeCommand(TransactionCommand command);
 

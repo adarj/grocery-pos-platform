@@ -13,6 +13,7 @@ The implemented routes are:
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/health` | Process liveness |
+| `GET` | `/ready` | Runtime/authoritative-database readiness |
 | `POST` | `/transaction-commands` | Execute or resolve one typed transaction command |
 | `GET` | `/transactions/{transaction_id}` | Read current authoritative transaction state |
 | `GET` | `/receipts/{transaction_id}` | Derive the canonical completed-sale receipt |
@@ -32,6 +33,12 @@ reimplementing command dispatch or retry semantics.
 Parameters such as `charset=utf-8` are accepted. A missing or non-JSON content
 type returns `415 Unsupported Media Type` with code
 `unsupported_media_type`.
+
+The local server's native request reader rejects bodies larger than 64 KiB
+before this handler receives or decodes them. A request-reader rejection has no
+typed command outcome; a client that had already established a logical command
+must retain its exact command identity while resolving any transport
+uncertainty.
 
 The body is exactly
 [Transaction Command Schema v1](transaction-command-schema.md):
@@ -412,6 +419,7 @@ Recognized routes with the wrong method return `405 Method Not Allowed` and an
 | Route | `Allow` |
 | --- | --- |
 | `/health` | `GET` |
+| `/ready` | `GET` |
 | `/transaction-commands` | `POST` |
 | `/transactions/{transaction_id}` | `GET` |
 | `/receipts/{transaction_id}` | `GET` |
