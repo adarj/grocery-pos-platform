@@ -32,7 +32,7 @@ fi
   fail "unexpected RPM package name"
 [[ "$(rpm -qp --queryformat '%{VERSION}' "$rpm_path")" == "0.0.0" ]] ||
   fail "unexpected internal RPM version"
-[[ "$(rpm -qp --queryformat '%{RELEASE}' "$rpm_path")" == "0.2.dev" ]] ||
+[[ "$(rpm -qp --queryformat '%{RELEASE}' "$rpm_path")" == "0.3.dev" ]] ||
   fail "unexpected internal RPM release"
 [[ "$(rpm -qp --queryformat '%{ARCH}' "$rpm_path")" == "noarch" ]] ||
   fail "RPM architecture is not noarch"
@@ -82,9 +82,11 @@ required_files=(
   "$payload_root/pos/persistence/sqlite-restore.rkt"
   "$payload_root/pos/support/appliance-recovery.rkt"
   "$payload_root/pos/support/support-bundle.rkt"
+  "$payload_root/pos/support/appliance-provisioning.rkt"
   "$payload_root/scripts/database-maintenance.rkt"
   "$payload_root/scripts/database-recovery.rkt"
   "$payload_root/scripts/support-diagnostics.rkt"
+  "$payload_root/scripts/appliance.rkt"
   "$payload_root/scripts/catalog.rkt"
   "$payload_root/scripts/register-configuration.rkt"
   "$payload_root/run-pos-core"

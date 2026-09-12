@@ -89,6 +89,11 @@ Stop and preserve both sides for explicit inspection/escalation. Do not
 improvise destructive file operations. Whole-device power-loss behavior and a
 booted-appliance recovery exercise remain Checkpoint 7 qualification.
 
+On a provisioned kiosk, enter the separate technician VT and stop the graphical
+presentation if needed as described in [Kiosk Recovery](kiosk-recovery.md).
+The service-aware recovery command itself owns the POS Core offline boundary;
+rpm-ostree rollback is not a database restore.
+
 ## Development-only primitive
 
 For temporary/test paths, source development exposes:

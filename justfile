@@ -44,6 +44,22 @@ build-pos-core-rpm:
 check-pos-core-package:
     nix flake check path:. --print-build-logs
 
+# Builds the noarch Fedora host-integration package for the register appliance.
+build-pos-appliance-rpm:
+    nix build path:.#pos-appliance-rpm
+
+# Builds the source-pinned system Flatpak for the cashier terminal.
+build-pos-terminal-flatpak:
+    nix build path:.#pos-terminal-flatpak
+
+# Builds the technician-facing RPM/Flatpak/bootstrap artifact bundle.
+build-appliance-bundle:
+    nix build path:.#appliance-bundle
+
+# Runs rootless RPM, Flatpak, bootstrap, provisioning, and bundle contracts.
+check-pos-appliance:
+    nix flake check path:. --print-build-logs
+
 catalog-validate FILE:
     racket pos-backend-racket/scripts/catalog.rkt validate {{quote(FILE)}}
 

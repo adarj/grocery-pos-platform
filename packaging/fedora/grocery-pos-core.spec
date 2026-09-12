@@ -1,6 +1,6 @@
 Name:           grocery-pos-core
 Version:        0.0.0
-Release:        0.2.dev%{?dist}
+Release:        0.3.dev%{?dist}
 Summary:        Local-first Grocery POS transaction core
 License:        LicenseRef-Project-Undecided
 URL:            https://github.com/adarj/grocery-pos-platform
@@ -70,6 +70,9 @@ install -D -m 0644 packaging/fedora/pos-core.env \
 %config(noreplace) /etc/grocery-pos/pos-core.env
 
 %changelog
+* Fri Sep 11 2026 Grocery POS Platform <internal@invalid> - 0.0.0-0.3.dev
+- Add the canonical database-building primitive used by appliance provisioning.
+
 * Fri Sep 11 2026 Grocery POS Platform <internal@invalid> - 0.0.0-0.2.dev
 - Add explicit offline recovery and allowlisted support diagnostics.
 

@@ -162,11 +162,15 @@ Verified capabilities currently include:
 * explicit double-validated offline database restore with displaced
   DB/WAL/SHM/journal evidence preservation, plus privacy-minimized local support
   bundles built from allowlisted operational metadata;
+* a Fedora Kinoite 44 x86_64 appliance contract with transactional local-RPM
+  bootstrap, resumable first provisioning, separate backend/kiosk identities,
+  Plasma Login Manager lifecycle, and a source-pinned system Flatpak terminal;
 * Transaction HTTP API v1 with one strict idempotent command route,
   authoritative transaction-state reads, and exact completed-sale canonical
   receipt lookup derived from journal replay, plus narrow register/shift
   operations;
-* Flutter Linux ARM64 POS terminal;
+* Flutter Linux POS terminal with ordinary windowed development and explicit
+  fullscreen kiosk mode;
 * typed Flutter POS Core client models for transaction commands, durable command
   outcomes, authoritative transaction snapshots, Receipt Schemas v1/v2,
   register/shift context, authoritative shift cash summaries, and safe failures;
@@ -389,8 +393,19 @@ just check-pos-core-package
 
 These rootless commands do not install, enable, or start the package. See
 [POS Core Fedora Service](docs/operations/pos-core-service.md) for its
-filesystem/service contract and provisioning prerequisite. Complete Kinoite
-and Flutter kiosk integration remain future work.
+filesystem/service contract. The x86_64 appliance artifacts are exposed through:
+
+```bash
+just build-pos-appliance-rpm
+just build-pos-terminal-flatpak
+just build-appliance-bundle
+just check-pos-appliance
+```
+
+See [Fedora Kinoite Grocery POS Appliance](docs/operations/kinoite-appliance.md)
+and [Appliance Provisioning](docs/operations/appliance-provisioning.md). These
+commands build/test artifacts rootlessly; they do not mutate the developer's
+host deployment or provision a register.
 
 The canonical development command surface is the repository `justfile`; prefer adding reusable commands there rather than relying on undocumented shell invocations.
 

@@ -323,6 +323,24 @@ so an unhealthy register can still yield a useful local archive. See
 [ADR-0023](../adr/0023-build-support-bundles-from-allowlisted-operational-metadata.md)
 and [Support Diagnostics](../operations/support-diagnostics.md).
 
+## Kinoite appliance provisioning boundary
+
+The separate `grocery-pos-appliance` package orchestrates first provisioning
+without changing POS Core's runtime contract. It validates store inputs, builds
+an unpublished database through the canonical migration/catalog/register code,
+uses the existing validated `VACUUM INTO` path to create a standalone current
+candidate, fixes ownership/mode, and atomically publishes only when canonical
+`/var/lib/grocery-pos/pos.db` is absent. It never overwrites or recreates an
+existing authoritative database.
+
+After publication, provisioning enables/starts the existing service and waits
+for its unchanged `/ready` contract before configuring the graphical kiosk.
+The Flutter Flatpak and `grocery-pos-kiosk` account receive no SQLite access;
+they continue to communicate over literal loopback. See
+[ADR-0024](../adr/0024-base-m6-appliance-on-fedora-kinoite-44.md),
+[ADR-0025](../adr/0025-run-cashier-ui-as-dedicated-plasma-flatpak-kiosk.md),
+and [Appliance Provisioning](../operations/appliance-provisioning.md).
+
 ## Tested lifecycle
 
 Focused file-backed tests establish:
@@ -383,8 +401,8 @@ This runtime composition and HTTP adapter do not add:
   backup encryption, remote replication, or power-loss qualification;
 - raw-log support export, automatic support upload, remote support transport,
   or a dedicated support-agent identity;
-- full Kinoite/rpm-ostree installation, service provisioning/enablement,
-  graphical kiosk lifecycle, or live-systemd/SELinux qualification;
+- live Kinoite/rpm-ostree/PLM execution, reference-hardware display/touch
+  mapping, SELinux denial qualification, or power-loss/endurance acceptance;
 - a generic service container or component framework;
 - external payment/device integration, physical cash-drawer control, or
   receipt-printer integration;

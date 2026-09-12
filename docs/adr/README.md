@@ -29,3 +29,5 @@ ADRs document important architectural decisions, their context, and their conseq
 - [ADR-0021: Package POS Core as a Fedora-native service with isolated persistent state](0021-package-pos-core-as-a-fedora-native-service.md)
 - [ADR-0022: Restore POS databases offline while preserving displaced state](0022-restore-pos-databases-offline-while-preserving-displaced-state.md)
 - [ADR-0023: Build support bundles from allowlisted operational metadata](0023-build-support-bundles-from-allowlisted-operational-metadata.md)
+- [ADR-0024: Base the M6 appliance on Fedora Kinoite 44 with persistent rpm-ostree layering](0024-base-m6-appliance-on-fedora-kinoite-44.md)
+- [ADR-0025: Run the cashier UI as a dedicated Plasma kiosk account and system Flatpak](0025-run-cashier-ui-as-dedicated-plasma-flatpak-kiosk.md)

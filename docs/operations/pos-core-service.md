@@ -5,8 +5,9 @@
 The internal `grocery-pos-core` noarch RPM packages the Racket POS Core source,
 Fedora service metadata, machine configuration, and technician launchers. It is
 the first deployable service boundary for the future Fedora Kinoite register.
-It is not yet a complete appliance image, kiosk session, public release, or
-final production qualification.
+Checkpoint 6 composes it into the Fedora Kinoite kiosk lifecycle, but it remains
+separately packaged and is not a public release or final production
+qualification.
 
 Fedora supplies `/usr/bin/racket` at runtime. Nix reproducibly builds and tests
 the RPM, but the installed service does not require Nix, `nix-daemon`, a Nix
@@ -94,7 +95,8 @@ allows at most three starts in 60 seconds. Administrator stop stays stopped;
 persistent startup failure is not hidden by a database reset.
 
 The package does not enable or start the unit and has no install-time migration
-or database scriptlet. Checkpoint 6 controls enablement after provisioning.
+or database scriptlet. Explicit appliance provisioning builds and validates the
+initial database first, then enables/starts the unit and requires `/ready`.
 
 ## Service hardening
 
@@ -139,7 +141,8 @@ replication remain unimplemented.
 
 ## Provisioning prerequisite
 
-The future first-boot sequence remains separate from RPM installation:
+The implemented first-provisioning sequence remains separate from RPM
+installation:
 
 ```text
 install package/image while service remains disabled
@@ -150,8 +153,10 @@ install package/image while service remains disabled
   -> enable and start grocery-pos-core
 ```
 
-Checkpoint 6 will implement and qualify that lifecycle. Flutter/KDE kiosk
-startup and the full Kinoite image are outside this package.
+The canonical lifecycle is documented in
+[Appliance Provisioning](appliance-provisioning.md). Fedora/Plasma integration
+is owned by the separate `grocery-pos-appliance` package; POS Core retains its
+service/database boundary unchanged.
 
 ## Build and test
 
@@ -173,3 +178,7 @@ commands.
 This is artifact evidence, not final booted-appliance qualification. Installed
 systemd, SELinux, rpm-ostree upgrades, sudden power loss, and endurance remain
 later Milestone 6 work.
+
+For appliance lifecycle/status and graphical recovery, see
+[Fedora Kinoite Grocery POS Appliance](kinoite-appliance.md) and
+[Kiosk Recovery](kiosk-recovery.md).

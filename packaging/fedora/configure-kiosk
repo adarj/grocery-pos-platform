@@ -1,0 +1,50 @@
+#!/bin/bash
+
+set -euo pipefail
+
+kiosk_user='grocery-pos-kiosk'
+kiosk_home='/var/lib/grocery-pos-kiosk'
+unit_name='grocery-pos-terminal.service'
+user_config="$kiosk_home/.config"
+user_unit_directory="$user_config/systemd/user"
+user_wants_directory="$user_unit_directory/graphical-session.target.wants"
+plasmalogin_directory='/etc/plasmalogin.conf.d'
+
+if [[ "$(/usr/bin/id -u)" -ne 0 ]]; then
+  printf '%s\n' 'configure-kiosk requires root' >&2
+  exit 1
+fi
+
+/usr/bin/id -u "$kiosk_user" >/dev/null
+/usr/bin/install -d -m 0700 -o "$kiosk_user" -g "$kiosk_user" "$kiosk_home"
+/usr/bin/install -d -m 0700 -o "$kiosk_user" -g "$kiosk_user" \
+  "$user_config" "$user_config/systemd" "$user_unit_directory" \
+  "$user_wants_directory"
+/usr/bin/install -m 0600 -o "$kiosk_user" -g "$kiosk_user" \
+  /usr/libexec/grocery-pos-appliance/kscreenlockerrc \
+  "$user_config/kscreenlockerrc"
+/usr/bin/install -m 0600 -o "$kiosk_user" -g "$kiosk_user" \
+  /usr/libexec/grocery-pos-appliance/powerdevilrc \
+  "$user_config/powerdevilrc"
+/usr/bin/ln -sfn \
+  /usr/lib/systemd/user/grocery-pos-terminal.service \
+  "$user_wants_directory/$unit_name"
+/usr/bin/chown -h "$kiosk_user:$kiosk_user" \
+  "$user_wants_directory/$unit_name"
+
+/usr/bin/install -d -m 0755 "$plasmalogin_directory"
+/usr/bin/install -m 0644 \
+  /usr/libexec/grocery-pos-appliance/plasmalogin-grocery-pos.conf \
+  "$plasmalogin_directory/90-grocery-pos.conf"
+
+# Fedora 44 selects the display manager through the display-manager alias.
+# --force replaces a historical SDDM alias without uninstalling base packages.
+/usr/bin/systemctl disable sddm.service >/dev/null 2>&1 || true
+/usr/bin/systemctl enable --force plasmalogin.service
+/usr/bin/systemctl mask \
+  sleep.target suspend.target hibernate.target hybrid-sleep.target
+
+if [[ -x /usr/sbin/restorecon ]]; then
+  /usr/sbin/restorecon -RF \
+    "$kiosk_home" "$plasmalogin_directory" >/dev/null
+fi

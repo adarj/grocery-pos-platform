@@ -68,3 +68,7 @@ For a case requiring deeper local investigation, a technician may deliberately
 use `journalctl -u grocery-pos-core` or the explicit
 `grocery-pos-db quick-check`/`integrity-check` tools. Raw logs and expensive
 integrity scans are not silently folded into ordinary support collection.
+
+On the kiosk appliance, use the separate administrator/VT procedure documented
+in [Kiosk Recovery](kiosk-recovery.md). Collection does not require stopping the
+cashier presentation or POS Core.
