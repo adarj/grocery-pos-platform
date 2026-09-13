@@ -294,9 +294,10 @@ infrastructure exceptions, consistent with the transaction event store.
 
 ## Deliberately deferred
 
-This persistence contract does not yet implement:
+This persistence contract does not implement:
 
-- automatic SQLite busy retry or backoff;
+- whole-command retry after SQLite contention (the connector's bounded
+  per-operation busy retry is defined by ADR-0018);
 - exactly-once external payment or device effects and `PaymentUnknown`
   recovery;
 - receipt expiration or cleanup.

@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "application_id": "com.grocerypos.pos_terminal",
+  "branch": "stable",
+  "runtime": "org.fedoraproject.Platform",
+  "runtime_version": "f44",
+  "sdk": "org.fedoraproject.Sdk",
+  "sdk_version": "f44",
+  "flutter_version": "3.41.9",
+  "flutter_source": "pinned-nixpkgs-flake-input",
+  "dart_dependencies": "flutter/apps/pos_terminal/pubspec.lock"
+}

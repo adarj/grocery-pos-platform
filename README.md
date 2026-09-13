@@ -124,7 +124,10 @@ Verified capabilities currently include:
 * Nix flakes with `direnv` / `nix-direnv`;
 * `just` as the canonical development command interface;
 * Racket POS Core process;
-* `GET /health` local API endpoint;
+* separate `GET /health` process liveness and `GET /ready` authoritative
+  SQLite readiness endpoints;
+* strict literal-loopback API binding and native bounded HTTP request/resource
+  safety limits, including a 64 KiB request-body ceiling;
 * RackUnit backend tests;
 * exact-money, immutable cash-sale transaction domain behavior;
 * transaction domain events and deterministic replay;
@@ -147,13 +150,30 @@ Verified capabilities currently include:
   shift close reconciliation with exact signed over/short;
 * idempotent persistent transaction application service with deterministic
   two-connection concurrency and file-backed restart/retry coverage;
-* Racket runtime composition with startup migration, a bounded SQLite pool,
-  thread-mapped virtual request connections, and explicit shutdown ownership;
+* explicit SQLite WAL/FULL connection policy with foreign-key enforcement,
+  bounded connector busy handling, a bounded SQLite pool, thread-mapped virtual
+  request connections, and explicit shutdown ownership;
+* read-only SQLite inspection and migration/schema reporting, explicit quick
+  and full integrity checks, and validated live `VACUUM INTO` backups with
+  same-directory partial staging and atomic non-overwriting publication;
+* an internal noarch Fedora RPM for POS Core source, systemd/sysusers policy,
+  isolated persistent state, rootless package inspection, and extracted-package
+  SIGTERM/restart durability testing without an appliance Nix dependency;
+* explicit double-validated offline database restore with displaced
+  DB/WAL/SHM/journal evidence preservation, plus privacy-minimized local support
+  bundles built from allowlisted operational metadata;
+* a Fedora Kinoite 44 x86_64 appliance contract with transactional local-RPM
+  bootstrap, resumable first provisioning, separate backend/kiosk identities,
+  Plasma Login Manager lifecycle, and a source-pinned system Flatpak terminal;
+* an evidence-tiered Milestone 6 reliability acceptance framework with
+  deterministic repository qualification and explicitly pending booted,
+  hardware, and destructive-power campaigns;
 * Transaction HTTP API v1 with one strict idempotent command route,
   authoritative transaction-state reads, and exact completed-sale canonical
   receipt lookup derived from journal replay, plus narrow register/shift
   operations;
-* Flutter Linux ARM64 POS terminal;
+* Flutter Linux POS terminal with ordinary windowed development and explicit
+  fullscreen kiosk mode;
 * typed Flutter POS Core client models for transaction commands, durable command
   outcomes, authoritative transaction snapshots, Receipt Schemas v1/v2,
   register/shift context, authoritative shift cash summaries, and safe failures;
@@ -170,6 +190,11 @@ Verified capabilities currently include:
 * GitHub Actions workflow definitions for scaffold/Nix validation, Racket
   tests, and Flutter analysis/tests;
 * Architecture Decision Records under `docs/adr/`.
+
+Milestone 6 acceptance evidence and the current deliberately conservative
+status are documented under [`docs/acceptance/m6`](docs/acceptance/m6/README.md).
+Repository-side green tests do not by themselves qualify a booted appliance or
+physical power-loss behavior.
 
 ## Development Environment
 
@@ -280,6 +305,17 @@ A healthy development response currently resembles:
 }
 ```
 
+Operational readiness is separate:
+
+```text
+GET http://127.0.0.1:7340/ready
+```
+
+`/ready` returns 200 only while POS Core can establish its current production
+SQLite contract; a live process returns a sanitized 503 state when that
+boundary is unavailable. The ordinary API accepts only literal `127.0.0.1` or
+`::1` listener configuration and does not support remote access.
+
 ### Terminal 2 — Flutter POS Terminal
 
 In the current Fedora Kinoite / VMware / Distrobox / Nix environment:
@@ -348,6 +384,37 @@ fast Racket/Flutter suites, and the real-process POS integration suite:
 just check
 ```
 
+Canonical database inspection, integrity-check, and live-backup commands are
+documented in [Local POS Database Maintenance](docs/operations/database-maintenance.md).
+Explicit recovery is documented in the
+[Offline POS Database Restore](docs/operations/database-restore.md) runbook;
+automatic backup selection/fallback remains intentionally absent. See
+[POS Support Diagnostics](docs/operations/support-diagnostics.md) for the local,
+non-uploading diagnostic bundle contract.
+
+On Linux, build and validate the internal Fedora POS Core artifact with:
+
+```bash
+just build-pos-core-rpm
+just check-pos-core-package
+```
+
+These rootless commands do not install, enable, or start the package. See
+[POS Core Fedora Service](docs/operations/pos-core-service.md) for its
+filesystem/service contract. The x86_64 appliance artifacts are exposed through:
+
+```bash
+just build-pos-appliance-rpm
+just build-pos-terminal-flatpak
+just build-appliance-bundle
+just check-pos-appliance
+```
+
+See [Fedora Kinoite Grocery POS Appliance](docs/operations/kinoite-appliance.md)
+and [Appliance Provisioning](docs/operations/appliance-provisioning.md). These
+commands build/test artifacts rootlessly; they do not mutate the developer's
+host deployment or provision a register.
+
 The canonical development command surface is the repository `justfile`; prefer adding reusable commands there rather than relying on undocumented shell invocations.
 
 ## Repository Layout
@@ -357,11 +424,15 @@ The canonical development command surface is the repository `justfile`; prefer a
 ├── docs/
 │   ├── adr/
 │   ├── architecture/
-│   └── development/
+│   ├── development/
+│   └── operations/
 ├── flutter/
 │   └── apps/
 │       └── pos_terminal/
 ├── pos-backend-racket/
+├── packaging/
+│   ├── fedora/
+│   └── tests/
 ├── scripts/
 │   └── dev/
 ├── .github/
@@ -392,6 +463,12 @@ Architecture and interface contracts are stored under:
 
 ```text
 docs/architecture/
+```
+
+Operational procedures are stored under:
+
+```text
+docs/operations/
 ```
 
 Documentation should evolve in the same change as the behavior or architectural decision it describes.

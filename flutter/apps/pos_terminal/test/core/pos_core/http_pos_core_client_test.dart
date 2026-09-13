@@ -7,6 +7,7 @@ import 'package:pos_terminal/core/pos_core/http_pos_core_client.dart';
 import 'package:pos_terminal/core/pos_core/models/command_result.dart';
 import 'package:pos_terminal/core/pos_core/models/canonical_receipt.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_failure.dart';
+import 'package:pos_terminal/core/pos_core/models/pos_core_readiness.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_command.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_snapshot.dart';
 
@@ -90,6 +91,74 @@ void main() {
       expect(health.service, 'grocery-pos-core');
     },
   );
+
+  test('fetchReadiness parses ready production state', () async {
+    final client = HttpPosCoreClient(
+      baseUri: baseUri,
+      httpClient: MockClient((request) async {
+        expect(request.method, 'GET');
+        expect(request.url.toString(), 'http://127.0.0.1:7340/ready');
+        return http.Response(
+          jsonBody({
+            'ok': true,
+            'service': 'grocery-pos-core',
+            'status': 'ready',
+            'database_schema_version': 6,
+          }),
+          200,
+        );
+      }),
+    );
+
+    final readiness = await client.fetchReadiness();
+    expect(readiness.ready, isTrue);
+    expect(readiness.databaseSchemaVersion, 6);
+    expect(readiness.reason, isNull);
+  });
+
+  test('fetchReadiness models 503 as structured not-ready state', () async {
+    final client = HttpPosCoreClient(
+      baseUri: baseUri,
+      httpClient: MockClient(
+        (_) async => http.Response(
+          jsonBody({
+            'ok': false,
+            'service': 'grocery-pos-core',
+            'status': 'not_ready',
+            'reason': 'database_unavailable',
+          }),
+          503,
+        ),
+      ),
+    );
+
+    final readiness = await client.fetchReadiness();
+    expect(readiness.ready, isFalse);
+    expect(readiness.databaseSchemaVersion, isNull);
+    expect(readiness.reason, PosCoreReadinessReason.databaseUnavailable);
+  });
+
+  test('fetchReadiness rejects status and payload disagreement', () async {
+    final client = HttpPosCoreClient(
+      baseUri: baseUri,
+      httpClient: MockClient(
+        (_) async => http.Response(
+          jsonBody({
+            'ok': true,
+            'service': 'grocery-pos-core',
+            'status': 'ready',
+            'database_schema_version': 6,
+          }),
+          503,
+        ),
+      ),
+    );
+
+    await expectLater(
+      client.fetchReadiness(),
+      throwsA(isA<PosCoreInvalidResponseFailure>()),
+    );
+  });
 
   test('executeCommand sends one exact JSON command POST', () async {
     var requests = 0;

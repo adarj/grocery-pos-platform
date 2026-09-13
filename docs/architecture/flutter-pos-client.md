@@ -20,6 +20,8 @@ are governed by
 `PosCoreClient` is the Flutter application boundary for:
 
 - reading process health;
+- reading structured runtime/persistence readiness, including expected 503
+  states;
 - executing one typed transaction command;
 - reading current authoritative transaction state;
 - reading a canonical completed-sale receipt by exact transaction ID;
@@ -31,6 +33,26 @@ Widgets do not receive raw `http.Response` values or package HTTP exceptions.
 Flutter owns presentation and cashier intent orchestration; it does not
 calculate authoritative totals, advance transaction lifecycle, or infer stream
 versions.
+
+## Appliance endpoint and sandbox boundary
+
+Production composition resolves `GROCERY_POS_CORE_BASE_URI`, defaulting to
+`http://127.0.0.1:7340`. The value must use HTTP, a literal `127.0.0.1` or
+`::1`, no credentials, no non-root path/query/fragment, and a legal explicit or
+default port. This seam permits an alternate local appliance port without
+creating remote API support; backend listener validation remains independent.
+
+The Kinoite cashier artifact is a system Flatpak with only Wayland, DRI, and
+network sharing. It has no host/home filesystem or database access. Flutter's
+existing XDG state resolver naturally maps into Flatpak-private persistent
+state, so the exact write-before-POST recovery record survives application,
+session, reboot, and deployment transitions without becoming POS truth.
+
+The Linux runner reads `GROCERY_POS_KIOSK=1`. Only that mode starts fullscreen
+without the ordinary GTK header/title bar. With the variable absent, the
+existing development desktop window is unchanged. One cashier window is
+created; no customer-display or mirroring behavior is introduced. See
+[ADR-0025](../adr/0025-run-cashier-ui-as-dedicated-plasma-flatpak-kiosk.md).
 
 The source is organized as:
 
@@ -451,7 +473,8 @@ Each scenario owns a child POS Core process, a dynamically allocated loopback
 port, a temporary SQLite file, and a temporary Flutter recovery record. POS
 Core performs its normal startup migration; the harness does not create schema
 or use a test-only route. Readiness is established through bounded polling of
-the real `/health` endpoint, and teardown stops the child process before
+the real `/ready` endpoint, while `/health` remains the independent liveness
+contract. Teardown stops the child process before
 removing its temporary directory.
 
 Before the first server start, the fixture invokes the production catalog and

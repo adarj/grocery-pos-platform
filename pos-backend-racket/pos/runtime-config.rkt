@@ -7,9 +7,10 @@
 (define default-api-port "7340")
 (define default-sqlite-db-path ".local/sqlite/pos-dev.db")
 
-(define (non-empty-string? value)
+(define (loopback-api-host? value)
   (and (string? value)
-       (positive? (string-length value))))
+       (or (string=? value "127.0.0.1")
+           (string=? value "::1"))))
 
 (define (legal-port? value)
   (and (exact-integer? value)
@@ -40,8 +41,12 @@
   #:transparent
   #:guard
   (lambda (host port sqlite-db-path type-name)
-    (unless (non-empty-string? host)
-      (raise-argument-error type-name "non-empty string?" host))
+    (unless (loopback-api-host? host)
+      (raise-arguments-error
+       type-name
+       "API host must be the literal loopback address 127.0.0.1 or ::1"
+       "host"
+       host))
     (unless (legal-port? port)
       (raise-argument-error
        type-name

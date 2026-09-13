@@ -1,0 +1,3 @@
+# Type Name ID GECOS Home Shell
+g grocery-pos - -
+u grocery-pos - "Grocery POS Core service" /var/lib/grocery-pos /usr/sbin/nologin

@@ -12,7 +12,8 @@
          "../pos/domain/transaction-event.rkt"
          (prefix-in op: "../pos/domain/transaction-operational-context.rkt")
          "../pos/persistence/pos-database-migrations.rkt"
-         "../pos/persistence/sqlite-transaction-event-store.rkt")
+         "../pos/persistence/sqlite-transaction-event-store.rkt"
+         "../pos/support/readiness.rkt")
 
 (define (request-for method path)
   (request method
@@ -53,7 +54,13 @@
          #:catalog-lookup
          (lambda (_barcode)
            (error 'catalog "receipt query must not use current catalog"))))
-      (proc connection (make-app service)))
+      (proc
+       connection
+       (make-app
+        service
+        #:readiness-probe
+        (lambda ()
+          (runtime-ready current-pos-database-schema-version)))))
     (lambda () (db:disconnect connection))))
 
 (define taxed-A

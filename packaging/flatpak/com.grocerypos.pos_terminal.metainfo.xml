@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.grocerypos.pos_terminal</id>
+  <name>Grocery POS Terminal</name>
+  <summary>Local-first cashier presentation for Grocery POS</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LicenseRef-Project-Undecided</project_license>
+  <description>
+    <p>Cashier presentation client for the loopback Grocery POS Core service.</p>
+  </description>
+  <launchable type="desktop-id">com.grocerypos.pos_terminal.desktop</launchable>
+  <releases>
+    <release version="0.0.0-dev" date="2026-09-11"/>
+  </releases>
+</component>

@@ -15,8 +15,8 @@ final class RealPosCoreFixture {
   // bounds generous enough for a loaded development/CI host while polling and
   // teardown remain independently bounded.
   static const _startupTimeout = Duration(seconds: 30);
-  static const _healthAttemptTimeout = Duration(milliseconds: 400);
-  static const _healthPollInterval = Duration(milliseconds: 50);
+  static const _readinessAttemptTimeout = Duration(milliseconds: 400);
+  static const _readinessPollInterval = Duration(milliseconds: 50);
   static const _shutdownTimeout = Duration(seconds: 5);
   static const _referenceDataActivationTimeout = Duration(seconds: 30);
 
@@ -51,6 +51,9 @@ final class RealPosCoreFixture {
   String get recoveryFilePath =>
       _join(temporaryDirectory.path, 'flutter/cashier-session-v1.json');
 
+  String get posBackendDirectoryPath =>
+      _join(repositoryRoot.path, 'pos-backend-racket');
+
   Uri get baseUri {
     final value = _baseUri;
     if (value == null) {
@@ -60,6 +63,14 @@ final class RealPosCoreFixture {
   }
 
   bool get isRunning => _process != null && _observedExitCode == null;
+
+  int get processId {
+    final process = _process;
+    if (process == null || _observedExitCode != null) {
+      throw StateError('POS Core fixture is not running.');
+    }
+    return process.pid;
+  }
 
   Future<void> start() async {
     if (_disposed) {
@@ -72,7 +83,7 @@ final class RealPosCoreFixture {
     await _prepareReferenceDataIfNeeded();
 
     final port = await _allocateLoopbackPort();
-    final backendDirectory = _join(repositoryRoot.path, 'pos-backend-racket');
+    final backendDirectory = posBackendDirectoryPath;
     _stdoutTail.clear();
     _stderrTail.clear();
     _observedExitCode = null;
@@ -116,6 +127,23 @@ final class RealPosCoreFixture {
     await start();
   }
 
+  /// Kills only the child POS Core process and waits for the operating system
+  /// to reap it. This is a process-crash test seam, not a power-loss model.
+  Future<void> killAbruptly() async {
+    final process = _process;
+    final exitCodeFuture = _exitCodeFuture;
+    if (process == null ||
+        exitCodeFuture == null ||
+        _observedExitCode != null) {
+      throw StateError('POS Core fixture is not running.');
+    }
+    if (!process.kill(ProcessSignal.sigkill)) {
+      throw StateError('Could not send SIGKILL to the POS Core fixture.');
+    }
+    await exitCodeFuture.timeout(_shutdownTimeout);
+    await _releaseProcessHandles();
+  }
+
   Future<void> activateCatalogSnapshot(String catalogPath) async {
     if (_disposed) {
       throw StateError(
@@ -154,6 +182,10 @@ final class RealPosCoreFixture {
       await exitCodeFuture.timeout(_shutdownTimeout);
     }
 
+    await _releaseProcessHandles();
+  }
+
+  Future<void> _releaseProcessHandles() async {
     await _stdoutSubscription?.cancel();
     await _stderrSubscription?.cancel();
     _stdoutSubscription = null;
@@ -189,7 +221,7 @@ final class RealPosCoreFixture {
   Future<void> _waitUntilReady() async {
     final client = HttpPosCoreClient(
       baseUri: baseUri,
-      timeout: _healthAttemptTimeout,
+      timeout: _readinessAttemptTimeout,
     );
     final deadline = DateTime.now().add(_startupTimeout);
     try {
@@ -197,29 +229,31 @@ final class RealPosCoreFixture {
         final exitCode = _observedExitCode;
         if (exitCode != null) {
           throw StateError(
-            diagnostics('POS Core exited before becoming healthy.'),
+            diagnostics('POS Core exited before becoming ready.'),
           );
         }
 
         try {
-          final health = await client.fetchHealth();
-          if (health.ok && health.service == 'grocery-pos-core') {
+          final readiness = await client.fetchReadiness();
+          if (readiness.service != 'grocery-pos-core') {
+            throw StateError(
+              diagnostics('Unexpected service answered the reserved port.'),
+            );
+          }
+          if (readiness.ready) {
             return;
           }
-          throw StateError(
-            diagnostics('Unexpected service answered the reserved port.'),
-          );
         } on PosCoreTransportFailure {
           // The listener is not ready yet. The bounded loop tries again.
         } on PosCoreFailure catch (failure) {
           throw StateError(
-            diagnostics('POS Core health response was invalid: $failure'),
+            diagnostics('POS Core readiness response was invalid: $failure'),
           );
         }
-        await Future<void>.delayed(_healthPollInterval);
+        await Future<void>.delayed(_readinessPollInterval);
       }
       throw TimeoutException(
-        diagnostics('Timed out waiting for POS Core health.'),
+        diagnostics('Timed out waiting for POS Core readiness.'),
         _startupTimeout,
       );
     } finally {

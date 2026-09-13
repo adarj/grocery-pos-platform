@@ -101,6 +101,9 @@ JSON
        (dynamic-wind
          void
          (lambda ()
+           (check-equal?
+            (db:query-value connection "PRAGMA journal_mode")
+            "wal")
            (define item
              (lookup-catalog-item-by-barcode
               connection "049000001234"))

@@ -4,6 +4,7 @@
          racket/file
          "../pos/persistence/catalog-snapshot-codec.rkt"
          "../pos/persistence/sqlite-catalog.rkt"
+         "../pos/persistence/sqlite-connection.rkt"
          "../pos/runtime.rkt")
 
 (provide run-catalog-cli)
@@ -64,9 +65,9 @@
     ;; production startup. Activation never creates an arbitrary parent tree.
     (initialize-sqlite-database! resolved-database-path)
     (define connection
-      (db:sqlite3-connect
-       #:database resolved-database-path
-       #:mode 'read/write))
+      (open-pos-sqlite-connection
+       resolved-database-path
+       'read/write))
     (dynamic-wind
       void
       (lambda ()

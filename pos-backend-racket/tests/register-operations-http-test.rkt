@@ -11,7 +11,8 @@
          "../pos/domain/fake-catalog.rkt"
          "../pos/persistence/operational-configuration-snapshot-codec.rkt"
          "../pos/persistence/pos-database-migrations.rkt"
-         "../pos/persistence/sqlite-register-operations.rkt")
+         "../pos/persistence/sqlite-register-operations.rkt"
+         "../pos/support/readiness.rkt")
 
 (define config-json
   "{\"schema_version\":1,\"register\":{\"register_id\":\"register-one\",\"display_name\":\"Register One\"},\"cashiers\":[{\"cashier_id\":\"active\",\"display_name\":\"Alice\",\"active\":true},{\"cashier_id\":\"inactive\",\"display_name\":\"Inactive\",\"active\":false}]}")
@@ -51,10 +52,12 @@
   (define app
     (make-app
      (make-transaction-service
-      connection
+     connection
       #:catalog-lookup fake-catalog-lookup
       #:current-epoch-ms (lambda () 1500))
-     register-service))
+     register-service
+     #:readiness-probe
+     (lambda () (runtime-ready current-pos-database-schema-version))))
 
   (test-case "register context reports legitimate unconfigured state"
     (define response (app (request* #"GET" "/register-context")))

@@ -22,10 +22,14 @@
          "../pos/persistence/transaction-command-unit-of-work.rkt"
          "../pos/persistence/pos-database-migrations.rkt"
          "../pos/runtime-config.rkt"
-         "../pos/runtime.rkt")
+         "../pos/runtime.rkt"
+         "../pos/support/readiness.rkt")
 
 (define test-barcode "049000001234")
 (define unknown-barcode "000000000000")
+
+(define (test-readiness)
+  (runtime-ready current-pos-database-schema-version))
 
 (define (make-http-request method
                            path
@@ -108,7 +112,9 @@
          #:catalog-lookup catalog-lookup
          #:load-events load-events
          #:commit-command! commit-command!))
-      (proc connection service (make-app service)))
+      (proc connection
+            service
+            (make-app service #:readiness-probe test-readiness)))
     (lambda ()
       (db:disconnect connection))))
 
@@ -766,7 +772,10 @@ SQL
        (check-safe-error uncertain 500 "command_outcome_unknown")
 
        (define normal-service (make-test-service connection))
-       (define retry (post-command (make-app normal-service) command))
+       (define retry
+         (post-command
+          (make-app normal-service #:readiness-probe test-readiness)
+          command))
        (check-command-result
         retry
         200 #t "cmd-lost-response" "txn-lost-response"
@@ -860,7 +869,10 @@ SQL
             void
             (lambda ()
               (define app-A
-                (make-app (pos-runtime-transaction-service runtime-A)))
+                (make-app
+                 (pos-runtime-transaction-service runtime-A)
+                 #:readiness-probe
+                 (lambda () (pos-runtime-readiness runtime-A))))
               (check-equal? (response-code (post-command app-A start-command))
                             200)
               (define response (post-command app-A scan-command))
@@ -877,7 +889,10 @@ SQL
           void
           (lambda ()
             (define app-B
-              (make-app (pos-runtime-transaction-service runtime-B)))
+              (make-app
+               (pos-runtime-transaction-service runtime-B)
+               #:readiness-probe
+               (lambda () (pos-runtime-readiness runtime-B))))
             (define retry (post-command app-B scan-command))
             (check-equal? (response-json retry) original-scan)
             (define query (get-transaction app-B "txn-runtime"))

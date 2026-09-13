@@ -200,4 +200,38 @@ void main() {
       ),
     );
   });
+
+  test('Flatpak-style XDG state preserves the exact pending command', () async {
+    final flatpakStateHome =
+        '${temporaryDirectory.path}/.var/app/com.grocerypos.pos_terminal/'
+        '.local/state';
+    final sandboxPath = resolveCashierSessionFilePath({
+      'HOME': '${temporaryDirectory.path}/sandbox-home',
+      'XDG_STATE_HOME': flatpakStateHome,
+    });
+    final firstProcessStore = FileCashierSessionStore(filePath: sandboxPath);
+    final pending = TenderCashCommand(
+      commandId: 'cmd-flatpak-recovery',
+      transactionId: 'txn-flatpak-recovery',
+      expectedVersion: 4,
+      amountMinorUnits: 500,
+    );
+    await firstProcessStore.save(
+      PersistedCashierSession(
+        activeTransactionId: pending.transactionId,
+        pendingCommand: pending,
+      ),
+    );
+
+    final restartedProcessStore = FileCashierSessionStore(
+      filePath: sandboxPath,
+    );
+    final restored = await restartedProcessStore.load();
+    final restoredCommand = restored!.pendingCommand! as TenderCashCommand;
+    expect(restoredCommand.commandId, pending.commandId);
+    expect(restoredCommand.transactionId, pending.transactionId);
+    expect(restoredCommand.expectedVersion, pending.expectedVersion);
+    expect(restoredCommand.amountMinorUnits, pending.amountMinorUnits);
+    expect(sandboxPath, startsWith(flatpakStateHome));
+  });
 }

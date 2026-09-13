@@ -2,7 +2,11 @@
 
 (require (prefix-in db: db))
 
-(provide migrate-pos-database!)
+(provide current-pos-database-schema-version
+         read-pos-database-migration-history
+         classify-pos-database-migration-history
+         validate-pos-database-schema!
+         migrate-pos-database!)
 
 (struct pos-database-migration (version name apply! validate!)
   #:transparent)
@@ -935,8 +939,11 @@ SQL
                            apply-migration-6!
                            validate-shift-cash-accountability-schema)))
 
+(define current-pos-database-schema-version (length migrations))
+
 (define (migration-row-matches? row migration)
-  (and (= (vector-length row) 2)
+  (and (vector? row)
+       (= (vector-length row) 2)
        (equal? (vector-ref row 0)
                (pos-database-migration-version migration))
        (equal? (vector-ref row 1)
@@ -947,6 +954,66 @@ SQL
        (for/and ([row (in-list applied-migrations)]
                  [migration (in-list migrations)])
          (migration-row-matches? row migration))))
+
+(define (read-pos-database-migration-history connection)
+  (unless (db:connection? connection)
+    (raise-argument-error
+     'read-pos-database-migration-history
+     "connection?"
+     connection))
+  ;; This query is intentionally non-mutating. A missing migrations table is
+  ;; evidence about the inspected database, not an invitation to create it.
+  (db:query-rows
+   connection
+   "SELECT version, name FROM pos_schema_migrations ORDER BY version ASC"))
+
+(define (classify-pos-database-migration-history history)
+  (unless (list? history)
+    (raise-argument-error
+     'classify-pos-database-migration-history
+     "list?"
+     history))
+  (cond
+    [(not (valid-migration-prefix? history)) 'unsupported]
+    [(= (length history) current-pos-database-schema-version) 'current]
+    [else 'supported-prefix]))
+
+(define (validate-applied-pos-database-schema! connection
+                                                applied-migrations
+                                                who)
+  (when (eq? (classify-pos-database-migration-history applied-migrations)
+             'unsupported)
+    (error
+     who
+     "unsupported POS database migration history: ~e"
+     applied-migrations))
+  (for ([migration
+         (in-list (take migrations (length applied-migrations)))])
+    ((pos-database-migration-validate! migration) connection)))
+
+(define (validate-pos-database-schema!
+         connection
+         #:require-current? [require-current? #f])
+  (define who 'validate-pos-database-schema!)
+  (unless (db:connection? connection)
+    (raise-argument-error who "connection?" connection))
+  (unless (boolean? require-current?)
+    (raise-argument-error who "boolean?" require-current?))
+
+  (define applied-migrations
+    (read-pos-database-migration-history connection))
+  (validate-applied-pos-database-schema!
+   connection applied-migrations who)
+  (when (and require-current?
+             (not (eq? (classify-pos-database-migration-history
+                        applied-migrations)
+                       'current)))
+    (error
+     who
+     "POS database schema is not current: expected version ~a, history ~e"
+     current-pos-database-schema-version
+     applied-migrations))
+  (void))
 
 (define (record-migration! connection migration)
   (db:query-exec
@@ -967,18 +1034,11 @@ SQL
    (lambda ()
      (db:query-exec connection create-migrations-table-sql)
      (define applied-migrations
-       (db:query-rows
-        connection
-        "SELECT version, name FROM pos_schema_migrations ORDER BY version ASC"))
-     (unless (valid-migration-prefix? applied-migrations)
-       (error
-        'migrate-pos-database!
-        "unsupported POS database migration history: ~e"
-        applied-migrations))
+       (read-pos-database-migration-history connection))
+     (validate-applied-pos-database-schema!
+      connection applied-migrations 'migrate-pos-database!)
 
      (define applied-count (length applied-migrations))
-     (for ([migration (in-list (take migrations applied-count))])
-       ((pos-database-migration-validate! migration) connection))
      (for ([migration (in-list (drop migrations applied-count))])
        ((pos-database-migration-apply! migration) connection)
        ((pos-database-migration-validate! migration) connection)

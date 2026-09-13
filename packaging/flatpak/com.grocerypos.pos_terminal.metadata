@@ -1,0 +1,10 @@
+[Application]
+name=com.grocerypos.pos_terminal
+runtime=runtime/org.fedoraproject.Platform/x86_64/f44
+sdk=runtime/org.fedoraproject.Sdk/x86_64/f44
+command=pos_terminal
+
+[Context]
+shared=network;
+sockets=wayland;
+devices=dri;

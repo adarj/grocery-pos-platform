@@ -1,7 +1,6 @@
 #lang racket
 
 (require racket/runtime-path
-         web-server/servlet-env
          "pos/api/server.rkt"
          "pos/runtime-config.rkt"
          "pos/runtime.rkt")
@@ -23,14 +22,13 @@
             (pos-runtime-sqlite-db-path runtime))
     (printf "Starting Grocery POS Core on http://~a:~a\n" host port)
     (printf "Health endpoint: http://~a:~a/health\n" host port)
-    (serve/servlet
+    (printf "Readiness endpoint: http://~a:~a/ready\n" host port)
+    (serve-pos-app
      (make-app (pos-runtime-transaction-service runtime)
-               (pos-runtime-register-operations-service runtime))
-     #:launch-browser? #f
-     #:quit? #f
-     #:listen-ip host
-     #:port port
-     #:servlet-path "/"
-     #:servlet-regexp #rx""))
+               (pos-runtime-register-operations-service runtime)
+               #:readiness-probe
+               (lambda () (pos-runtime-readiness runtime)))
+     host
+     port))
   (lambda ()
     (stop-pos-runtime! runtime)))

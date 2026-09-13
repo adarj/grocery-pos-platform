@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Grocery POS Terminal
+Comment=Local-first cashier terminal
+Exec=pos_terminal
+Icon=com.grocerypos.pos_terminal
+Terminal=false
+Categories=Office;

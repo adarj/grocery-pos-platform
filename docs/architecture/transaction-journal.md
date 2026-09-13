@@ -469,6 +469,8 @@ migrates with a dedicated startup connection, and gives request threads actual
 connections through a bounded pool and virtual connection. See
 [Racket POS Core Runtime Composition](racket-runtime.md). Automated tests use
 isolated temporary databases rather than the developer's normal local
-database. Automatic SQLite busy retry/backoff remains deferred; a lock failure
-is currently an infrastructure failure, and tests establish that it cannot
-produce a false durable success or partial command write.
+database. The Racket SQLite connector applies only the bounded per-operation
+busy retry fixed by ADR-0018. Whole transaction-command retry remains
+prohibited; exhausted contention is an infrastructure failure, and tests
+establish that it cannot produce a false durable success or partial command
+write.

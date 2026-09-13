@@ -172,8 +172,9 @@ resolved by blindly submitting another charge.
   allowed.
 - A caller-observed error around or after commit does not prove the commit
   failed; retrying the same ID resolves durable state.
-- SQLite busy or writer contention must not appear as durable success. No
-  automatic busy retry or backoff is currently provided.
+- SQLite busy or writer contention must not appear as durable success.
+  ADR-0018 later established bounded connector-level retry; it does not permit
+  automatically rerunning the transaction command.
 - Command receipts are retained at least as long as their corresponding
   transaction journal history. Schema v1 has no TTL or cleanup mechanism.
 

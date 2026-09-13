@@ -7,7 +7,9 @@
          "application/register-operations-service.rkt"
          "application/transaction-service.rkt"
          "persistence/pos-database-migrations.rkt"
-         "persistence/sqlite-catalog.rkt")
+         "persistence/sqlite-catalog.rkt"
+         "persistence/sqlite-connection.rkt"
+         "support/readiness.rkt")
 
 (provide runtime-sqlite-max-connections
          runtime-sqlite-max-idle-connections
@@ -18,7 +20,8 @@
          pos-runtime-transaction-service
          pos-runtime-register-operations-service
          pos-runtime-sqlite-db-path
-         pos-runtime-stopped?)
+         pos-runtime-stopped?
+         pos-runtime-readiness)
 
 ;; One local register has modest concurrency. A fixed small bound prevents a
 ;; burst of request threads from creating an unbounded number of SQLite
@@ -32,7 +35,8 @@
    register-operations-service
    sqlite-db-path
    custodian
-   stopped-box))
+   stopped-box
+   connect))
 
 (define (system-current-epoch-ms)
   (inexact->exact (floor (current-inexact-milliseconds))))
@@ -45,8 +49,15 @@
     (raise-argument-error 'pos-runtime-stopped? "pos-runtime?" runtime))
   (unbox (pos-runtime-stopped-box runtime)))
 
-(define (open-sqlite-connection database-path mode)
-  (db:sqlite3-connect #:database database-path #:mode mode))
+(define (pos-runtime-readiness runtime)
+  (unless (pos-runtime? runtime)
+    (raise-argument-error 'pos-runtime-readiness "pos-runtime?" runtime))
+  (if (pos-runtime-stopped? runtime)
+      (runtime-not-ready 'runtime_stopped)
+      (parameterize ([current-custodian (pos-runtime-custodian runtime)])
+        (probe-pos-database-readiness
+         (pos-runtime-sqlite-db-path runtime)
+         #:connect (pos-runtime-connect runtime)))))
 
 (define (check-database-parent! who database-path)
   (define parent-directory (path-only database-path))
@@ -62,7 +73,7 @@
 
 (define (initialize-sqlite-database!
          database-path
-         #:connect [connect open-sqlite-connection]
+         #:connect [connect open-pos-sqlite-connection]
          #:migrate! [migrate! migrate-pos-database!])
   (define who 'initialize-sqlite-database!)
   (unless (path-string? database-path)
@@ -95,7 +106,7 @@
 (define (start-pos-runtime
          config
          #:catalog-lookup [catalog-lookup #f]
-         #:connect [connect open-sqlite-connection]
+         #:connect [connect open-pos-sqlite-connection]
          #:current-epoch-ms [current-epoch-ms system-current-epoch-ms]
          #:generate-shift-id [generate-shift-id secure-shift-id])
   (define who 'start-pos-runtime)
@@ -158,7 +169,8 @@
                  register-service
                  database-path
                  runtime-custodian
-                 stopped-box)))
+                 stopped-box
+                 connect)))
 
 (define (stop-pos-runtime! runtime)
   (unless (pos-runtime? runtime)
