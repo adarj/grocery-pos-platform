@@ -1,5 +1,10 @@
 # Fedora Kinoite Grocery POS Appliance
 
+The repository-side lifecycle contract is implemented, but full appliance
+qualification is tracked separately in the
+[Milestone 6 acceptance record](../acceptance/m6/README.md). A green package
+test is not proof of booted, display, or physical power-loss behavior.
+
 ## Reference platform and qualification boundary
 
 Milestone 6 targets an official **Fedora Kinoite 44 x86_64** installation with
@@ -113,4 +118,3 @@ state recovery.
 
 See [Appliance Provisioning](appliance-provisioning.md) for installation and
 [Kiosk Recovery](kiosk-recovery.md) for technician operations.
-

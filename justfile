@@ -60,6 +60,27 @@ build-appliance-bundle:
 check-pos-appliance:
     nix flake check path:. --print-build-logs
 
+# Runs only deterministic/rootless Milestone 6 acceptance and records concise
+# evidence. It never mutates rpm-ostree, users, systemd, displays, or power.
+accept-m6:
+    scripts/acceptance/accept-m6.sh
+
+# Regenerates the committed ledger from the most recent ignored local run.
+acceptance-report-m6:
+    racket scripts/acceptance/m6-report.rkt .local/acceptance/m6/run-summary.json docs/acceptance/m6/acceptance-results.json
+
+# Optional bounded extended workload; the ordinary Tier A run uses 100 cycles.
+soak-m6 ITERATIONS="1000":
+    racket scripts/acceptance/m6-soak.rkt {{quote(ITERATIONS)}}
+
+# Optional extended real-process crash campaign; Tier A runs three iterations.
+crash-m6 ITERATIONS="100":
+    cd flutter/apps/pos_terminal && M6_CRASH_ITERATIONS={{quote(ITERATIONS)}} flutter test --concurrency=1 integration/real_pos_core_test.dart --plain-name "repeated accepted commands survive abrupt POS Core process death"
+
+# Read-only qualification observations for an already booted reference host.
+qualify-m6-kinoite:
+    packaging/acceptance/qualify-kinoite.sh
+
 catalog-validate FILE:
     racket pos-backend-racket/scripts/catalog.rkt validate {{quote(FILE)}}
 

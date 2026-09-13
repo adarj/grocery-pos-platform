@@ -64,6 +64,14 @@ final class RealPosCoreFixture {
 
   bool get isRunning => _process != null && _observedExitCode == null;
 
+  int get processId {
+    final process = _process;
+    if (process == null || _observedExitCode != null) {
+      throw StateError('POS Core fixture is not running.');
+    }
+    return process.pid;
+  }
+
   Future<void> start() async {
     if (_disposed) {
       throw StateError('A disposed POS Core fixture cannot be restarted.');
@@ -119,6 +127,23 @@ final class RealPosCoreFixture {
     await start();
   }
 
+  /// Kills only the child POS Core process and waits for the operating system
+  /// to reap it. This is a process-crash test seam, not a power-loss model.
+  Future<void> killAbruptly() async {
+    final process = _process;
+    final exitCodeFuture = _exitCodeFuture;
+    if (process == null ||
+        exitCodeFuture == null ||
+        _observedExitCode != null) {
+      throw StateError('POS Core fixture is not running.');
+    }
+    if (!process.kill(ProcessSignal.sigkill)) {
+      throw StateError('Could not send SIGKILL to the POS Core fixture.');
+    }
+    await exitCodeFuture.timeout(_shutdownTimeout);
+    await _releaseProcessHandles();
+  }
+
   Future<void> activateCatalogSnapshot(String catalogPath) async {
     if (_disposed) {
       throw StateError(
@@ -157,6 +182,10 @@ final class RealPosCoreFixture {
       await exitCodeFuture.timeout(_shutdownTimeout);
     }
 
+    await _releaseProcessHandles();
+  }
+
+  Future<void> _releaseProcessHandles() async {
     await _stdoutSubscription?.cancel();
     await _stderrSubscription?.cancel();
     _stdoutSubscription = null;

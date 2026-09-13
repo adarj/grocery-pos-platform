@@ -452,12 +452,14 @@ The adapter never returns stack traces, arbitrary `exn-message` text, SQL
 errors, corrupt journal contents, raw command JSON, or application persistence
 details.
 
-The server is loopback-bound by default but is still an application trust
-boundary. Transaction HTTP API v1 does not add authentication, actor/session
-authorization, or production security claims. It also does not add a request
-streaming/body-size guarantee, readiness endpoint, automatic SQLite busy
-retry, payment behavior, or external-effect exactly-once
-semantics. Flutter now has a typed client and the current start, scan, cash
+The server accepts only literal loopback addresses but is still an application
+trust boundary. Transaction HTTP API v1 does not add authentication,
+actor/session authorization, or remote-service security claims. The surrounding
+server now enforces a native 64 KiB request-body limit and exposes separate
+`/ready` infrastructure state. ADR-0018 permits bounded connector-level SQLite
+busy retry, never whole-command retry. The transaction API still adds no
+payment behavior or external-effect exactly-once semantics. Flutter now has a
+typed client and the current start, scan, cash
 tender, pre-payment line removal/void, authoritative tax/change, completion,
 next-sale cashier slice, and exact completed-sale receipt lookup. Receipt
 printing, timestamps, broad sale search, paid reversal/refund, and manager

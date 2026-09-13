@@ -57,7 +57,8 @@ runs migrations, checkpoints, repairs, or restores data.
 
 The runtime never automatically restores or selects a backup. A missing or
 damaged authoritative database continues to fail closed; recovery-point
-selection remains an explicit future technician operation.
+selection remains an explicit technician operation. ADR-0022 later defines the
+offline restore procedure without changing this no-automatic-recovery rule.
 
 ## Rationale
 
@@ -145,7 +146,10 @@ metadata and never database rows or transaction payloads.
 
 ## Deferred work
 
-Explicit offline restore, recovery-point selection, backup scheduling and
-retention, encryption, off-machine replication, production ownership and
-permissions, service supervision, support-bundle policy, and power-loss/load
-qualification remain later Milestone 6 checkpoints.
+At the time of this decision, restore, appliance ownership/supervision, support
+diagnostics, and reliability qualification were deferred. ADR-0021 subsequently
+defined the service boundary, ADR-0022 defined explicit offline restore,
+ADR-0023 defined support-bundle policy, and ADR-0026 defined evidence-tiered
+qualification. Backup scheduling/retention, encryption, off-machine
+replication, and the still-unexecuted external qualification campaigns remain
+deferred.

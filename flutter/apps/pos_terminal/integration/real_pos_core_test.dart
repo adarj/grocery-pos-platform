@@ -27,6 +27,18 @@ const _developmentCashierId = 'cashier-development-01';
 const _developmentCashierName = 'Development Cashier';
 const _developmentOpeningCash = 10000;
 
+int _crashCampaignIterations() {
+  final configured = Platform.environment['M6_CRASH_ITERATIONS'];
+  if (configured == null) {
+    return 3;
+  }
+  final parsed = int.tryParse(configured);
+  if (parsed == null || parsed <= 0) {
+    throw StateError('M6_CRASH_ITERATIONS must be a positive integer.');
+  }
+  return parsed;
+}
+
 final class _SequentialIntegrationIds implements CashierIdGenerator {
   _SequentialIntegrationIds(this.namespace);
 
@@ -178,6 +190,7 @@ Future<void> _scanThreeTimes(CashierSessionController controller) async {
 
 void main() {
   final ordinaryTestHttpOverrides = HttpOverrides.current;
+  final crashCampaignIterations = _crashCampaignIterations();
   setUpAll(() {
     // This explicitly invoked suite tests real loopback HTTP. flutter_test's
     // default override returns synthetic 400 responses for all network calls.
@@ -231,6 +244,30 @@ void main() {
       expect(unavailable.reason, PosCoreReadinessReason.databaseMissing);
     },
   );
+
+  test('repeated readiness probes do not leak process descriptors', () async {
+    expect(Platform.isLinux, isTrue);
+    final fixture = await _startFixture(openShift: false);
+    final client = HttpPosCoreClient(
+      baseUri: fixture.baseUri,
+      timeout: const Duration(seconds: 3),
+    );
+    addTearDown(client.close);
+
+    final descriptorDirectory = Directory('/proc/${fixture.processId}/fd');
+    final before = await descriptorDirectory.list().length;
+    for (var attempt = 0; attempt < 200; attempt += 1) {
+      final readiness = await client.fetchReadiness();
+      expect(readiness.ready, isTrue);
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    final after = await descriptorDirectory.list().length;
+
+    // This is deliberately broad leak detection, not a performance target.
+    // Persistent listener/pool bookkeeping may legitimately retain a small
+    // number of descriptors, but request count must not drive linear growth.
+    expect(after, lessThanOrEqualTo(before + 8));
+  });
 
   test(
     'real operational startup exposes configuration and opens one shift',
@@ -1025,6 +1062,84 @@ void main() {
       expect(restoredCashier.controller.state.pendingCommand, isNull);
       expect(restoredCashier.ids.commandIdCalls, 0);
     },
+  );
+
+  test(
+    'repeated accepted commands survive abrupt POS Core process death',
+    () async {
+      final fixture = await _startFixture();
+      var cashier = await _createCashier(fixture, 'sigkill_initial');
+      await cashier.controller.startTransaction();
+
+      for (
+        var iteration = 1;
+        iteration <= crashCampaignIterations;
+        iteration += 1
+      ) {
+        final crashAtCompletion = iteration.isEven;
+        if (crashAtCompletion) {
+          await cashier.controller.scanBarcode(_developmentBarcode);
+          await cashier.controller.tenderCash(500);
+        }
+        final beforeCrash = _snapshot(cashier.controller);
+        final exactCommand = crashAtCompletion
+            ? CompleteTransactionCommand(
+                commandId: 'cmd_sigkill_complete_$iteration',
+                transactionId: beforeCrash.transactionId,
+                expectedVersion: beforeCrash.version,
+              )
+            : ScanBarcodeCommand(
+                commandId: 'cmd_sigkill_scan_$iteration',
+                transactionId: beforeCrash.transactionId,
+                expectedVersion: beforeCrash.version,
+                barcode: _developmentBarcode,
+              );
+        await cashier.store.save(
+          PersistedCashierSession(
+            activeTransactionId: beforeCrash.transactionId,
+            pendingCommand: exactCommand,
+          ),
+        );
+
+        // Deliberately discard the accepted result, then kill only the POS
+        // Core process. This is an ambiguous caller outcome around a real
+        // durable mutation, but it is not a physical power-loss model.
+        final discarded = await cashier.client.executeCommand(exactCommand);
+        expect(discarded.outcomeKind, PosCommandOutcomeKind.accepted);
+        await fixture.killAbruptly();
+        cashier.close();
+
+        await fixture.start();
+        cashier = await _createCashier(fixture, 'sigkill_after_$iteration');
+        final restoredPending = cashier.controller.state.pendingCommand!;
+        expect(restoredPending.toJson(), equals(exactCommand.toJson()));
+
+        await cashier.controller.retryPendingCommand();
+        var recovered = _snapshot(cashier.controller);
+        expect(
+          cashier.controller.state.lastCommandResult!.commandId,
+          exactCommand.commandId,
+        );
+        expect(cashier.controller.state.pendingCommand, isNull);
+
+        if (!crashAtCompletion) {
+          expect(recovered.version, 2);
+          expect(recovered.lineItems, hasLength(1));
+          _expectDevelopmentItem(recovered.lineItems.single);
+          await cashier.controller.tenderCash(500);
+          await cashier.controller.completeTransaction();
+          recovered = _snapshot(cashier.controller);
+        }
+        expect(recovered.status, TransactionStatus.completed);
+        expect(recovered.version, 4);
+        expect(recovered.lineItems, hasLength(1));
+
+        if (iteration < crashCampaignIterations) {
+          await cashier.controller.beginNextSale();
+        }
+      }
+    },
+    timeout: Timeout(Duration(seconds: 30 + (15 * crashCampaignIterations))),
   );
 
   test('known active session restores through GET only', () async {

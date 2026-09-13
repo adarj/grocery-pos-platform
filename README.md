@@ -165,6 +165,9 @@ Verified capabilities currently include:
 * a Fedora Kinoite 44 x86_64 appliance contract with transactional local-RPM
   bootstrap, resumable first provisioning, separate backend/kiosk identities,
   Plasma Login Manager lifecycle, and a source-pinned system Flatpak terminal;
+* an evidence-tiered Milestone 6 reliability acceptance framework with
+  deterministic repository qualification and explicitly pending booted,
+  hardware, and destructive-power campaigns;
 * Transaction HTTP API v1 with one strict idempotent command route,
   authoritative transaction-state reads, and exact completed-sale canonical
   receipt lookup derived from journal replay, plus narrow register/shift
@@ -187,6 +190,11 @@ Verified capabilities currently include:
 * GitHub Actions workflow definitions for scaffold/Nix validation, Racket
   tests, and Flutter analysis/tests;
 * Architecture Decision Records under `docs/adr/`.
+
+Milestone 6 acceptance evidence and the current deliberately conservative
+status are documented under [`docs/acceptance/m6`](docs/acceptance/m6/README.md).
+Repository-side green tests do not by themselves qualify a booted appliance or
+physical power-loss behavior.
 
 ## Development Environment
 

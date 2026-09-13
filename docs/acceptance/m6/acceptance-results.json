@@ -1,0 +1,1011 @@
+{
+  "generated_at": "2026-09-13T05:06:30Z",
+  "milestone": 6,
+  "overall_status": "conditional",
+  "reference_commit": "0f4cc148b07ad8b8e5a117440cfb4f2d273aa53c",
+  "reference_platform": {
+    "booted_appliance": "Fedora Kinoite 44 x86_64 (qualification not supplied)",
+    "destructive_test_appliance": "Not supplied",
+    "reference_hardware": "Not selected/recorded in this repository execution",
+    "repository_tier_a_environment": "fedora 44; aarch64; kernel 7.2.5-200.fc44.aarch64"
+  },
+  "schema_version": 1,
+  "test_groups": [
+    {
+      "blocking_issue": null,
+      "command": "just test-racket",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.5-200.fc44.aarch64",
+      "evidence_references": [
+        "pos-backend-racket/tests",
+        ".local/acceptance/m6/racket.log"
+      ],
+      "execution_timestamp": "2026-09-13T04:55:49Z",
+      "id": "M6-A-001",
+      "notes": "Includes focused migration, connection, backup, restore, support, concurrency, and cash-accountability tests.",
+      "requirements": [
+        "M6-CP1-001",
+        "M6-CP2-001",
+        "M6-CP5-001"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Complete Racket suite"
+    },
+    {
+      "blocking_issue": null,
+      "command": "just test-flutter",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.5-200.fc44.aarch64",
+      "evidence_references": [
+        "flutter/apps/pos_terminal/test",
+        ".local/acceptance/m6/flutter.log"
+      ],
+      "execution_timestamp": "2026-09-13T04:57:18Z",
+      "id": "M6-A-002",
+      "notes": "Protects endpoint validation and durable cashier recovery state.",
+      "requirements": [
+        "M6-CP6-002",
+        "M6-CP7-002"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Complete Flutter suite"
+    },
+    {
+      "blocking_issue": null,
+      "command": "just test-pos-integration",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.5-200.fc44.aarch64",
+      "evidence_references": [
+        "flutter/apps/pos_terminal/integration/real_pos_core_test.dart",
+        ".local/acceptance/m6/integration.log"
+      ],
+      "execution_timestamp": "2026-09-13T04:57:26Z",
+      "id": "M6-A-003",
+      "notes": "Uses a real Racket process and file-backed SQLite.",
+      "requirements": [
+        "M6-CP3-001",
+        "M6-CP7-001"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Real Flutter-to-Racket integration"
+    },
+    {
+      "blocking_issue": null,
+      "command": "nix flake check path:. --print-build-logs",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.5-200.fc44.aarch64",
+      "evidence_references": [
+        "packaging/tests/check-pos-core-package.sh",
+        ".local/acceptance/m6/nix-native.log"
+      ],
+      "execution_timestamp": "2026-09-13T05:01:24Z",
+      "id": "M6-A-004",
+      "notes": "Builds, extracts, inspects, and lifecycle-tests the noarch RPM.",
+      "requirements": [
+        "M6-CP4-001",
+        "M6-CP4-002"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "POS Core RPM contract"
+    },
+    {
+      "blocking_issue": null,
+      "command": "nix flake check path:. --print-build-logs",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.5-200.fc44.aarch64",
+      "evidence_references": [
+        "packaging/tests/check-pos-appliance-package.sh",
+        ".local/acceptance/m6/nix-native.log"
+      ],
+      "execution_timestamp": "2026-09-13T05:01:24Z",
+      "id": "M6-A-005",
+      "notes": "Checks declarative payload and absence of install-time mutation.",
+      "requirements": [
+        "M6-CP6-001",
+        "M6-CP6-003"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Appliance RPM contract"
+    },
+    {
+      "blocking_issue": null,
+      "command": "nix build --no-link --print-build-logs --extra-platforms x86_64-linux path:.#checks.x86_64-linux.pos-terminal-flatpak path:.#checks.x86_64-linux.appliance-bundle",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.5-200.fc44.aarch64",
+      "evidence_references": [
+        "packaging/tests/check-terminal-flatpak.sh",
+        ".local/acceptance/m6/nix-x86.log"
+      ],
+      "execution_timestamp": "2026-09-13T05:02:21Z",
+      "id": "M6-A-006",
+      "notes": "Inspects the built x86_64 Flatpak metadata and payload.",
+      "requirements": [
+        "M6-CP6-002",
+        "M6-CP6-003"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Terminal Flatpak contract"
+    },
+    {
+      "blocking_issue": null,
+      "command": "nix build --no-link --print-build-logs --extra-platforms x86_64-linux path:.#checks.x86_64-linux.pos-terminal-flatpak path:.#checks.x86_64-linux.appliance-bundle",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.5-200.fc44.aarch64",
+      "evidence_references": [
+        "packaging/tests/check-appliance-bundle.sh",
+        ".local/acceptance/m6/nix-x86.log"
+      ],
+      "execution_timestamp": "2026-09-13T05:02:21Z",
+      "id": "M6-A-007",
+      "notes": "Includes a bundle-tampering rejection test.",
+      "requirements": [
+        "M6-CP6-004"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Appliance bundle contract"
+    },
+    {
+      "blocking_issue": null,
+      "command": "nix flake check path:. --print-build-logs",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.5-200.fc44.aarch64",
+      "evidence_references": [
+        "packaging/tests/bootstrap-kinoite-test.sh",
+        ".local/acceptance/m6/nix-native.log"
+      ],
+      "execution_timestamp": "2026-09-13T05:01:24Z",
+      "id": "M6-A-008",
+      "notes": "Does not mutate the host rpm-ostree deployment.",
+      "requirements": [
+        "M6-CP6-004"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Kinoite bootstrap pure-state tests"
+    },
+    {
+      "blocking_issue": null,
+      "command": "just test-racket",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.5-200.fc44.aarch64",
+      "evidence_references": [
+        "pos-backend-racket/tests/appliance-provisioning-test.rkt",
+        ".local/acceptance/m6/racket.log"
+      ],
+      "execution_timestamp": "2026-09-13T04:55:49Z",
+      "id": "M6-A-009",
+      "notes": "Uses injected operating-system boundaries and real staged SQLite state.",
+      "requirements": [
+        "M6-CP6-005"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Provisioning pure-state tests"
+    },
+    {
+      "blocking_issue": null,
+      "command": "just test-pos-integration",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.5-200.fc44.aarch64",
+      "evidence_references": [
+        "flutter/apps/pos_terminal/integration/real_pos_core_test.dart",
+        ".local/acceptance/m6/integration.log"
+      ],
+      "execution_timestamp": "2026-09-13T04:57:26Z",
+      "id": "M6-A-010",
+      "notes": "Three accepted scan/completion boundaries use SIGKILL and exact-ID recovery by default; this is process-death evidence, not power-loss evidence.",
+      "requirements": [
+        "M6-CP7-001",
+        "M6-CP1-003"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Transaction process-crash recovery"
+    },
+    {
+      "blocking_issue": null,
+      "command": "just test-racket",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.5-200.fc44.aarch64",
+      "evidence_references": [
+        "pos-backend-racket/tests/persistent-transaction-service-restart-test.rkt",
+        ".local/acceptance/m6/racket.log"
+      ],
+      "execution_timestamp": "2026-09-13T04:55:49Z",
+      "id": "M6-A-011",
+      "notes": "Covers same normalized command and incompatible command-ID reuse across restart.",
+      "requirements": [
+        "M6-CP1-003"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Durable same-ID command idempotency"
+    },
+    {
+      "blocking_issue": null,
+      "command": "just test-racket",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.5-200.fc44.aarch64",
+      "evidence_references": [
+        "pos-backend-racket/tests/persistent-transaction-service-concurrency-test.rkt",
+        ".local/acceptance/m6/racket.log"
+      ],
+      "execution_timestamp": "2026-09-13T04:55:49Z",
+      "id": "M6-A-012",
+      "notes": "Preserves BEGIN IMMEDIATE arbitration without a global mutex.",
+      "requirements": [
+        "M6-CP1-004"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Optimistic concurrency and command races"
+    },
+    {
+      "blocking_issue": null,
+      "command": "racket scripts/acceptance/m6-soak.rkt 100",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.5-200.fc44.aarch64",
+      "evidence_references": [
+        "scripts/acceptance/m6-soak.rkt",
+        ".local/acceptance/m6/soak.log"
+      ],
+      "execution_timestamp": "2026-09-13T05:00:45Z",
+      "id": "M6-A-013",
+      "notes": "Checks expected cash, movement cardinality, durable retries, and immutable reconciliation across connection reconstruction.",
+      "requirements": [
+        "M6-CP1-005",
+        "M6-CP7-003"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Cash-accountability restart invariants"
+    },
+    {
+      "blocking_issue": null,
+      "command": "just test-racket",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.5-200.fc44.aarch64",
+      "evidence_references": [
+        "pos-backend-racket/tests/m6-reliability-acceptance-test.rkt",
+        ".local/acceptance/m6/racket.log"
+      ],
+      "execution_timestamp": "2026-09-13T04:55:49Z",
+      "id": "M6-A-014",
+      "notes": "Publishes and independently validates multiple snapshots during valid WAL writes.",
+      "requirements": [
+        "M6-CP2-001",
+        "M6-CP7-004"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Validated backups under concurrent write load"
+    },
+    {
+      "blocking_issue": null,
+      "command": "just test-racket",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.5-200.fc44.aarch64",
+      "evidence_references": [
+        "pos-backend-racket/tests/sqlite-maintenance-test.rkt",
+        ".local/acceptance/m6/racket.log"
+      ],
+      "execution_timestamp": "2026-09-13T04:55:49Z",
+      "id": "M6-A-015",
+      "notes": "Deterministic failure seams prove invalid candidates never acquire the final name.",
+      "requirements": [
+        "M6-CP2-001",
+        "M6-CP2-002"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Backup interruption and publication safety"
+    },
+    {
+      "blocking_issue": null,
+      "command": "just test-racket",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.5-200.fc44.aarch64",
+      "evidence_references": [
+        "pos-backend-racket/tests/m6-reliability-acceptance-test.rkt",
+        ".local/acceptance/m6/racket.log"
+      ],
+      "execution_timestamp": "2026-09-13T04:55:49Z",
+      "id": "M6-A-016",
+      "notes": "Proves an explicitly older recovery point contains sale A, omits later sale B, and preserves displaced A+B state.",
+      "requirements": [
+        "M6-CP5-001",
+        "M6-CP5-002",
+        "M6-CP7-005"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Backup-to-restore financial round trip"
+    },
+    {
+      "blocking_issue": null,
+      "command": "just test-racket",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.5-200.fc44.aarch64",
+      "evidence_references": [
+        "pos-backend-racket/tests/support-bundle-test.rkt",
+        ".local/acceptance/m6/racket.log"
+      ],
+      "execution_timestamp": "2026-09-13T04:55:49Z",
+      "id": "M6-A-017",
+      "notes": "Searches archive members for authoritative and secret-looking sentinel data.",
+      "requirements": [
+        "M6-CP5-003"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Support-bundle privacy sentinel"
+    },
+    {
+      "blocking_issue": null,
+      "command": "just test-pos-integration",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.5-200.fc44.aarch64",
+      "evidence_references": [
+        "flutter/apps/pos_terminal/integration/real_pos_core_test.dart",
+        ".local/acceptance/m6/integration.log"
+      ],
+      "execution_timestamp": "2026-09-13T04:57:26Z",
+      "id": "M6-A-018",
+      "notes": "Uses the real request-reader boundary and verifies a subsequent valid request.",
+      "requirements": [
+        "M6-CP3-002"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Oversized HTTP body rejection and recovery"
+    },
+    {
+      "blocking_issue": null,
+      "command": "just test-pos-integration",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.5-200.fc44.aarch64",
+      "evidence_references": [
+        "flutter/apps/pos_terminal/integration/real_pos_core_test.dart",
+        ".local/acceptance/m6/integration.log"
+      ],
+      "execution_timestamp": "2026-09-13T04:57:26Z",
+      "id": "M6-A-019",
+      "notes": "The process stays live while readiness fails closed after the authoritative path disappears.",
+      "requirements": [
+        "M6-CP3-003"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Missing-database liveness/readiness distinction"
+    },
+    {
+      "blocking_issue": null,
+      "command": "just test-pos-integration",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.5-200.fc44.aarch64",
+      "evidence_references": [
+        "flutter/apps/pos_terminal/integration/real_pos_core_test.dart",
+        ".local/acceptance/m6/integration.log"
+      ],
+      "execution_timestamp": "2026-09-13T04:57:26Z",
+      "id": "M6-A-020",
+      "notes": "Real local cash-sale integration has no cloud service fixture or dependency.",
+      "requirements": [
+        "M6-CP3-004",
+        "M6-CP7-006"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Process-level offline and no-cloud operation"
+    },
+    {
+      "blocking_issue": null,
+      "command": "scripts/acceptance/m6-enospc.sh",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.5-200.fc44.aarch64",
+      "evidence_references": [
+        "scripts/acceptance/m6-enospc.sh",
+        ".local/acceptance/m6/enospc.log"
+      ],
+      "execution_timestamp": "2026-09-13T05:00:47Z",
+      "id": "M6-A-021",
+      "notes": "Uses a bounded private tmpfs in an unprivileged mount namespace; never fills the developer filesystem.",
+      "requirements": [
+        "M6-CP7-007"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Isolated disk-full failure behavior"
+    },
+    {
+      "blocking_issue": null,
+      "command": "just test-racket",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.5-200.fc44.aarch64",
+      "evidence_references": [
+        "pos-backend-racket/tests/support-bundle-test.rkt",
+        "pos-backend-racket/tests/recovery-support-cli-test.rkt",
+        ".local/acceptance/m6/racket.log"
+      ],
+      "execution_timestamp": "2026-09-13T04:55:49Z",
+      "id": "M6-A-022",
+      "notes": "Serializers use explicit allowlists and sanitized failure categories.",
+      "requirements": [
+        "M6-CP5-003",
+        "M6-CP7-008"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Sensitive diagnostics regression"
+    },
+    {
+      "blocking_issue": null,
+      "command": "scripts/acceptance/check-m6-static.sh",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.5-200.fc44.aarch64",
+      "evidence_references": [
+        "scripts/acceptance/check-m6-static.sh",
+        ".local/acceptance/m6/static.log"
+      ],
+      "execution_timestamp": "2026-09-13T05:00:50Z",
+      "id": "M6-A-023",
+      "notes": "Classifies raw SQLite calls and freezes migration, HTTP, service, Flatpak, and RPM boundaries.",
+      "requirements": [
+        "M6-CP7-009"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Whole-M6 static boundary audit"
+    },
+    {
+      "blocking_issue": null,
+      "command": "scripts/acceptance/check-nix-source-filter.sh",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.5-200.fc44.aarch64",
+      "evidence_references": [
+        "scripts/acceptance/check-nix-source-filter.sh",
+        ".local/acceptance/m6/nix-source.log"
+      ],
+      "execution_timestamp": "2026-09-13T05:00:50Z",
+      "id": "M6-A-024",
+      "notes": "Proves ignored .local and Flutter-generated state cannot alter RPM or terminal derivations.",
+      "requirements": [
+        "M6-CP6-002",
+        "M6-CP7-013"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Deployable Nix source isolation"
+    },
+    {
+      "blocking_issue": "Requires a booted Fedora Kinoite 44 x86_64 appliance.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "packaging/acceptance/qualify-kinoite.sh",
+        "docs/acceptance/m6/test-plan.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-B-001",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-010"
+      ],
+      "status": "not_run",
+      "tier": "B",
+      "title": "Genuine Fedora Kinoite 44 x86_64 host"
+    },
+    {
+      "blocking_issue": "Requires a booted Fedora Kinoite 44 x86_64 appliance.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "packaging/acceptance/qualify-kinoite.sh",
+        "docs/acceptance/m6/test-plan.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-B-002",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-010"
+      ],
+      "status": "not_run",
+      "tier": "B",
+      "title": "Bootstrap and rpm-ostree deployment"
+    },
+    {
+      "blocking_issue": "Requires a booted Fedora Kinoite 44 x86_64 appliance.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "packaging/acceptance/qualify-kinoite.sh",
+        "docs/acceptance/m6/test-plan.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-B-003",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-010"
+      ],
+      "status": "not_run",
+      "tier": "B",
+      "title": "Reboot into layered deployment"
+    },
+    {
+      "blocking_issue": "Requires a booted Fedora Kinoite 44 x86_64 appliance.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "packaging/acceptance/qualify-kinoite.sh",
+        "docs/acceptance/m6/test-plan.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-B-004",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-010"
+      ],
+      "status": "not_run",
+      "tier": "B",
+      "title": "Installed filesystem ownership and modes"
+    },
+    {
+      "blocking_issue": "Requires a booted Fedora Kinoite 44 x86_64 appliance.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "packaging/acceptance/qualify-kinoite.sh",
+        "docs/acceptance/m6/test-plan.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-B-005",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-010"
+      ],
+      "status": "not_run",
+      "tier": "B",
+      "title": "Actual systemd POS Core lifecycle"
+    },
+    {
+      "blocking_issue": "Requires a booted Fedora Kinoite 44 x86_64 appliance.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "packaging/acceptance/qualify-kinoite.sh",
+        "docs/acceptance/m6/test-plan.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-B-006",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-010"
+      ],
+      "status": "not_run",
+      "tier": "B",
+      "title": "Missing-database service guard"
+    },
+    {
+      "blocking_issue": "Requires a booted Fedora Kinoite 44 x86_64 appliance.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "packaging/acceptance/qualify-kinoite.sh",
+        "docs/acceptance/m6/test-plan.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-B-007",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-010"
+      ],
+      "status": "not_run",
+      "tier": "B",
+      "title": "SELinux-enforcing workflow"
+    },
+    {
+      "blocking_issue": "Requires a booted Fedora Kinoite 44 x86_64 appliance.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "packaging/acceptance/qualify-kinoite.sh",
+        "docs/acceptance/m6/test-plan.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-B-008",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-010"
+      ],
+      "status": "not_run",
+      "tier": "B",
+      "title": "System Flatpak installation and execution"
+    },
+    {
+      "blocking_issue": "Requires a booted Fedora Kinoite 44 x86_64 appliance.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "packaging/acceptance/qualify-kinoite.sh",
+        "docs/acceptance/m6/test-plan.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-B-009",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-010"
+      ],
+      "status": "not_run",
+      "tier": "B",
+      "title": "Kiosk and backend group separation"
+    },
+    {
+      "blocking_issue": "Requires a booted Fedora Kinoite 44 x86_64 appliance.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "packaging/acceptance/qualify-kinoite.sh",
+        "docs/acceptance/m6/test-plan.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-B-010",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-010"
+      ],
+      "status": "not_run",
+      "tier": "B",
+      "title": "Behavioral Flatpak database-access denial"
+    },
+    {
+      "blocking_issue": "Requires a booted Fedora Kinoite 44 x86_64 appliance.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "packaging/acceptance/qualify-kinoite.sh",
+        "docs/acceptance/m6/test-plan.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-B-011",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-010"
+      ],
+      "status": "not_run",
+      "tier": "B",
+      "title": "Plasma Login Manager autologin"
+    },
+    {
+      "blocking_issue": "Requires a booted Fedora Kinoite 44 x86_64 appliance.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "packaging/acceptance/qualify-kinoite.sh",
+        "docs/acceptance/m6/test-plan.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-B-012",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-010"
+      ],
+      "status": "not_run",
+      "tier": "B",
+      "title": "Terminal user-service restart"
+    },
+    {
+      "blocking_issue": "Requires a booted Fedora Kinoite 44 x86_64 appliance.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "packaging/acceptance/qualify-kinoite.sh",
+        "docs/acceptance/m6/test-plan.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-B-013",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-010"
+      ],
+      "status": "not_run",
+      "tier": "B",
+      "title": "Plasma session relogin"
+    },
+    {
+      "blocking_issue": "Requires a booted Fedora Kinoite 44 x86_64 appliance.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "packaging/acceptance/qualify-kinoite.sh",
+        "docs/acceptance/m6/test-plan.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-B-014",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-010"
+      ],
+      "status": "not_run",
+      "tier": "B",
+      "title": "Sleep and hibernate policy"
+    },
+    {
+      "blocking_issue": "Requires a booted Fedora Kinoite 44 x86_64 appliance.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "packaging/acceptance/qualify-kinoite.sh",
+        "docs/acceptance/m6/test-plan.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-B-015",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-010"
+      ],
+      "status": "not_run",
+      "tier": "B",
+      "title": "Offline no-Internet checkout"
+    },
+    {
+      "blocking_issue": "Requires a booted Fedora Kinoite 44 x86_64 appliance.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "packaging/acceptance/qualify-kinoite.sh",
+        "docs/acceptance/m6/test-plan.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-B-016",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-010"
+      ],
+      "status": "not_run",
+      "tier": "B",
+      "title": "Ten reboot cycles"
+    },
+    {
+      "blocking_issue": "Requires a booted Fedora Kinoite 44 x86_64 appliance.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "packaging/acceptance/qualify-kinoite.sh",
+        "docs/acceptance/m6/test-plan.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-B-017",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-010"
+      ],
+      "status": "not_run",
+      "tier": "B",
+      "title": "Same-release rpm-ostree update"
+    },
+    {
+      "blocking_issue": "Requires a booted Fedora Kinoite 44 x86_64 appliance.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "packaging/acceptance/qualify-kinoite.sh",
+        "docs/acceptance/m6/test-plan.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-B-018",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-010"
+      ],
+      "status": "not_run",
+      "tier": "B",
+      "title": "rpm-ostree rollback with persistent database"
+    },
+    {
+      "blocking_issue": "Requires a booted Fedora Kinoite 44 x86_64 appliance.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "packaging/acceptance/qualify-kinoite.sh",
+        "docs/acceptance/m6/test-plan.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-B-019",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-010"
+      ],
+      "status": "not_run",
+      "tier": "B",
+      "title": "Installed support collection"
+    },
+    {
+      "blocking_issue": "Requires a booted Fedora Kinoite 44 x86_64 appliance.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "packaging/acceptance/qualify-kinoite.sh",
+        "docs/acceptance/m6/test-plan.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-B-020",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-010"
+      ],
+      "status": "not_run",
+      "tier": "B",
+      "title": "Installed offline restore"
+    },
+    {
+      "blocking_issue": "Requires the selected physical reference register hardware.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "docs/acceptance/m6/reference-hardware.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-C-001",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-011"
+      ],
+      "status": "not_run",
+      "tier": "C",
+      "title": "Cashier display placement"
+    },
+    {
+      "blocking_issue": "Requires the selected physical reference register hardware.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "docs/acceptance/m6/reference-hardware.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-C-002",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-011"
+      ],
+      "status": "not_run",
+      "tier": "C",
+      "title": "Portrait secondary display"
+    },
+    {
+      "blocking_issue": "Requires the selected physical reference register hardware.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "docs/acceptance/m6/reference-hardware.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-C-003",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-011"
+      ],
+      "status": "not_run",
+      "tier": "C",
+      "title": "Extended rather than mirrored topology"
+    },
+    {
+      "blocking_issue": "Requires the selected physical reference register hardware.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "docs/acceptance/m6/reference-hardware.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-C-004",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-011"
+      ],
+      "status": "not_run",
+      "tier": "C",
+      "title": "Cashier fullscreen placement"
+    },
+    {
+      "blocking_issue": "Requires the selected physical reference register hardware.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "docs/acceptance/m6/reference-hardware.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-C-005",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-011"
+      ],
+      "status": "not_run",
+      "tier": "C",
+      "title": "Touchscreen mapping"
+    },
+    {
+      "blocking_issue": "Requires the selected physical reference register hardware.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "docs/acceptance/m6/reference-hardware.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-C-006",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-011"
+      ],
+      "status": "not_run",
+      "tier": "C",
+      "title": "Display layout reboot persistence"
+    },
+    {
+      "blocking_issue": "Requires the selected physical reference register hardware.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "docs/acceptance/m6/reference-hardware.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-C-007",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-011"
+      ],
+      "status": "not_run",
+      "tier": "C",
+      "title": "Display reconnect recovery"
+    },
+    {
+      "blocking_issue": "Requires the selected physical reference register hardware.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "docs/acceptance/m6/reference-hardware.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-C-008",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-011"
+      ],
+      "status": "not_run",
+      "tier": "C",
+      "title": "Technician virtual-console path"
+    },
+    {
+      "blocking_issue": "Requires the selected physical reference register hardware.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "docs/acceptance/m6/reference-hardware.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-C-009",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-011"
+      ],
+      "status": "not_run",
+      "tier": "C",
+      "title": "Idle without suspend or lock"
+    },
+    {
+      "blocking_issue": "Requires the selected physical reference register hardware.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "docs/acceptance/m6/reference-hardware.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-C-010",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-011"
+      ],
+      "status": "not_run",
+      "tier": "C",
+      "title": "Reference storage identification and qualification"
+    },
+    {
+      "blocking_issue": "Requires a disposable physical appliance and controlled abrupt power interruption.",
+      "command": null,
+      "environment_description": "External qualification environment not supplied",
+      "evidence_references": [
+        "docs/acceptance/m6/power-interruption.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M6-D-001",
+      "notes": "A specification/checklist exists, but this repository execution is not evidence that the external behavior passed.",
+      "requirements": [
+        "M6-CP7-012"
+      ],
+      "status": "not_run",
+      "tier": "D",
+      "title": "Twenty-five-cycle abrupt power-interruption campaign"
+    }
+  ]
+}

@@ -32,6 +32,39 @@
             "rustfmt"
           ];
         };
+
+        # Path-based flake evaluation deliberately includes untracked files so
+        # an unstaged checkpoint can be tested. Keep ignored developer state
+        # out of deployable derivation inputs without hiding new source files.
+        deployableSourceFilter = path: type:
+          let
+            name = builtins.baseNameOf (toString path);
+            generatedDirectory =
+              type == "directory"
+              && builtins.elem name [
+                ".dart_tool"
+                ".direnv"
+                ".local"
+                "build"
+                "coverage"
+                "node_modules"
+                "target"
+              ];
+            resultLink = name == "result" || pkgs.lib.hasPrefix "result-" name;
+          in
+          !(generatedDirectory || resultLink);
+
+        projectSource = pkgs.lib.cleanSourceWith {
+          name = "grocery-pos-platform-source";
+          src = ./.;
+          filter = deployableSourceFilter;
+        };
+
+        terminalSource = pkgs.lib.cleanSourceWith {
+          name = "grocery-pos-terminal-source";
+          src = ./flutter/apps/pos_terminal;
+          filter = deployableSourceFilter;
+        };
       in
       {
         devShells.default = pkgs.mkShell {
@@ -122,7 +155,7 @@
           posCoreRpm = pkgs.stdenvNoCC.mkDerivation {
             pname = "grocery-pos-core-rpm";
             version = "0.0.0-dev";
-            src = ./.;
+            src = projectSource;
 
             nativeBuildInputs = with pkgs; [
               coreutils
@@ -173,14 +206,14 @@
               export PLTUSERHOME="$TMPDIR/plt-user"
               mkdir -p "$HOME" "$PLTUSERHOME"
               bash ${./packaging/tests/check-pos-core-package.sh} \
-                ${posCoreRpm} ${./.}
+                ${posCoreRpm} ${projectSource}
               touch "$out"
             '';
 
           posTerminalApplication = pkgs.flutter.buildFlutterApplication {
             pname = "pos-terminal";
             version = "0.0.0-dev";
-            src = ./flutter/apps/pos_terminal;
+            src = terminalSource;
             pubspecLock = pkgs.lib.importJSON ./packaging/flatpak/pubspec.lock.json;
             # The pinned Dart dependency hook parses pubspec.yaml through
             # PyYAML. Add it explicitly so the source build also works when an
@@ -234,7 +267,7 @@
           posApplianceRpm = pkgs.stdenvNoCC.mkDerivation {
             pname = "grocery-pos-appliance-rpm";
             version = "0.0.0-dev";
-            src = ./.;
+            src = projectSource;
 
             nativeBuildInputs = with pkgs; [
               coreutils
@@ -269,7 +302,7 @@
           applianceBundle = pkgs.stdenvNoCC.mkDerivation {
             pname = "grocery-pos-appliance-bundle";
             version = "0.0.0-dev";
-            src = ./.;
+            src = projectSource;
 
             nativeBuildInputs = with pkgs; [
               coreutils
@@ -318,8 +351,8 @@
             }
             ''
               bash ${./packaging/tests/check-pos-appliance-package.sh} \
-                ${posApplianceRpm} ${posCoreRpm} ${./.}
-              bash ${./packaging/tests/bootstrap-kinoite-test.sh} ${./.}
+                ${posApplianceRpm} ${posCoreRpm} ${projectSource}
+              bash ${./packaging/tests/bootstrap-kinoite-test.sh} ${projectSource}
               touch "$out"
             '';
 
@@ -345,7 +378,7 @@
               mkdir -p "$HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR"
               chmod 0700 "$XDG_RUNTIME_DIR"
               bash ${./packaging/tests/check-terminal-flatpak.sh} \
-                ${posTerminalFlatpak} ${./.}
+                ${posTerminalFlatpak} ${projectSource}
               touch "$out"
             '';
 
@@ -363,7 +396,7 @@
             }
             ''
               bash ${./packaging/tests/check-appliance-bundle.sh} \
-                ${applianceBundle} ${./.}
+                ${applianceBundle} ${projectSource}
               touch "$out"
             '';
         in

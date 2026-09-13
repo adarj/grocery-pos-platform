@@ -4,10 +4,13 @@
 
 The internal `grocery-pos-core` noarch RPM packages the Racket POS Core source,
 Fedora service metadata, machine configuration, and technician launchers. It is
-the first deployable service boundary for the future Fedora Kinoite register.
+the deployable backend service boundary for the Fedora Kinoite register.
 Checkpoint 6 composes it into the Fedora Kinoite kiosk lifecycle, but it remains
 separately packaged and is not a public release or final production
 qualification.
+
+The evidence tiers and currently pending booted-system checks are recorded in
+the [Milestone 6 acceptance record](../acceptance/m6/README.md).
 
 Fedora supplies `/usr/bin/racket` at runtime. Nix reproducibly builds and tests
 the RPM, but the installed service does not require Nix, `nix-daemon`, a Nix

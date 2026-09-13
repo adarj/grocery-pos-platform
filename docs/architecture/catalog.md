@@ -212,14 +212,15 @@ inserted before assignments, and activation verifies that no orphan or unmapped
 item exists. The lookup path independently fails closed on corrupt merchandise
 or tax data.
 
-Ordinary Racket SQLite connections currently report
-`PRAGMA foreign_keys = 0`, and runtime composition does not yet enable that
-connection-local setting consistently. Migration 3 therefore does not declare
-a foreign key that would appear enforced while actually being disabled.
+The production connection boundary now requires `PRAGMA foreign_keys = ON` on
+every authoritative connection. Migration 3 retains its historical schema
+meaning; catalog activation still performs complete application validation
+rather than relying on a rewritten historical migration.
 
-No arbitrary row-at-a-time production catalog write API is exposed. Enabling
-foreign keys consistently on every connection and adding a corresponding
-enforcing migration remains separate database hardening work.
+No arbitrary row-at-a-time production catalog write API is exposed. Existing
+catalog relationships are checked during atomic activation and fail closed on
+lookup; later schema changes, if justified, require a new forward migration
+rather than rewriting migrations v1-v6.
 
 ## Runtime Composition
 
