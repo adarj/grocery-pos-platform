@@ -14,6 +14,9 @@ package_version='0.0.0'
 work_root="$(mktemp -d)"
 trap 'rm -rf -- "$work_root"' EXIT
 
+# shellcheck source=rpm-build-common.sh
+source "$repository_root/packaging/fedora/rpm-build-common.sh"
+
 source_tree="$work_root/$package_name-$package_version"
 rpm_topdir="$work_root/rpmbuild"
 mkdir -p "$source_tree/packaging/fedora" \
@@ -58,15 +61,8 @@ tar --sort=name \
   -cf "$rpm_topdir/SOURCES/$package_name-$package_version.tar.gz" \
   -C "$work_root" "$package_name-$package_version"
 
-SOURCE_DATE_EPOCH=1 rpmbuild -bb \
-  --define "_topdir $rpm_topdir" \
-  --define "_sourcedir $rpm_topdir/SOURCES" \
-  --define "_rpmdir $rpm_topdir/RPMS" \
+run_hermetic_rpmbuild "$rpm_topdir" \
   --define '_sysusersdir /usr/lib/sysusers.d' \
-  --define '_buildhost grocery-pos-build' \
-  --define '_build_id_links none' \
-  --define 'use_source_date_epoch_as_buildtime 1' \
-  --define 'build_mtime_policy clamp_to_source_date_epoch' \
   "$repository_root/packaging/fedora/grocery-pos-core.spec"
 
 mapfile -t built_rpms < <(find "$rpm_topdir/RPMS" -type f -name '*.rpm' -print)

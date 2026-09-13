@@ -210,6 +210,21 @@
               touch "$out"
             '';
 
+          rpmBuildIsolationCheck = pkgs.runCommand
+            "grocery-pos-rpm-build-isolation-check"
+            {
+              nativeBuildInputs = with pkgs; [
+                bash
+                coreutils
+                gnugrep
+              ];
+            }
+            ''
+              bash ${./packaging/tests/rpm-build-isolation-test.sh} \
+                ${projectSource}
+              touch "$out"
+            '';
+
           posTerminalApplication = pkgs.flutter.buildFlutterApplication {
             pname = "pos-terminal";
             version = "0.0.0-dev";
@@ -405,10 +420,12 @@
           packages.pos-appliance-rpm = posApplianceRpm;
           checks.pos-core-package = posCorePackageCheck;
           checks.pos-appliance-package = posAppliancePackageCheck;
+          checks.rpm-build-isolation = rpmBuildIsolationCheck;
         }
         // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
           packages.pos-terminal-flatpak = posTerminalFlatpak;
           packages.appliance-bundle = applianceBundle;
+          checks.rpm-build-isolation = rpmBuildIsolationCheck;
           checks.pos-terminal-flatpak = posTerminalFlatpakCheck;
           checks.appliance-bundle = applianceBundleCheck;
         }));
