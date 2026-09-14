@@ -37,6 +37,8 @@ repository_root="$3"
   fail 'appliance package license metadata changed'
 
 requires="$(rpm -qp --requires "$appliance_rpm")"
+grep -Eq '^grocery-pos-core >= 0\.0\.0-0\.4\.dev$' <<<"$requires" ||
+  fail 'appliance package does not require the M7-capable POS Core release'
 for dependency in grocery-pos-core flatpak ostree plasma-login-manager rpm-ostree shadow-utils systemd; do
   grep -Eq "^${dependency}([[:space:]]|$)" <<<"$requires" ||
     fail "appliance package does not require $dependency"

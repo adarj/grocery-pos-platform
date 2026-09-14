@@ -62,10 +62,13 @@ It installs the Flatpak system-wide, creates locked non-admin
 `grocery-pos-kiosk`, and prepares `/var/lib/grocery-pos` as mode `0750` owned by
 `grocery-pos:grocery-pos`. It builds the initial database at an unpublished
 same-filesystem path through canonical POS migration/catalog/register code,
-performs full current-schema/SQLite/foreign-key validation, and publishes a
+reaches schema v7, performs full current-schema/SQLite/foreign-key validation,
+and publishes a
 standalone candidate as `pos.db` with no-overwrite atomic rename. The final DB
 is `grocery-pos:grocery-pos`, mode `0640`. Provisioning never overwrites an
-existing canonical DB.
+existing canonical DB. Each configured cashier gains a same-ID `cashier`
+operator stub with no credential; enrollment is not a readiness prerequisite
+in M7 Checkpoint 1.
 
 Only then does it enable/start `grocery-pos-core.service` and wait up to 30
 seconds for `/ready`. PLM autologin, the kiosk user service, lock/power policy,
@@ -98,4 +101,3 @@ Plasma Wayland kiosk login, fullscreen terminal startup, and persistence across
 a terminal/session restart. Reference-hardware display placement, touch
 mapping, SELinux denials, AC-loss firmware behavior, and endurance remain
 Checkpoint 7 qualification.
-

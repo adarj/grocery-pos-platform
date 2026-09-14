@@ -14,6 +14,17 @@
          "../pos/support/support-bundle.rkt")
 
 (define privacy-sentinel "SUPPORT_BUNDLE_MUST_NOT_CONTAIN_THIS_SENTINEL")
+(define operator-id-sentinel "OPERATOR_ID_MUST_NOT_BE_EXPORTED")
+(define operator-name-sentinel "OPERATOR_NAME_MUST_NOT_BE_EXPORTED")
+(define pin-sentinel "80421637")
+(define credential-sentinel
+  "$argon2id$v=19$m=19456,t=2,p=1$CREDENTIAL_HASH_MUST_NOT_BE_EXPORTED$hash")
+(define privacy-sentinels
+  (list privacy-sentinel
+        operator-id-sentinel
+        operator-name-sentinel
+        pin-sentinel
+        credential-sentinel))
 
 (define (call-with-temporary-directory procedure)
   (define directory
@@ -36,7 +47,23 @@
         connection
         privacy-sentinel
         0
-        (list (transaction-started privacy-sentinel)))))
+        (list (transaction-started privacy-sentinel))))
+      (db:query-exec
+       connection
+       "INSERT INTO operators (operator_id, display_name, active) VALUES (?, ?, 1)"
+       operator-id-sentinel operator-name-sentinel)
+      (db:query-exec
+       connection
+       "INSERT INTO operator_roles (operator_id, role) VALUES (?, 'manager')"
+       operator-id-sentinel)
+      (db:query-exec
+       connection
+       #<<SQL
+INSERT INTO operator_pin_credentials
+  (operator_id, password_hash, credential_revision)
+VALUES (?, ?, 1)
+SQL
+       operator-id-sentinel credential-sentinel))
     (lambda () (db:disconnect connection))))
 
 (define (fake-platform-provider)
@@ -77,7 +104,7 @@
                   'ok #t
                   'service "grocery-pos-core"
                   'status "ready"
-                  'database_schema_version 6
+                  'database_schema_version 7
                   'exception privacy-sentinel)))
 
 (define (fake-storage-provider _state-path)
@@ -137,9 +164,10 @@
        (for ([member (in-list members)])
          (define member-path (build-path extraction-path member))
          (check-eq? (file-or-directory-type member-path #t) 'file)
-         (check-false
-          (regexp-match? (regexp (regexp-quote privacy-sentinel))
-                         (file->string member-path))))
+         (for ([sentinel (in-list privacy-sentinels)])
+           (check-false
+            (regexp-match? (regexp (regexp-quote sentinel))
+                           (file->string member-path)))))
 
        (define manifest
          (call-with-input-file
@@ -153,7 +181,7 @@
          (call-with-input-file
           (build-path extraction-path "database.json") read-json))
        (check-equal? (hash-ref database 'migration_status) "current")
-       (check-equal? (hash-ref database 'current_supported_migration_version) 6)
+       (check-equal? (hash-ref database 'current_supported_migration_version) 7)
        (check-false (hash-has-key? database 'path))
        (check-false (hash-has-key? database 'diagnostic))
 
@@ -189,9 +217,10 @@
         #:storage-provider (lambda (_path) (error 'test privacy-sentinel)))
        (extract-bundle! output-path extraction-path)
        (for ([member (in-list (directory-list extraction-path #:build? #t))])
-         (check-false
-          (regexp-match? (regexp (regexp-quote privacy-sentinel))
-                         (file->string member))))
+         (for ([sentinel (in-list privacy-sentinels)])
+           (check-false
+            (regexp-match? (regexp (regexp-quote sentinel))
+                           (file->string member)))))
        (define database
          (call-with-input-file
           (build-path extraction-path "database.json") read-json))

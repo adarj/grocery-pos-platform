@@ -88,6 +88,14 @@ directory atomically. It is rejected while any shift is open, leaves
 historical shifts untouched, and rolls back completely on failure. Flutter has
 no configuration-write API.
 
+Migration 7 relates this operational directory to, but does not merge it with,
+the security identity domain. Each configured cashier must have a same-ID
+operator. Activation creates a cashier-role, no-credential operator stub only
+for a genuinely new ID. An existing operator's display name, active state,
+role, credential, and credential revision are preserved. Operators and their
+credentials are not deleted when a cashier disappears from a later snapshot;
+re-adding the exact ID reconnects to the same principal.
+
 Operator commands are explicit about the file and target database:
 
 ```text
@@ -183,12 +191,14 @@ closing count is not prefilled with expected cash, and all reconciliation
 values are rendered from the backend. Backend enforcement remains authoritative
 if Flutter state is stale.
 
-Cashier selection is attribution only. There is no PIN, password, role,
-manager approval, lockout, or authentication claim.
+Cashier selection remains attribution only. Operator roles and PIN credentials
+now exist in SQLite, but this checkpoint adds no login/session HTTP boundary,
+manager approval, lockout, or authorization claim to the existing cashier
+selection workflow.
 
 ## Deliberately deferred
 
-This model does not define employee authentication, store/address identity,
-roles, cash drops, paid-outs, refunds, manager variance approval, drawer
-hardware, breaks, payroll/timeclock behavior, receipt numbering, broad
-transaction search, or cloud employee synchronization.
+This model does not define login sessions, role permission evaluation,
+store/address identity, cash drops, paid-outs, refunds, manager variance
+approval, drawer hardware, breaks, payroll/timeclock behavior, receipt
+numbering, broad transaction search, or cloud employee synchronization.

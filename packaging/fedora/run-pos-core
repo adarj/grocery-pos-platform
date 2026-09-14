@@ -4,4 +4,7 @@
 SQLITE_DB_PATH=/var/lib/grocery-pos/pos.db
 export SQLITE_DB_PATH
 
+PLTCOLLECTS=/usr/libexec/grocery-pos-core/vendor/racket/collects:
+export PLTCOLLECTS
+
 exec /usr/bin/racket /usr/libexec/grocery-pos-core/main.rkt "$@"

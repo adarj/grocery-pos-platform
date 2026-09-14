@@ -18,6 +18,7 @@ fi
 extract_root="$1"
 repository_root="$2"
 payload_root="$extract_root/usr/libexec/grocery-pos-core"
+export PLTCOLLECTS="$payload_root/vendor/racket/collects:"
 work_root="$(mktemp -d)"
 database_path="$work_root/pos.db"
 backup_path="$work_root/pos-backup.db"
@@ -51,6 +52,16 @@ run_packaged_script register-configuration.rkt activate \
   "$repository_root/fixtures/development/register-configuration-v1.json" \
   "$database_path" >/dev/null
 
+PIN_MODULE="$payload_root/pos/security/operator-pin.rkt" racket -e \
+  '(define module-path (string->path (getenv "PIN_MODULE")))
+   (define hash-pin (dynamic-require module-path (quote hash-operator-pin)))
+   (define verify-pin (dynamic-require module-path (quote verify-operator-pin)))
+   (define verifier (hash-pin "80421637"))
+   (unless (and (string-prefix? verifier "$argon2id$")
+                (verify-pin "80421637" verifier)
+                (not (verify-pin "80421638" verifier)))
+     (error (quote packaged-auth-smoke) "Argon2id credential round trip failed"))'
+
 allocate_port() {
   racket -e \
     '(begin (require racket/tcp) (define listener (tcp-listen 0 4 #t "127.0.0.1")) (define-values (_address port _remote-address _remote-port) (tcp-addresses listener #t)) (tcp-close listener) (display port))'
@@ -79,7 +90,7 @@ start_core() {
       fail "packaged POS Core exited before readiness"
     fi
     if readiness="$(curl --silent --show-error --max-time 1 "$base_url/ready" 2>/dev/null)" &&
-      jq -e '.ok == true and .status == "ready" and .database_schema_version == 6' \
+      jq -e '.ok == true and .status == "ready" and .database_schema_version == 7' \
         <<<"$readiness" >/dev/null; then
       return
     fi
@@ -172,7 +183,7 @@ run_packaged_script catalog.rkt activate \
   "$restore_target_path" >/dev/null
 restore_result="$(run_packaged_script database-recovery.rkt restore-offline \
   "$backup_path" "$restore_target_path")"
-jq -e '.ok == true and .operation == "restore_offline" and .restored_schema_version == 6' \
+jq -e '.ok == true and .operation == "restore_offline" and .restored_schema_version == 7' \
   <<<"$restore_result" >/dev/null ||
   fail "packaged offline restore failed"
 recovery_directory="$(jq -r '.recovery_evidence_directory' <<<"$restore_result")"

@@ -12,9 +12,12 @@ qualification.
 The evidence tiers and currently pending booted-system checks are recorded in
 the [Milestone 6 acceptance record](../acceptance/m6/README.md).
 
-Fedora supplies `/usr/bin/racket` at runtime. Nix reproducibly builds and tests
-the RPM, but the installed service does not require Nix, `nix-daemon`, a Nix
-store, Distrobox, `direnv`, a repository checkout, or a developer home.
+Fedora supplies `/usr/bin/racket` and `libargon2` at runtime. The RPM carries a
+fixed, source-pinned `crypto-lib` collection graph because Fedora 44's
+`racket-pkgs` does not contain that collection. Nix reproducibly builds and
+tests the RPM, but the installed service does not require Nix, `nix-daemon`, a
+Nix store, Distrobox, `direnv`, a repository checkout, a developer home, or a
+runtime `raco pkg install`.
 
 ## Installed filesystem contract
 
@@ -131,6 +134,13 @@ grocery-pos-register-config validate SNAPSHOT
 grocery-pos-register-config activate SNAPSHOT /var/lib/grocery-pos/pos.db
 grocery-pos-recovery restore SELECTED-BACKUP.sqlite
 grocery-pos-support collect OUTPUT.tar.gz
+grocery-pos-auth status
+grocery-pos-auth operator list
+grocery-pos-auth operator create OPERATOR_ID DISPLAY_NAME ROLE
+grocery-pos-auth operator set-role OPERATOR_ID ROLE
+grocery-pos-auth operator enable OPERATOR_ID
+grocery-pos-auth operator disable OPERATOR_ID
+grocery-pos-auth operator enroll-pin OPERATOR_ID
 ```
 
 These launchers contain no maintenance or business logic. State-changing
@@ -138,9 +148,12 @@ operations require a deliberate technician procedure and correct filesystem
 authority. Recovery is explicitly offline and preserves displaced DB/WAL/SHM/
 journal evidence; support export contains allowlisted metadata rather than POS
 data. See the [restore runbook](database-restore.md) and
-[support diagnostics runbook](support-diagnostics.md). Technician application
-authentication/authorization, scheduled backup, retention, encryption, and
-replication remain unimplemented.
+[support diagnostics runbook](support-diagnostics.md). The auth command is a
+root-only local bootstrap tool fixed to the canonical database; PIN enrollment
+uses a no-echo repeated prompt and no PIN argv. See
+[Operator Identity and PIN Credentials](../security/operator-identity-and-pin-credentials.md).
+HTTP authentication/authorization, scheduled backup, retention, encryption,
+and replication remain unimplemented.
 
 ## Provisioning prerequisite
 

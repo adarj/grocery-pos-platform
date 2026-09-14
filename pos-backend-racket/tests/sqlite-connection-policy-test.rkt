@@ -15,7 +15,8 @@
         #(3 "create_catalog")
         #(4 "create_tax_categories")
         #(5 "create_register_operations")
-        #(6 "create_shift_cash_accountability")))
+        #(6 "create_shift_cash_accountability")
+        #(7 "create_operator_identity_credentials")))
 
 (define (call-with-temporary-database procedure)
   (define directory

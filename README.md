@@ -148,6 +148,11 @@ Verified capabilities currently include:
   historical identity snapshotting;
 * migration v6 append-only opening/completed-sale cash movements and immutable
   shift close reconciliation with exact signed over/short;
+* migration v7 local operator principals, fixed cashier/supervisor/manager
+  roles, same-ID cashier compatibility, and optional Argon2id PIN credentials
+  with no default identities or credentials;
+* root-only packaged operator bootstrap administration with no-echo PIN entry,
+  a fixed canonical database target, and no HTTP authentication cutover yet;
 * idempotent persistent transaction application service with deterministic
   two-connection concurrency and file-backed restart/retry coverage;
 * explicit SQLite WAL/FULL connection policy with foreign-key enforcement,

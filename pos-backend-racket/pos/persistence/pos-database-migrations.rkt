@@ -17,6 +17,7 @@
 (define migration-4-name "create_tax_categories")
 (define migration-5-name "create_register_operations")
 (define migration-6-name "create_shift_cash_accountability")
+(define migration-7-name "create_operator_identity_credentials")
 (define stream-sequence-index-name
   "transaction_events_stream_sequence_unique")
 
@@ -420,6 +421,74 @@ WHERE movement_type = 'cash_sale'
 SQL
   )
 
+(define create-operators-table-sql
+  #<<SQL
+CREATE TABLE operators (
+  operator_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(operator_id) = 'text'
+      AND length(operator_id) > 0
+    ),
+  display_name TEXT NOT NULL
+    CHECK (
+      typeof(display_name) = 'text'
+      AND length(display_name) > 0
+    ),
+  active INTEGER NOT NULL
+    CHECK (
+      typeof(active) = 'integer'
+      AND active IN (0, 1)
+    )
+)
+SQL
+  )
+
+(define create-operator-roles-table-sql
+  #<<SQL
+CREATE TABLE operator_roles (
+  operator_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(operator_id) = 'text'
+      AND length(operator_id) > 0
+    ),
+  role TEXT NOT NULL
+    CHECK (
+      typeof(role) = 'text'
+      AND role IN ('cashier', 'supervisor', 'manager')
+    ),
+  FOREIGN KEY (operator_id)
+    REFERENCES operators(operator_id)
+    ON DELETE CASCADE
+)
+SQL
+  )
+
+(define create-operator-pin-credentials-table-sql
+  #<<SQL
+CREATE TABLE operator_pin_credentials (
+  operator_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(operator_id) = 'text'
+      AND length(operator_id) > 0
+    ),
+  password_hash TEXT NOT NULL
+    CHECK (
+      typeof(password_hash) = 'text'
+      AND length(password_hash) > 0
+      AND substr(password_hash, 1, 10) = '$argon2id$'
+    ),
+  credential_revision INTEGER NOT NULL
+    CHECK (
+      typeof(credential_revision) = 'integer'
+      AND credential_revision >= 1
+    ),
+  FOREIGN KEY (operator_id)
+    REFERENCES operators(operator_id)
+    ON DELETE CASCADE
+)
+SQL
+  )
+
 (define (schema-object-exists? connection type name)
   (= 1
      (db:query-value
@@ -569,6 +638,20 @@ SQL
         (vector "expected_cash_minor_units" "INTEGER" 1 0)
         (vector "counted_cash_minor_units" "INTEGER" 1 0)
         (vector "over_short_minor_units" "INTEGER" 1 0)))
+
+(define expected-operator-columns
+  (list (vector "operator_id" "TEXT" 1 1)
+        (vector "display_name" "TEXT" 1 0)
+        (vector "active" "INTEGER" 1 0)))
+
+(define expected-operator-role-columns
+  (list (vector "operator_id" "TEXT" 1 1)
+        (vector "role" "TEXT" 1 0)))
+
+(define expected-operator-pin-credential-columns
+  (list (vector "operator_id" "TEXT" 1 1)
+        (vector "password_hash" "TEXT" 1 0)
+        (vector "credential_revision" "INTEGER" 1 0)))
 
 (define (validate-owned-table-schema connection
                                      migration-version
@@ -860,6 +943,83 @@ SQL
    create-cash-sale-transaction-index-sql)
   (validate-shift-cash-integrity connection))
 
+(define (validate-operator-relational-integrity connection)
+  (define cashier-without-operator-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM cashiers AS cashier
+LEFT JOIN operators AS operator
+  ON operator.operator_id = cashier.cashier_id
+WHERE operator.operator_id IS NULL
+SQL
+     ))
+  (define operator-without-one-role-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM (
+  SELECT operator.operator_id
+  FROM operators AS operator
+  LEFT JOIN operator_roles AS assignment
+    ON assignment.operator_id = operator.operator_id
+  GROUP BY operator.operator_id
+  HAVING COUNT(assignment.operator_id) <> 1
+)
+SQL
+     ))
+  (define orphan-role-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM operator_roles AS assignment
+LEFT JOIN operators AS operator
+  ON operator.operator_id = assignment.operator_id
+WHERE operator.operator_id IS NULL
+SQL
+     ))
+  (define orphan-credential-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM operator_pin_credentials AS credential
+LEFT JOIN operators AS operator
+  ON operator.operator_id = credential.operator_id
+WHERE operator.operator_id IS NULL
+SQL
+     ))
+  (unless (zero? cashier-without-operator-count)
+    (error 'migrate-pos-database!
+           "current cashiers require same-ID operator principals"))
+  (unless (zero? operator-without-one-role-count)
+    (error 'migrate-pos-database!
+           "every operator requires exactly one role"))
+  (unless (zero? orphan-role-count)
+    (error 'migrate-pos-database!
+           "operator roles reference missing operators"))
+  (unless (zero? orphan-credential-count)
+    (error 'migrate-pos-database!
+           "operator credentials reference missing operators")))
+
+(define (validate-operator-identity-schema connection)
+  (validate-owned-table-schema
+   connection 7 "operators"
+   expected-operator-columns
+   create-operators-table-sql)
+  (validate-owned-table-schema
+   connection 7 "operator_roles"
+   expected-operator-role-columns
+   create-operator-roles-table-sql)
+  (validate-owned-table-schema
+   connection 7 "operator_pin_credentials"
+   expected-operator-pin-credential-columns
+   create-operator-pin-credentials-table-sql)
+  (validate-operator-relational-integrity connection))
+
 (define (apply-migration-1! connection)
   (db:query-exec connection create-events-table-sql)
   (db:query-exec connection create-stream-sequence-index-sql))
@@ -912,6 +1072,27 @@ SQL
   (db:query-exec connection create-shift-opening-index-sql)
   (db:query-exec connection create-cash-sale-transaction-index-sql))
 
+(define (apply-migration-7! connection)
+  (db:query-exec connection create-operators-table-sql)
+  (db:query-exec connection create-operator-roles-table-sql)
+  (db:query-exec connection create-operator-pin-credentials-table-sql)
+  (db:query-exec
+   connection
+   #<<SQL
+INSERT INTO operators (operator_id, display_name, active)
+SELECT cashier_id, display_name, active
+FROM cashiers
+SQL
+   )
+  (db:query-exec
+   connection
+   #<<SQL
+INSERT INTO operator_roles (operator_id, role)
+SELECT cashier_id, 'cashier'
+FROM cashiers
+SQL
+   ))
+
 (define migrations
   (list
    (pos-database-migration 1
@@ -937,7 +1118,11 @@ SQL
    (pos-database-migration 6
                            migration-6-name
                            apply-migration-6!
-                           validate-shift-cash-accountability-schema)))
+                           validate-shift-cash-accountability-schema)
+   (pos-database-migration 7
+                           migration-7-name
+                           apply-migration-7!
+                           validate-operator-identity-schema)))
 
 (define current-pos-database-schema-version (length migrations))
 

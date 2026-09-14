@@ -65,6 +65,71 @@
           src = ./flutter/apps/pos_terminal;
           filter = deployableSourceFilter;
         };
+
+        # crypto-lib is not part of the Racket 9.1 distribution shipped by
+        # either pinned nixpkgs or Fedora 44. Pin its complete Racket-library
+        # dependency graph here; native Argon2 remains supplied by libargon2.
+        cryptoSource = pkgs.fetchFromGitHub {
+          owner = "rmculpepper";
+          repo = "crypto";
+          rev = "713eaaf45a5e6c55bd3e97a32b2a90f61ef13c4f";
+          hash = "sha256-6Y4WZ494vNxY3/WOq7Dmi7SpfYqMsqVvG8SyqXUTU7g=";
+        };
+        asn1Source = pkgs.fetchFromGitHub {
+          owner = "rmculpepper";
+          repo = "asn1";
+          rev = "3cd32b61a68b40ec03bed98cd0c4d4d4f72cacf2";
+          hash = "sha256-aNYtnW/usIbqebWXIsWZKylfo83oXUGGJCbLhoaXoJ8=";
+        };
+        hashViewSource = pkgs.fetchFromGitHub {
+          owner = "rmculpepper";
+          repo = "racket-hash-view";
+          rev = "7a9b31d1715c40c205a065d666fcc74d840a8a5e";
+          hash = "sha256-pKp/sVd/xNOIbZsRwg1yRi5Xr+7V5DJqr3QxsM6MLhI=";
+        };
+        base64Source = pkgs.fetchFromGitHub {
+          owner = "rmculpepper";
+          repo = "racket-base64";
+          rev = "f783f42743b158173c5775b90b5cadcc41f700b3";
+          hash = "sha256-SKoi5GD3bHL0ktxEtC7wpzu6epjIEnc7zMtJ2rGe5zU=";
+        };
+        binaryioSource = pkgs.fetchFromGitHub {
+          owner = "rmculpepper";
+          repo = "binaryio";
+          rev = "e949401e3acd7aa51ffe044cb75288128ce64c61";
+          hash = "sha256-wxEqfbAcnZNhB2YXiMTadpilHWcaGBfXtDjYYQ/VtbQ=";
+        };
+        gmpSource = pkgs.fetchFromGitHub {
+          owner = "rmculpepper";
+          repo = "racket-gmp";
+          rev = "768c33615a1c2414ccaf1a1e4ea1064bd5dd46af";
+          hash = "sha256-Z09YdkD6nzwF51CjF7405cf4ZGR/OGAnYJrVvbXidEU=";
+        };
+        scrambleSource = pkgs.fetchFromGitHub {
+          owner = "rmculpepper";
+          repo = "racket-scramble";
+          rev = "a2d1dfd8d249c63059bed2958e71dbb6e9098319";
+          hash = "sha256-GbniMHYktaaXLbc/CHNRxQvzisc2u5NAsUH2E4ZLYeY=";
+        };
+
+        racketCryptoCollections = pkgs.stdenvNoCC.mkDerivation {
+          pname = "grocery-pos-racket-crypto-collections";
+          version = "2.0-713eaaf";
+          dontUnpack = true;
+          installPhase = ''
+            runHook preInstall
+            collections="$out/share/racket/collects"
+            mkdir -p "$collections"
+            cp -a ${cryptoSource}/crypto-lib "$collections/crypto"
+            cp -a ${asn1Source}/asn1-lib "$collections/asn1"
+            cp -a ${hashViewSource}/hash-view-lib "$collections/hash-view"
+            cp -a ${base64Source}/base64-lib "$collections/base64"
+            cp -a ${binaryioSource}/binaryio-lib "$collections/binaryio"
+            cp -a ${gmpSource}/gmp-lib "$collections/gmp"
+            cp -a ${scrambleSource}/scramble-lib "$collections/scramble"
+            runHook postInstall
+          '';
+        };
       in
       {
         devShells.default = pkgs.mkShell {
@@ -96,6 +161,7 @@
 
             # Racket backend
             racket
+            libargon2
 
             # Rust edge agents
             rustToolchain
@@ -137,6 +203,8 @@
             export SQLITE_DB_PATH="$PROJECT_ROOT/.local/sqlite/pos-dev.db"
             export RACKET_API_HOST="127.0.0.1"
             export RACKET_API_PORT="7340"
+            export PLTCOLLECTS="${racketCryptoCollections}/share/racket/collects:''${PLTCOLLECTS:-}"
+            export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.libargon2 ]}:''${LD_LIBRARY_PATH:-}"
 
             mkdir -p \
               "$PROJECT_ROOT/.local/sqlite" \
@@ -169,7 +237,9 @@
 
             buildPhase = ''
               runHook preBuild
-              bash packaging/fedora/build-rpm.sh "$PWD" "$PWD/rpm-output"
+              bash packaging/fedora/build-rpm.sh \
+                "$PWD" "$PWD/rpm-output" \
+                ${racketCryptoCollections}/share/racket/collects
               runHook postBuild
             '';
 
@@ -197,6 +267,7 @@
                 gawk
                 gnugrep
                 jq
+                libargon2
                 racket
                 rpm
               ];
@@ -204,6 +275,8 @@
             ''
               export HOME="$TMPDIR/home"
               export PLTUSERHOME="$TMPDIR/plt-user"
+              export PLTCOLLECTS="${racketCryptoCollections}/share/racket/collects:"
+              export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.libargon2 ]}"
               mkdir -p "$HOME" "$PLTUSERHOME"
               bash ${./packaging/tests/check-pos-core-package.sh} \
                 ${posCoreRpm} ${projectSource}
@@ -222,6 +295,27 @@
             ''
               bash ${./packaging/tests/rpm-build-isolation-test.sh} \
                 ${projectSource}
+              touch "$out"
+            '';
+
+          racketCryptoCheck = pkgs.runCommand
+            "grocery-pos-racket-crypto-check"
+            {
+              nativeBuildInputs = with pkgs; [ libargon2 racket ];
+            }
+            ''
+              export PLTCOLLECTS="${racketCryptoCollections}/share/racket/collects:"
+              export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.libargon2 ]}"
+              racket -e \
+                '(require crypto crypto/argon2)
+                 (define implementation (get-kdf (quote argon2id) argon2-factory))
+                 (unless implementation (error (quote crypto-check) "Argon2id unavailable"))
+                 (define verifier
+                   (pwhash implementation #"80421637"
+                           (quote ((m 19456) (t 2) (p 1)))))
+                 (unless (and (string-prefix? verifier "$argon2id$")
+                              (pwhash-verify implementation #"80421637" verifier))
+                   (error (quote crypto-check) "Argon2id round trip failed"))'
               touch "$out"
             '';
 
@@ -416,17 +510,22 @@
             '';
         in
         {
-          packages.pos-core-rpm = posCoreRpm;
-          packages.pos-appliance-rpm = posApplianceRpm;
-          checks.pos-core-package = posCorePackageCheck;
-          checks.pos-appliance-package = posAppliancePackageCheck;
-          checks.rpm-build-isolation = rpmBuildIsolationCheck;
-        }
-        // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
-          packages.pos-terminal-flatpak = posTerminalFlatpak;
-          packages.appliance-bundle = applianceBundle;
-          checks.rpm-build-isolation = rpmBuildIsolationCheck;
-          checks.pos-terminal-flatpak = posTerminalFlatpakCheck;
-          checks.appliance-bundle = applianceBundleCheck;
+          packages = {
+            pos-core-rpm = posCoreRpm;
+            pos-appliance-rpm = posApplianceRpm;
+          } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+            pos-terminal-flatpak = posTerminalFlatpak;
+            appliance-bundle = applianceBundle;
+          };
+
+          checks = {
+            pos-core-package = posCorePackageCheck;
+            pos-appliance-package = posAppliancePackageCheck;
+            racket-crypto = racketCryptoCheck;
+            rpm-build-isolation = rpmBuildIsolationCheck;
+          } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+            pos-terminal-flatpak = posTerminalFlatpakCheck;
+            appliance-bundle = applianceBundleCheck;
+          };
         }));
 }

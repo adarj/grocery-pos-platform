@@ -39,7 +39,7 @@
         (define result
           (build-initial-pos-database!
            valid-catalog-path valid-register-path target))
-        (check-equal? (initial-pos-database-schema-version result) 6)
+        (check-equal? (initial-pos-database-schema-version result) 7)
         (check-true (file-exists? target))
         (check-true
          (sqlite-backup-validation-valid?
@@ -62,7 +62,23 @@
             (check-equal?
              (db:query-value connection
                              "SELECT register_id FROM register_configuration")
-             "register-development-01"))
+             "register-development-01")
+            (check-equal?
+             (db:query-row
+              connection
+              #<<SQL
+SELECT operator.operator_id,
+       assignment.role,
+       credential.operator_id
+FROM operators AS operator
+JOIN operator_roles AS assignment
+  ON assignment.operator_id = operator.operator_id
+LEFT JOIN operator_pin_credentials AS credential
+  ON credential.operator_id = operator.operator_id
+WHERE operator.operator_id = 'cashier-development-01'
+SQL
+              )
+             (vector "cashier-development-01" "cashier" db:sql-null)))
           (lambda () (db:disconnect connection))))
       (lambda () (delete-directory/files directory))))
 

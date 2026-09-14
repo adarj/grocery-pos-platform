@@ -231,7 +231,7 @@ void main() {
 
       final initiallyReady = await client.fetchReadiness();
       expect(initiallyReady.ready, isTrue);
-      expect(initiallyReady.databaseSchemaVersion, 6);
+      expect(initiallyReady.databaseSchemaVersion, 7);
 
       await File(
         fixture.databasePath,

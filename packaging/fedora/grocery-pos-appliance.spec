@@ -7,7 +7,7 @@ URL:            https://github.com/adarj/grocery-pos-platform
 Source0:        %{name}-%{version}.tar.gz
 
 BuildArch:      noarch
-Requires:       grocery-pos-core >= 0.0.0-0.3.dev
+Requires:       grocery-pos-core >= 0.0.0-0.4.dev
 Requires:       coreutils
 Requires:       flatpak
 Requires:       kde-settings-plasmalogin

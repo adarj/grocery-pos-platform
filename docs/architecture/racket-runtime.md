@@ -71,7 +71,8 @@ wal_autocheckpoint: 1000 pages
 
 If policy setup or verification fails after the underlying connection opens,
 the constructor disconnects it before propagating the failure. This policy is
-separate from schema migration history and adds no migration after v6. See
+separate from schema migration history and does not encode connection settings
+in migration 7. See
 [ADR-0018](../adr/0018-use-wal-with-full-synchronous-durability.md).
 
 ## Startup schema lifecycle
@@ -83,7 +84,7 @@ succeeded:
 open dedicated SQLite connection in create mode
   -> establish and verify WAL
   -> establish and verify per-connection durability policy
-  -> run and validate POS database migrations through v6
+  -> run and validate POS database migrations through v7
   -> disconnect dedicated startup connection
   -> construct request-time database resources
   -> construct HTTP application
@@ -207,6 +208,14 @@ Migration v6 adds shift cash movements and reconciliation. Runtime uses the
 same virtual connection for cash-summary reads, opening/close writes, and the
 completion unit of work. It never auto-seeds an opening float or rewrites
 drawer state at startup. See [Shift Cash Accountability](cash-accountability.md).
+
+Migration v7 adds local operator principals, fixed roles, and optional
+Argon2id PIN credentials. Existing cashiers gain same-ID operator stubs without
+credentials. Runtime readiness validates the new schema and relationships but
+does not hash PINs or require credential enrollment. Authentication is not yet
+part of the HTTP composition; operator bootstrap is a separate root-only
+administrative boundary. See
+[Operator Identity and PIN Credentials](../security/operator-identity-and-pin-credentials.md).
 
 `make-app` requires the constructed transaction service and an explicit runtime
 readiness probe, then returns the servlet handler. The service and probe are
@@ -351,7 +360,7 @@ Focused file-backed tests establish:
   transaction-history loss;
 - normal `read/write` production opening rejecting a non-WAL database;
 - policy failure disconnecting the newly opened connection;
-- fresh runtime migration through schema v6;
+- fresh runtime migration through schema v7;
 - an empty persistent catalog rejecting the former development barcode rather
   than falling back to a fake;
 - active/inactive/unknown persistent catalog lookup behavior and exact
@@ -393,7 +402,7 @@ Focused file-backed tests establish:
 This runtime composition and HTTP adapter do not add:
 
 - authenticated or remote API access;
-- employee authentication, PINs/passwords, or authorization;
+- HTTP login/session handling, PIN enforcement, or authorization;
 - catalog HTTP administration, patch updates, or cloud synchronization;
 - application-level busy retry/backoff or whole-command retry;
 - custom checkpoint scheduling, manual checkpoint tooling, or WAL metrics;

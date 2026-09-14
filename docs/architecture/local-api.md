@@ -101,7 +101,7 @@ a control.
 
 The Racket process now constructs its durable transaction service before the
 HTTP listener starts. Startup resolves `SQLITE_DB_PATH`, migrates and validates
-the POS database through schema v6 using a dedicated connection after
+the POS database through schema v7 using a dedicated connection after
 establishing WAL with FULL synchronous durability. Every production connection
 explicitly enables foreign-key enforcement, retains a 1000-page WAL automatic
 checkpoint threshold, and uses the bounded Racket connector busy policy.
@@ -136,6 +136,12 @@ Migration 6 adds the append-only shift cash ledger and immutable close
 reconciliation. Completed cash-sale movement and shift-slot release participate
 in the same transaction-command writer boundary. See
 [Shift Cash Accountability](cash-accountability.md).
+
+Migration 7 adds operator principals, fixed roles, and optional Argon2id PIN
+credentials. It deliberately adds no login, session, authorization, or
+`Authorization` HTTP behavior in this checkpoint. Existing cashier IDs remain
+sufficient operational attribution until the later M7 API cutover. See
+[Operator Identity and PIN Credentials](../security/operator-identity-and-pin-credentials.md).
 
 ## Health Endpoint
 

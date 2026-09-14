@@ -124,6 +124,29 @@ SQL
         (for ([cashier
                (in-list
                 (operational-configuration-snapshot-cashiers snapshot))])
+          ;; Cashier snapshots are operational configuration, not the
+          ;; security-principal authority. Create a same-ID stub only when the
+          ;; operator is genuinely new; conflict handling deliberately leaves
+          ;; an existing role, credential, identity activation state, and
+          ;; display name untouched.
+          (db:query-exec
+           connection
+           #<<SQL
+INSERT INTO operators (operator_id, display_name, active)
+VALUES (?, ?, ?)
+ON CONFLICT(operator_id) DO NOTHING
+SQL
+           (operational-configuration-cashier-cashier-id cashier)
+           (operational-configuration-cashier-display-name cashier)
+           (if (operational-configuration-cashier-active? cashier) 1 0))
+          (db:query-exec
+           connection
+           #<<SQL
+INSERT INTO operator_roles (operator_id, role)
+VALUES (?, 'cashier')
+ON CONFLICT(operator_id) DO NOTHING
+SQL
+           (operational-configuration-cashier-cashier-id cashier))
           (db:query-exec
            connection
            #<<SQL

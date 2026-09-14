@@ -32,3 +32,4 @@ ADRs document important architectural decisions, their context, and their conseq
 - [ADR-0024: Base the M6 appliance on Fedora Kinoite 44 with persistent rpm-ostree layering](0024-base-m6-appliance-on-fedora-kinoite-44.md)
 - [ADR-0025: Run the cashier UI as a dedicated Plasma kiosk account and system Flatpak](0025-run-cashier-ui-as-dedicated-plasma-flatpak-kiosk.md)
 - [ADR-0026: Require evidence-tiered reliability qualification before Milestone 6 acceptance](0026-require-evidence-tiered-m6-reliability-qualification.md)
+- [ADR-0027: Separate operator identity from cashier attribution and store local PIN credentials with Argon2id](0027-separate-operator-identity-and-pin-credentials.md)

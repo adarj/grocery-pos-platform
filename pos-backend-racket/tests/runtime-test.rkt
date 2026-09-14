@@ -160,7 +160,8 @@
                   (vector 3 "create_catalog")
                   (vector 4 "create_tax_categories")
                   (vector 5 "create_register_operations")
-                  (vector 6 "create_shift_cash_accountability")))
+                  (vector 6 "create_shift_cash_accountability")
+                  (vector 7 "create_operator_identity_credentials")))
            (with-connection
             database-path
             (lambda (connection)
@@ -419,7 +420,8 @@ SQL
                   (vector 3 "create_catalog")
                   (vector 4 "create_tax_categories")
                   (vector 5 "create_register_operations")
-                  (vector 6 "create_shift_cash_accountability")))
+                  (vector 6 "create_shift_cash_accountability")
+                  (vector 7 "create_operator_identity_credentials")))
            (define service
              (pos-runtime-transaction-service runtime-B))
            (define retry-receipt

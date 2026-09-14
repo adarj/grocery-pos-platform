@@ -41,6 +41,22 @@ JSON
 JSON
   )
 
+(define security-seam-replacement-json
+  #<<JSON
+{
+  "schema_version": 1,
+  "register": {
+    "register_id": "register-front-01",
+    "display_name": "Front Register 1"
+  },
+  "cashiers": [
+    {"cashier_id":"cashier-alice","display_name":"Operational Alice","active":true},
+    {"cashier_id":"cashier-new","display_name":"New Cashier","active":false}
+  ]
+}
+JSON
+  )
+
 (define (snapshot text)
   (define decoded (json-string->operational-configuration-snapshot text))
   (check-pred operational-configuration-decode-success? decoded)
@@ -121,6 +137,76 @@ JSON
          connection
          "SELECT register_display_name, cashier_display_name FROM register_shifts WHERE shift_id = 'shift_one'")
         #("Front Register 1" "Alice")))))
+
+  (test-case "configuration replacement preserves security principals and credentials"
+    (call-with-database
+     (lambda (connection)
+       (activate-operational-configuration! connection (snapshot config-json))
+       (db:query-exec
+        connection
+        "UPDATE operators SET display_name = 'Security Alice', active = 0 WHERE operator_id = 'cashier-alice'")
+       (db:query-exec
+        connection
+        "UPDATE operator_roles SET role = 'manager' WHERE operator_id = 'cashier-alice'")
+       (db:query-exec
+        connection
+        #<<SQL
+INSERT INTO operator_pin_credentials
+  (operator_id, password_hash, credential_revision)
+VALUES ('cashier-alice', '$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA', 4)
+SQL
+        )
+
+       (activate-operational-configuration!
+        connection (snapshot security-seam-replacement-json))
+
+       (check-equal?
+        (db:query-rows
+         connection
+         "SELECT cashier_id, display_name, active FROM cashiers ORDER BY cashier_id")
+        (list #("cashier-alice" "Operational Alice" 1)
+              #("cashier-new" "New Cashier" 0)))
+       (check-equal?
+        (db:query-row
+         connection
+         #<<SQL
+SELECT operator.display_name, operator.active, assignment.role,
+       credential.password_hash, credential.credential_revision
+FROM operators AS operator
+JOIN operator_roles AS assignment USING (operator_id)
+JOIN operator_pin_credentials AS credential USING (operator_id)
+WHERE operator.operator_id = 'cashier-alice'
+SQL
+         )
+        #("Security Alice"
+          0
+          "manager"
+          "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA"
+          4))
+       (check-equal?
+        (db:query-list
+         connection
+         "SELECT operator_id FROM operators ORDER BY operator_id")
+        '("cashier-alice"
+          "cashier-bob"
+          "cashier-new"
+          "cashier-old"))
+       (check-equal?
+        (db:query-row
+         connection
+         #<<SQL
+SELECT operator.display_name, operator.active, assignment.role
+FROM operators AS operator
+JOIN operator_roles AS assignment USING (operator_id)
+WHERE operator.operator_id = 'cashier-new'
+SQL
+         )
+        #("New Cashier" 0 "cashier"))
+       (check-equal?
+        (db:query-value
+         connection
+         "SELECT COUNT(*) FROM operator_pin_credentials WHERE operator_id = 'cashier-new'")
+        0))))
 
   (test-case "unconfigured unknown and inactive open attempts reject safely"
     (call-with-database

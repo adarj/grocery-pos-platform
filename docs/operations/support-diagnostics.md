@@ -48,8 +48,8 @@ The ordinary bundle never includes:
 
 - `pos.db`, WAL, SHM, or rollback journals;
 - backups or displaced recovery databases;
-- transaction events, command receipts, receipt contents, catalog, cashier, or
-  shift contents;
+- transaction events, command receipts, receipt contents, catalog, cashier,
+  operator/role roster, credential verifier, or shift contents;
 - raw journald message text;
 - whole configuration files or process environments;
 - hostname, machine ID, boot ID, usernames, home paths, serial/MAC/device or
