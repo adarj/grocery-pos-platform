@@ -18,6 +18,7 @@
 (define migration-5-name "create_register_operations")
 (define migration-6-name "create_shift_cash_accountability")
 (define migration-7-name "create_operator_identity_credentials")
+(define migration-8-name "create_operator_login_throttle")
 (define stream-sequence-index-name
   "transaction_events_stream_sequence_unique")
 
@@ -489,6 +490,37 @@ CREATE TABLE operator_pin_credentials (
 SQL
   )
 
+(define create-operator-login-throttle-table-sql
+  #<<SQL
+CREATE TABLE operator_login_throttle (
+  operator_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(operator_id) = 'text'
+      AND length(operator_id) > 0
+    ),
+  consecutive_failures INTEGER NOT NULL
+    CHECK (
+      typeof(consecutive_failures) = 'integer'
+      AND consecutive_failures >= 1
+    ),
+  last_failed_at_epoch_ms INTEGER NOT NULL
+    CHECK (
+      typeof(last_failed_at_epoch_ms) = 'integer'
+      AND last_failed_at_epoch_ms >= 0
+    ),
+  blocked_until_epoch_ms INTEGER NOT NULL
+    CHECK (
+      typeof(blocked_until_epoch_ms) = 'integer'
+      AND blocked_until_epoch_ms >= 0
+      AND blocked_until_epoch_ms >= last_failed_at_epoch_ms
+    ),
+  FOREIGN KEY (operator_id)
+    REFERENCES operators(operator_id)
+    ON DELETE CASCADE
+)
+SQL
+  )
+
 (define (schema-object-exists? connection type name)
   (= 1
      (db:query-value
@@ -652,6 +684,12 @@ SQL
   (list (vector "operator_id" "TEXT" 1 1)
         (vector "password_hash" "TEXT" 1 0)
         (vector "credential_revision" "INTEGER" 1 0)))
+
+(define expected-operator-login-throttle-columns
+  (list (vector "operator_id" "TEXT" 1 1)
+        (vector "consecutive_failures" "INTEGER" 1 0)
+        (vector "last_failed_at_epoch_ms" "INTEGER" 1 0)
+        (vector "blocked_until_epoch_ms" "INTEGER" 1 0)))
 
 (define (validate-owned-table-schema connection
                                      migration-version
@@ -1020,6 +1058,26 @@ SQL
    create-operator-pin-credentials-table-sql)
   (validate-operator-relational-integrity connection))
 
+(define (validate-operator-login-throttle-schema connection)
+  (validate-owned-table-schema
+   connection 8 "operator_login_throttle"
+   expected-operator-login-throttle-columns
+   create-operator-login-throttle-table-sql)
+  (define orphan-throttle-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM operator_login_throttle AS throttle
+LEFT JOIN operators AS operator
+  ON operator.operator_id = throttle.operator_id
+WHERE operator.operator_id IS NULL
+SQL
+     ))
+  (unless (zero? orphan-throttle-count)
+    (error 'migrate-pos-database!
+           "operator login throttle state references missing operators")))
+
 (define (apply-migration-1! connection)
   (db:query-exec connection create-events-table-sql)
   (db:query-exec connection create-stream-sequence-index-sql))
@@ -1093,6 +1151,9 @@ FROM cashiers
 SQL
    ))
 
+(define (apply-migration-8! connection)
+  (db:query-exec connection create-operator-login-throttle-table-sql))
+
 (define migrations
   (list
    (pos-database-migration 1
@@ -1122,7 +1183,11 @@ SQL
    (pos-database-migration 7
                            migration-7-name
                            apply-migration-7!
-                           validate-operator-identity-schema)))
+                           validate-operator-identity-schema)
+   (pos-database-migration 8
+                           migration-8-name
+                           apply-migration-8!
+                           validate-operator-login-throttle-schema)))
 
 (define current-pos-database-schema-version (length migrations))
 

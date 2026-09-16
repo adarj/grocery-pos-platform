@@ -9,7 +9,8 @@
          "../pos/application/transaction-service.rkt"
          "../pos/domain/fake-catalog.rkt"
          "../pos/persistence/pos-database-migrations.rkt"
-         "../pos/support/readiness.rkt")
+         "../pos/support/readiness.rkt"
+         "support/authentication.rkt")
 
 (define (make-request method path)
   (request method
@@ -38,9 +39,11 @@
     (make-transaction-service
      connection
      #:catalog-lookup fake-catalog-lookup))
+  (define auth-service (make-test-authentication-service connection))
   (define app
     (make-app
      service
+     #:authentication-service auth-service
      #:readiness-probe
      (lambda ()
        (runtime-ready current-pos-database-schema-version))))
@@ -57,6 +60,7 @@
     (define health-only-app
       (make-app
        service
+       #:authentication-service auth-service
        #:readiness-probe
        (lambda () (error 'readiness "health must not probe SQLite"))))
     (check-equal?
@@ -82,6 +86,7 @@
       (define unavailable-app
         (make-app
          service
+         #:authentication-service auth-service
          #:readiness-probe (lambda () (runtime-not-ready reason))))
       (define response
         (unavailable-app (make-request #"GET" "/ready")))
@@ -97,6 +102,7 @@
     (define unavailable-app
       (make-app
        service
+       #:authentication-service auth-service
        #:readiness-probe
        (lambda () (error 'probe "secret SQLite diagnostics"))))
     (define response
@@ -113,7 +119,10 @@
 
   (test-case "top-level application exceptions remain generic JSON"
     (define invalid-app
-      (make-app service #:readiness-probe (lambda () 'invalid-result)))
+      (make-app
+       service
+       #:authentication-service auth-service
+       #:readiness-probe (lambda () 'invalid-result)))
     (define response (invalid-app (make-request #"GET" "/ready")))
     (check-equal? (response-code response) 500)
     (check-equal?
@@ -136,9 +145,21 @@
   (test-case "app factory rejects an invalid transaction service"
     (check-exn exn:fail:contract?
                (lambda ()
-                 (make-app #f #:readiness-probe runtime-ready)))
+                 (make-app
+                  #f
+                  #:authentication-service auth-service
+                  #:readiness-probe runtime-ready)))
     (check-exn exn:fail:contract?
                (lambda ()
-                 (make-app service #:readiness-probe #f))))
+                 (make-app
+                  service
+                  #:authentication-service auth-service
+                  #:readiness-probe #f)))
+    (check-exn exn:fail:contract?
+               (lambda ()
+                 (make-app
+                  service
+                  #:authentication-service #f
+                  #:readiness-probe runtime-ready))))
 
   (db:disconnect connection))

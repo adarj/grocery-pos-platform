@@ -454,11 +454,17 @@
                 gawk
                 gcc
                 gnugrep
+                libargon2
                 racket
                 rpm
               ];
             }
             ''
+              export HOME="$TMPDIR/home"
+              export PLTUSERHOME="$TMPDIR/plt-user"
+              export PLTCOLLECTS="${racketCryptoCollections}/share/racket/collects:"
+              export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.libargon2 ]}"
+              mkdir -p "$HOME" "$PLTUSERHOME"
               bash ${./packaging/tests/check-pos-appliance-package.sh} \
                 ${posApplianceRpm} ${posCoreRpm} ${projectSource}
               bash ${./packaging/tests/bootstrap-kinoite-test.sh} ${projectSource}

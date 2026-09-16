@@ -8,6 +8,8 @@
          web-server/http
          "../pos/api/server.rkt"
          "../pos/application/transaction-command.rkt"
+         "../pos/application/authentication-service.rkt"
+         "../pos/application/operator-service.rkt"
          "../pos/application/register-operations-service.rkt"
          "../pos/application/transaction-service.rkt"
          "../pos/domain/catalog-item.rkt"
@@ -23,13 +25,23 @@
          "../pos/persistence/pos-database-migrations.rkt"
          "../pos/runtime-config.rkt"
          "../pos/runtime.rkt"
-         "../pos/support/readiness.rkt")
+         "../pos/support/readiness.rkt"
+         "support/authentication.rkt")
 
 (define test-barcode "049000001234")
 (define unknown-barcode "000000000000")
+(define current-test-access-token (make-parameter #f))
+(define current-test-authentication-service (make-parameter #f))
 
 (define (test-readiness)
   (runtime-ready current-pos-database-schema-version))
+
+(define (login-token authentication-service operator-id pin)
+  (define result
+    (authentication-service-login authentication-service operator-id pin))
+  (unless (authentication-login-succeeded? result)
+    (error 'login-token "test authentication failed"))
+  (authentication-login-succeeded-access-token result))
 
 (define (make-http-request method
                            path
@@ -38,14 +50,18 @@
   (request
    method
    (string->url path)
-   (if content-type
-       (list
-        (header
-         #"Content-Type"
-         (if (bytes? content-type)
-             content-type
-             (string->bytes/utf-8 content-type))))
-       '())
+   (append
+    (if content-type
+        (list
+         (header
+          #"Content-Type"
+          (if (bytes? content-type)
+              content-type
+              (string->bytes/utf-8 content-type))))
+        '())
+    (if (current-test-access-token)
+        (list (test-authorization-header (current-test-access-token)))
+        '()))
    (delay '())
    body
    "127.0.0.1"
@@ -112,9 +128,17 @@
          #:catalog-lookup catalog-lookup
          #:load-events load-events
          #:commit-command! commit-command!))
-      (proc connection
-            service
-            (make-app service #:readiness-probe test-readiness)))
+      (define auth-service (make-test-authentication-service connection))
+      (define access-token (issue-test-access-token auth-service))
+      (parameterize
+          ([current-test-access-token access-token]
+           [current-test-authentication-service auth-service])
+        (proc connection
+              service
+              (make-app
+               service
+               #:authentication-service auth-service
+               #:readiness-probe test-readiness))))
     (lambda ()
       (db:disconnect connection))))
 
@@ -774,7 +798,10 @@ SQL
        (define normal-service (make-test-service connection))
        (define retry
          (post-command
-          (make-app normal-service #:readiness-probe test-readiness)
+          (make-app
+           normal-service
+           #:authentication-service (current-test-authentication-service)
+           #:readiness-probe test-readiness)
           command))
        (check-command-result
         retry
@@ -852,6 +879,13 @@ SQL
             (activate-operational-configuration!
              seed-connection
              (operational-configuration-decode-success-snapshot decoded))
+            (define enrollment
+              (operator-service-enroll-pin
+               (make-operator-service seed-connection)
+               "http-cashier"
+               test-operator-pin))
+            (unless (operator-pin-enrollment-succeeded? enrollment)
+              (error 'transaction-http-test "operator enrollment failed"))
             (register-operations-open-shift
              (make-register-operations-service
               seed-connection
@@ -871,13 +905,21 @@ SQL
               (define app-A
                 (make-app
                  (pos-runtime-transaction-service runtime-A)
+                 #:authentication-service
+                 (pos-runtime-authentication-service runtime-A)
                  #:readiness-probe
                  (lambda () (pos-runtime-readiness runtime-A))))
-              (check-equal? (response-code (post-command app-A start-command))
-                            200)
-              (define response (post-command app-A scan-command))
-              (check-equal? (response-code response) 200)
-              (response-json response))
+              (define token-A
+                (login-token
+                 (pos-runtime-authentication-service runtime-A)
+                 "http-cashier"
+                 test-operator-pin))
+              (parameterize ([current-test-access-token token-A])
+                (check-equal?
+                 (response-code (post-command app-A start-command)) 200)
+                (define response (post-command app-A scan-command))
+                (check-equal? (response-code response) 200)
+                (response-json response)))
             (lambda ()
               (stop-pos-runtime! runtime-A))))
 
@@ -891,17 +933,25 @@ SQL
             (define app-B
               (make-app
                (pos-runtime-transaction-service runtime-B)
+               #:authentication-service
+               (pos-runtime-authentication-service runtime-B)
                #:readiness-probe
                (lambda () (pos-runtime-readiness runtime-B))))
-            (define retry (post-command app-B scan-command))
-            (check-equal? (response-json retry) original-scan)
-            (define query (get-transaction app-B "txn-runtime"))
-            (check-equal? (response-code query) 200)
-            (define transaction
-              (hash-ref (response-json query) 'transaction))
-            (check-equal? (hash-ref transaction 'version) 2)
-            (check-equal? (hash-ref transaction 'subtotal_minor_units) 199)
-            (check-equal? (length (hash-ref transaction 'line_items)) 1)
+            (define token-B
+              (login-token
+               (pos-runtime-authentication-service runtime-B)
+               "http-cashier"
+               test-operator-pin))
+            (parameterize ([current-test-access-token token-B])
+              (define retry (post-command app-B scan-command))
+              (check-equal? (response-json retry) original-scan)
+              (define query (get-transaction app-B "txn-runtime"))
+              (check-equal? (response-code query) 200)
+              (define transaction
+                (hash-ref (response-json query) 'transaction))
+              (check-equal? (hash-ref transaction 'version) 2)
+              (check-equal? (hash-ref transaction 'subtotal_minor_units) 199)
+              (check-equal? (length (hash-ref transaction 'line_items)) 1))
 
             (define connection
               (db:sqlite3-connect

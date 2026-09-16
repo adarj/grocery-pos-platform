@@ -4,6 +4,8 @@
          file/sha1
          racket/random
          "runtime-config.rkt"
+         "application/authentication-service.rkt"
+         "application/operator-service.rkt"
          "application/register-operations-service.rkt"
          "application/transaction-service.rkt"
          "persistence/pos-database-migrations.rkt"
@@ -19,6 +21,8 @@
          pos-runtime?
          pos-runtime-transaction-service
          pos-runtime-register-operations-service
+         pos-runtime-operator-service
+         pos-runtime-authentication-service
          pos-runtime-sqlite-db-path
          pos-runtime-stopped?
          pos-runtime-readiness)
@@ -33,6 +37,8 @@
 (struct pos-runtime
   (transaction-service
    register-operations-service
+   operator-service
+   authentication-service
    sqlite-db-path
    custodian
    stopped-box
@@ -40,6 +46,9 @@
 
 (define (system-current-epoch-ms)
   (inexact->exact (floor (current-inexact-milliseconds))))
+
+(define (system-current-monotonic-ms)
+  (inexact->exact (floor (current-inexact-monotonic-milliseconds))))
 
 (define (secure-shift-id)
   (string-append "shift_" (bytes->hex-string (crypto-random-bytes 16))))
@@ -107,6 +116,8 @@
          config
          #:catalog-lookup [catalog-lookup #f]
          #:connect [connect open-pos-sqlite-connection]
+         #:current-monotonic-ms
+         [current-monotonic-ms system-current-monotonic-ms]
          #:current-epoch-ms [current-epoch-ms system-current-epoch-ms]
          #:generate-shift-id [generate-shift-id secure-shift-id])
   (define who 'start-pos-runtime)
@@ -116,8 +127,10 @@
     (raise-argument-error who "(or/c #f procedure?)" catalog-lookup))
   (unless (procedure? connect)
     (raise-argument-error who "procedure?" connect))
-  (for ([value (in-list (list current-epoch-ms generate-shift-id))]
-        [name (in-list '(current-epoch-ms generate-shift-id))])
+  (for ([value (in-list
+                (list current-monotonic-ms current-epoch-ms generate-shift-id))]
+        [name (in-list
+               '(current-monotonic-ms current-epoch-ms generate-shift-id))])
     (unless (and (procedure? value) (procedure-arity-includes? value 0))
       (raise-arguments-error
        who "expected a zero-argument procedure" (symbol->string name) value)))
@@ -139,7 +152,8 @@
           (set-box! stopped-box #t)
           (custodian-shutdown-all runtime-custodian)
           (raise value))])
-    (define-values (transaction-service register-service)
+    (define-values
+      (transaction-service register-service operator-service auth-service)
       (parameterize ([current-custodian runtime-custodian])
         (define pool
           (db:connection-pool
@@ -156,6 +170,13 @@
               (lambda (barcode)
                 (lookup-catalog-item-by-barcode
                  virtual-connection barcode))))
+        (define operator-service
+          (make-operator-service virtual-connection))
+        (define auth-service
+          (make-authentication-service
+           virtual-connection
+           #:current-monotonic-ms current-monotonic-ms
+           #:current-epoch-ms current-epoch-ms))
         (values
          (make-transaction-service
           virtual-connection
@@ -164,9 +185,13 @@
          (make-register-operations-service
           virtual-connection
           #:current-epoch-ms current-epoch-ms
-          #:generate-shift-id generate-shift-id))))
+          #:generate-shift-id generate-shift-id)
+         operator-service
+         auth-service)))
     (pos-runtime transaction-service
                  register-service
+                 operator-service
+                 auth-service
                  database-path
                  runtime-custodian
                  stopped-box

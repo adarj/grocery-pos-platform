@@ -31,13 +31,13 @@ repository_root="$3"
   fail 'unexpected appliance package name'
 [[ "$(rpm -qp --queryformat '%{ARCH}' "$appliance_rpm")" == 'noarch' ]] ||
   fail 'appliance package is not noarch'
-[[ "$(rpm -qp --queryformat '%{RELEASE}' "$appliance_rpm")" == '0.1.dev' ]] ||
+[[ "$(rpm -qp --queryformat '%{RELEASE}' "$appliance_rpm")" == '0.2.dev' ]] ||
   fail 'unexpected appliance package release'
 [[ "$(rpm -qp --queryformat '%{LICENSE}' "$appliance_rpm")" == 'LicenseRef-Project-Undecided' ]] ||
   fail 'appliance package license metadata changed'
 
 requires="$(rpm -qp --requires "$appliance_rpm")"
-grep -Eq '^grocery-pos-core >= 0\.0\.0-0\.4\.dev$' <<<"$requires" ||
+grep -Eq '^grocery-pos-core >= 0\.0\.0-0\.5\.dev$' <<<"$requires" ||
   fail 'appliance package does not require the M7-capable POS Core release'
 for dependency in grocery-pos-core flatpak ostree plasma-login-manager rpm-ostree shadow-utils systemd; do
   grep -Eq "^${dependency}([[:space:]]|$)" <<<"$requires" ||

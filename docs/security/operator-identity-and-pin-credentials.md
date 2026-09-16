@@ -44,10 +44,10 @@ remove its operator; re-adding the same exact ID reconnects to the existing
 security principal. A manager or supervisor who appears in a cashier snapshot
 is not demoted.
 
-## PIN policy and storage
+## PIN enrollment policy, verification, and storage
 
-A PIN must be exactly 8–12 ASCII characters from `0` through `9`. Input is not
-trimmed. The policy rejects:
+A newly enrolled PIN must be exactly 8–12 ASCII characters from `0` through
+`9`. Input is not trimmed. Enrollment rejects:
 
 - one digit repeated for the whole PIN;
 - a one- or two-digit motif repeated for the whole PIN; and
@@ -71,6 +71,14 @@ then re-reads the operator and credential state under `BEGIN IMMEDIATE` before
 inserting. Concurrent first enrollments therefore have one winner and one
 `credential_already_enrolled` result without holding the writer lock during
 Argon2 work.
+
+Verification of an existing credential-v1 PIN uses the separately frozen
+syntax of exactly 8–12 ASCII digits; it does not reapply the current enrollment
+strength rules. Before invoking the native provider, POS Core requires the
+stored PHC verifier to have the exact supported Argon2id/v19 parameter profile
+and bounded salt/hash encodings. This prevents database-controlled work factors
+and ensures future enrollment-policy tightening cannot invalidate an existing
+syntactically valid credential.
 
 PIN bytes are cleared where a mutable temporary buffer is practical, but
 Racket's garbage-collected runtime cannot promise deterministic whole-process
@@ -136,24 +144,26 @@ explicit offline restore carry the PHC verifier and revision; there is no
 separate unbacked credential file or pepper. Protect backups as sensitive POS
 data.
 
-Readiness validates migration 7 DDL and relational invariants but performs no
-Argon2 hashing and does not require every operator to be enrolled. Fresh M7
-appliance provisioning reaches schema 7 and creates cashier operator stubs, so
-an unenrolled register remains ready during this foundation checkpoint.
+Readiness validates current migration 8 DDL and relational invariants but
+performs no Argon2 hashing and does not require every operator to be enrolled.
+Fresh M7 appliance provisioning reaches schema 8 and creates cashier operator
+stubs. An unenrolled register can be persistence-ready, but the Checkpoint 2
+terminal remains locked until an administrator explicitly enrolls a usable
+active operator.
 
 The ordinary support bundle excludes operator IDs, operator display names,
 role rosters, PINs, credential verifiers, and credential rows. Regression tests
 place distinctive identity and credential sentinels in a real database and
 search every allowlisted bundle member.
 
-## Deliberately deferred
+## Authenticated-session integration
 
-There are no login/logout HTTP routes, bearer sessions, session expiry,
-throttling, permission enforcement, manager approval, actor attribution,
-security audit ledger, credential reset, or Flutter PIN UI yet. Existing M6 API
-behavior still accepts cashier IDs as operational attribution until later M7
-checkpoints perform a deliberate authentication cutover.
+Checkpoint 2 adds process-local bearer sessions and durable login throttling
+without changing this identity/credential model. See
+[Authenticated Sessions and Register Lock](authenticated-sessions-and-register-lock.md).
+Session validity does not make the current role a permission decision;
+role-specific authorization, manager approval, actor attribution, security
+audit, and credential reset remain deferred.
 
 The files under `docs/acceptance/m6` remain historical evidence for the schema
-6 M6 baseline. They are not regenerated to describe current schema 7 code.
-
+6 M6 baseline. They are not regenerated to describe current schema 8 code.

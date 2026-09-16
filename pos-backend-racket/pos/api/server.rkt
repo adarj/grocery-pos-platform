@@ -3,12 +3,14 @@
 (require net/url
          web-server/http
          web-server/servlet-env
+         "auth-http.rkt"
          "http-safety.rkt"
          "http-response.rkt"
          "receipt-http.rkt"
          "register-operations-http.rkt"
          "transaction-http.rkt"
          "../application/transaction-service.rkt"
+         "../application/authentication-service.rkt"
          "../application/register-operations-service.rkt"
          "../support/health.rkt"
          "../support/readiness.rkt")
@@ -101,6 +103,7 @@
 
 (define (make-app transaction-service
                   [register-service #f]
+                  #:authentication-service authentication-service
                   #:readiness-probe readiness-probe)
   (unless (transaction-service? transaction-service)
     (raise-argument-error
@@ -109,6 +112,9 @@
               (register-operations-service? register-service))
     (raise-argument-error
      'make-app "(or/c #f register-operations-service?)" register-service))
+  (unless (authentication-service? authentication-service)
+    (raise-argument-error
+     'make-app "authentication-service?" authentication-service))
   (unless (and (procedure? readiness-probe)
                (procedure-arity-includes? readiness-probe 0))
     (raise-argument-error
@@ -131,48 +137,89 @@
              (readiness-response readiness-probe)
              (method-not-allowed-response #"GET"))]
 
+        [(equal? path '("auth" "login"))
+         (if (equal? method #"POST")
+             (handle-login-request authentication-service req)
+             (method-not-allowed-response #"POST"))]
+
+        [(equal? path '("auth" "session"))
+         (if (equal? method #"GET")
+             (handle-session-request authentication-service req)
+             (method-not-allowed-response #"GET"))]
+
+        [(equal? path '("auth" "logout"))
+         (if (equal? method #"POST")
+             (handle-logout-request authentication-service req)
+             (method-not-allowed-response #"POST"))]
+
         [(equal? path '("transaction-commands"))
          (if (equal? method #"POST")
-             (handle-transaction-command-request transaction-service req)
+             (authenticate-protected-request
+              authentication-service req
+              (lambda (_token _authenticated)
+                (handle-transaction-command-request transaction-service req)))
              (method-not-allowed-response #"POST"))]
 
         [(and register-service (equal? path '("register-context")))
          (if (equal? method #"GET")
-             (handle-register-context-request register-service)
+             (authenticate-protected-request
+              authentication-service req
+              (lambda (_token _authenticated)
+                (handle-register-context-request register-service)))
              (method-not-allowed-response #"GET"))]
 
         [(and register-service (equal? path '("cashiers")))
          (if (equal? method #"GET")
-             (handle-active-cashiers-request register-service)
+             (authenticate-protected-request
+              authentication-service req
+              (lambda (_token _authenticated)
+                (handle-active-cashiers-request register-service)))
              (method-not-allowed-response #"GET"))]
 
         [(and register-service (equal? path '("shifts" "open")))
          (if (equal? method #"POST")
-             (handle-open-shift-request register-service req)
+             (authenticate-protected-request
+              authentication-service req
+              (lambda (_token _authenticated)
+                (handle-open-shift-request register-service req)))
              (method-not-allowed-response #"POST"))]
 
         [(and register-service (shift-close-path? path))
          (if (equal? method #"POST")
-             (handle-close-shift-request register-service (second path) req)
+             (authenticate-protected-request
+              authentication-service req
+              (lambda (_token _authenticated)
+                (handle-close-shift-request
+                 register-service (second path) req)))
              (method-not-allowed-response #"POST"))]
 
         [(and register-service (shift-cash-summary-path? path))
          (if (equal? method #"GET")
-             (handle-shift-cash-summary-request register-service (second path))
+             (authenticate-protected-request
+              authentication-service req
+              (lambda (_token _authenticated)
+                (handle-shift-cash-summary-request
+                 register-service (second path))))
              (method-not-allowed-response #"GET"))]
 
         [(transaction-query-path? path)
          (if (equal? method #"GET")
-             (handle-transaction-query-request
-              transaction-service
-              (second path))
+             (authenticate-protected-request
+              authentication-service req
+              (lambda (_token _authenticated)
+                (handle-transaction-query-request
+                 transaction-service
+                 (second path))))
              (method-not-allowed-response #"GET"))]
 
         [(receipt-query-path? path)
          (if (equal? method #"GET")
-             (handle-receipt-query-request
-              transaction-service
-              (second path))
+             (authenticate-protected-request
+              authentication-service req
+              (lambda (_token _authenticated)
+                (handle-receipt-query-request
+                 transaction-service
+                 (second path))))
              (method-not-allowed-response #"GET"))]
 
         [else

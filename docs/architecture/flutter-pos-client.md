@@ -3,8 +3,9 @@
 ## Status
 
 The Flutter `pos_terminal` implements a typed client for the current local POS
-Core transaction, receipt, and register-operation routes, a cashier-session
-application controller, and the
+Core authentication, transaction, receipt, and register-operation routes, a
+process-memory authentication controller, a cashier-session application
+controller, and the
 current cash-sale cashier slice: start, scan, cash tender, authoritative paid
 state/change, completion, open-sale line removal/void, crash-safe
 command-intent recovery, explicit next-sale session transition, and read-only
@@ -28,6 +29,13 @@ are governed by
 - reading configured register/active-shift context and active cashier choices;
 - explicitly opening and reconciling/closing a register shift;
 - reading authoritative shift cash summaries.
+
+`PosAuthenticationClient` is deliberately separate. It owns login, current
+session lookup, and logout transport. `MemoryAuthenticationSession` retains the
+opaque bearer only for the life of the Flutter process and supplies it to the
+HTTP adapter for protected requests. A definitive
+`authentication_required` 401 clears that memory centrally; a transient 503
+does not falsely revoke it.
 
 Widgets do not receive raw `http.Response` values or package HTTP exceptions.
 Flutter owns presentation and cashier intent orchestration; it does not
@@ -62,6 +70,7 @@ lib/
   app/pos_terminal_app.dart         Material application
   core/pos_core/                    typed client boundary and HTTP adapter
     models/                         wire-facing immutable values
+  features/authentication/         register lock, login, in-memory session
   features/cashier/                 session state, recovery, orchestration, UI
   features/receipt/                 read-only receipt lookup and presentation
   features/status/                  health/register/shift operational home
@@ -265,8 +274,39 @@ strict identity fields, and valid configured/shift nullability. Operational
 writes create no transaction command ID and do not touch
 `CashierSessionStore`.
 
-Cashier selection is identity attribution, not authentication. The UI makes no
-PIN, password, authenticated-session, role, or manager-authorization claim.
+Cashier selection remains operational attribution and is distinct from the
+authenticated operator. Checkpoint 2 authenticates every active enrolled
+operator equally; Flutter does not infer role permissions or bind the operator
+to a shift. Those decisions remain Racket-owned future authorization policy.
+
+## Register authentication and lock
+
+Terminal startup calls only public health/readiness routes. A ready terminal
+starts locked and does not fetch register, cashier, shift, transaction, or
+receipt state until local operator login succeeds. The kiosk-friendly view
+collects an exact operator ID and masked 8–12 digit PIN, disables suggestions,
+and clears the PIN field after every submission. It displays one generic
+failure message for wrong, missing, inactive, unenrolled, or throttled
+identities.
+
+The access token is memory-only. It is not part of `CashierSessionController`,
+`CashierSessionStore`, Flatpak/XDG files, preferences, logs, or crash text.
+Manual `Lock` immediately obscures protected presentation, clears token memory,
+and then attempts best-effort server logout. A high-level five-minute input
+timer supplies presentation locking; server-side expiry remains authoritative.
+If a 401 arrives while a pushed cashier/receipt route is open, the app shell
+immediately obscures it and replaces the root navigator identity. That disposes
+the authenticated subtree and its complete protected route history. A later
+operator therefore receives a newly constructed status/register view and fresh
+protected queries rather than access to the prior operator's widget state.
+
+Locking never clears transaction recovery. A transaction POST rejected by
+authentication before dispatch remains an exact pending command and is retried
+with its original command ID only after reauthentication. Likewise, if a
+command committed before POS Core process death, restart invalidates the bearer
+but the same persisted command resolves through its durable command receipt
+after a fresh login. No bearer/session identifier is added to the transaction
+command schema.
 
 ## Cashier presentation
 
@@ -517,8 +557,9 @@ This slice does not implement automatic retry, retry timers, cached/offline
 transaction truth, quantity editing, post-payment refund/reversal, split
 tender, card/external payment behavior, receipt printing, receipt numbering or
 date/recent-sale search, drawer hardware, cash drops, paid-outs, refunds, or
-general accounting reports. It also does not implement employee authentication,
-PINs/passwords, roles, manager authorization, or variance approval.
+general accounting reports. It also does not implement role-specific endpoint
+authorization, manager approval, credential reset, transaction actor
+attribution, security audit, or variance approval.
 Current recovery payloads may contain an opaque barcode, integer cash amount,
 or nonnegative removal line index; void and lifecycle commands have empty
 payloads. The recovery record is never logged.

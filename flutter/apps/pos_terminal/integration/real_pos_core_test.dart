@@ -2,7 +2,9 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:pos_terminal/core/pos_core/authentication_client.dart';
 import 'package:pos_terminal/core/pos_core/http_pos_core_client.dart';
+import 'package:pos_terminal/core/pos_core/models/authentication.dart';
 import 'package:pos_terminal/core/pos_core/models/command_result.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_failure.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_readiness.dart';
@@ -13,6 +15,7 @@ import 'package:pos_terminal/features/cashier/cashier_id_generator.dart';
 import 'package:pos_terminal/features/cashier/cashier_session_controller.dart';
 import 'package:pos_terminal/features/cashier/cashier_session_store.dart';
 import 'package:pos_terminal/features/cashier/file_cashier_session_store.dart';
+import 'package:pos_terminal/features/authentication/authentication_controller.dart';
 
 import 'support/real_pos_core_fixture.dart';
 
@@ -26,6 +29,7 @@ const _developmentRegisterName = 'Development Register 1';
 const _developmentCashierId = 'cashier-development-01';
 const _developmentCashierName = 'Development Cashier';
 const _developmentOpeningCash = 10000;
+const _developmentOperatorPin = '80421637';
 
 int _crashCampaignIterations() {
   final configured = Platform.environment['M6_CRASH_ITERATIONS'];
@@ -71,10 +75,7 @@ final class _IntegrationCashier {
     RealPosCoreFixture fixture,
     String namespace,
   ) async {
-    final client = HttpPosCoreClient(
-      baseUri: fixture.baseUri,
-      timeout: const Duration(seconds: 3),
-    );
+    final client = await _authenticatedClient(fixture);
     final store = FileCashierSessionStore(filePath: fixture.recoveryFilePath);
     final ids = _SequentialIntegrationIds(namespace);
     final controller = CashierSessionController(
@@ -118,10 +119,7 @@ Future<RealPosCoreFixture> _startFixture({bool openShift = true}) async {
 }
 
 Future<RegisterShift> _openDevelopmentShift(RealPosCoreFixture fixture) async {
-  final client = HttpPosCoreClient(
-    baseUri: fixture.baseUri,
-    timeout: const Duration(seconds: 3),
-  );
+  final client = await _authenticatedClient(fixture);
   try {
     return (await client.openShift(
       _developmentCashierId,
@@ -129,6 +127,26 @@ Future<RegisterShift> _openDevelopmentShift(RealPosCoreFixture fixture) async {
     )).shift;
   } finally {
     client.close();
+  }
+}
+
+Future<HttpPosCoreClient> _authenticatedClient(
+  RealPosCoreFixture fixture,
+) async {
+  final client = HttpPosCoreClient(
+    baseUri: fixture.baseUri,
+    timeout: const Duration(seconds: 3),
+  );
+  try {
+    final login = await client.login(
+      _developmentCashierId,
+      _developmentOperatorPin,
+    );
+    client.authenticationSession.establish(login);
+    return client;
+  } catch (_) {
+    client.close();
+    rethrow;
   }
 }
 
@@ -231,7 +249,7 @@ void main() {
 
       final initiallyReady = await client.fetchReadiness();
       expect(initiallyReady.ready, isTrue);
-      expect(initiallyReady.databaseSchemaVersion, 7);
+      expect(initiallyReady.databaseSchemaVersion, 8);
 
       await File(
         fixture.databasePath,
@@ -273,10 +291,7 @@ void main() {
     'real operational startup exposes configuration and opens one shift',
     () async {
       final fixture = await _startFixture(openShift: false);
-      final client = HttpPosCoreClient(
-        baseUri: fixture.baseUri,
-        timeout: const Duration(seconds: 3),
-      );
+      final client = await _authenticatedClient(fixture);
       addTearDown(client.close);
 
       final before = await client.fetchRegisterContext();
@@ -313,6 +328,164 @@ void main() {
         (await client.fetchRegisterContext()).activeShift!.shiftId,
         opened.shift.shiftId,
       );
+    },
+  );
+
+  test(
+    'manual register lock reaches Core logout and revokes the bearer',
+    () async {
+      final fixture = await _startFixture(openShift: false);
+      final anonymous = HttpPosCoreClient(
+        baseUri: fixture.baseUri,
+        timeout: const Duration(seconds: 3),
+      );
+      addTearDown(anonymous.close);
+
+      expect((await anonymous.fetchReadiness()).ready, isTrue);
+      await expectLater(
+        anonymous.fetchRegisterContext(),
+        throwsA(
+          isA<PosCoreServerFailure>()
+              .having((failure) => failure.statusCode, 'statusCode', 401)
+              .having(
+                (failure) => failure.code,
+                'code',
+                'authentication_required',
+              ),
+        ),
+      );
+
+      final memory = MemoryAuthenticationSession();
+      final authenticated = HttpPosCoreClient(
+        baseUri: fixture.baseUri,
+        authenticationSession: memory,
+        timeout: const Duration(seconds: 3),
+      );
+      addTearDown(authenticated.close);
+      final controller = AuthenticationController(
+        client: authenticated,
+        sessionMemory: memory,
+      );
+      addTearDown(controller.dispose);
+      await controller.login(_developmentCashierId, _developmentOperatorPin);
+      final session = controller.session!;
+      expect(session.operatorId, _developmentCashierId);
+      expect((await authenticated.fetchRegisterContext()).configured, isTrue);
+      final token = memory.accessToken!;
+
+      await controller.lock();
+      expect(controller.status, AuthenticationStatus.locked);
+      expect(memory.accessToken, isNull);
+
+      final staleMemory = MemoryAuthenticationSession()
+        ..establish(AuthenticationLogin(accessToken: token, session: session));
+      final staleClient = HttpPosCoreClient(
+        baseUri: fixture.baseUri,
+        authenticationSession: staleMemory,
+        timeout: const Duration(seconds: 3),
+      );
+      addTearDown(staleClient.close);
+      await expectLater(
+        staleClient.fetchRegisterContext(),
+        throwsA(
+          isA<PosCoreServerFailure>().having(
+            (failure) => failure.code,
+            'code',
+            'authentication_required',
+          ),
+        ),
+      );
+      expect(staleMemory.authenticated, isFalse);
+    },
+  );
+
+  test(
+    'POS Core restart invalidates bearer while durable credential can relogin',
+    () async {
+      final fixture = await _startFixture(openShift: false);
+      final firstMemory = MemoryAuthenticationSession();
+      final first = HttpPosCoreClient(
+        baseUri: fixture.baseUri,
+        authenticationSession: firstMemory,
+        timeout: const Duration(seconds: 3),
+      );
+      final firstLogin = await first.login(
+        _developmentCashierId,
+        _developmentOperatorPin,
+      );
+      firstMemory.establish(firstLogin);
+      expect((await first.fetchRegisterContext()).configured, isTrue);
+      first.close();
+
+      await fixture.restart();
+      final staleMemory = MemoryAuthenticationSession()..establish(firstLogin);
+      final afterRestart = HttpPosCoreClient(
+        baseUri: fixture.baseUri,
+        authenticationSession: staleMemory,
+        timeout: const Duration(seconds: 3),
+      );
+      addTearDown(afterRestart.close);
+      await expectLater(
+        afterRestart.fetchRegisterContext(),
+        throwsA(
+          isA<PosCoreServerFailure>().having(
+            (failure) => failure.code,
+            'code',
+            'authentication_required',
+          ),
+        ),
+      );
+      expect(staleMemory.authenticated, isFalse);
+
+      final replacement = await afterRestart.login(
+        _developmentCashierId,
+        _developmentOperatorPin,
+      );
+      staleMemory.establish(replacement);
+      expect((await afterRestart.fetchRegisterContext()).configured, isTrue);
+    },
+  );
+
+  test(
+    '401 before mutation preserves exact command across reauthentication',
+    () async {
+      final fixture = await _startFixture();
+      final cashier = await _createCashier(fixture, 'auth_loss_retry');
+      await cashier.controller.startTransaction();
+      final before = _snapshot(cashier.controller);
+      final token = cashier.client.authenticationSession.accessToken!;
+
+      // Revoke only the server capability. The client learns of that loss on
+      // the protected command, after it has durably written the exact command.
+      await cashier.client.logout(token);
+      await cashier.controller.scanBarcode(_developmentBarcode);
+
+      final pending =
+          cashier.controller.state.pendingCommand! as ScanBarcodeCommand;
+      expect(pending.transactionId, before.transactionId);
+      expect(pending.expectedVersion, before.version);
+      expect(pending.barcode, _developmentBarcode);
+      expect(cashier.client.authenticationSession.authenticated, isFalse);
+      final persisted = await cashier.store.load();
+      expect(persisted!.pendingCommand!.toJson(), pending.toJson());
+      final commandIdCallsBeforeRetry = cashier.ids.commandIdCalls;
+
+      final relogin = await cashier.client.login(
+        _developmentCashierId,
+        _developmentOperatorPin,
+      );
+      cashier.client.authenticationSession.establish(relogin);
+      await cashier.controller.retryPendingCommand();
+
+      final recovered = _snapshot(cashier.controller);
+      expect(
+        cashier.controller.state.lastCommandResult!.commandId,
+        pending.commandId,
+      );
+      expect(recovered.version, 2);
+      expect(recovered.lineItems, hasLength(1));
+      expect(cashier.controller.state.pendingCommand, isNull);
+      expect(cashier.ids.commandIdCalls, commandIdCallsBeforeRetry);
     },
   );
 

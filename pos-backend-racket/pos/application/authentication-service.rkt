@@ -1,0 +1,225 @@
+#lang racket
+
+(require (prefix-in db: db)
+         "../domain/operator-identity.rkt"
+         "../persistence/sqlite-authentication.rkt"
+         "../persistence/sqlite-auth-throttle.rkt"
+         "../persistence/sqlite-operators.rkt"
+         "../security/operator-pin.rkt"
+         "../security/operator-session.rkt")
+
+(provide make-authentication-service
+         authentication-service?
+         authentication-service-connection
+         authentication-service-session-store
+         (struct-out authenticated-operator)
+         (struct-out authentication-login-succeeded)
+         (struct-out authentication-login-failed)
+         (struct-out authentication-login-unavailable)
+         (struct-out authentication-session-authenticated)
+         (struct-out authentication-session-invalid)
+         (struct-out authentication-session-unavailable)
+         (struct-out authentication-logout-succeeded)
+         authentication-service-login
+         authentication-service-authenticate
+         authentication-service-logout)
+
+(define dummy-pin "50627184")
+(define default-dummy-password-hash
+  (delay (hash-operator-pin dummy-pin)))
+
+(struct authenticated-operator (operator-id display-name role) #:transparent)
+(struct authentication-login-succeeded
+  (access-token principal session-id absolute-expires-at-epoch-ms)
+  #:transparent)
+(struct authentication-login-failed () #:transparent)
+(struct authentication-login-unavailable () #:transparent)
+(struct authentication-session-authenticated (principal session) #:transparent)
+(struct authentication-session-invalid () #:transparent)
+(struct authentication-session-unavailable () #:transparent)
+(struct authentication-logout-succeeded () #:transparent)
+
+(struct authentication-service
+  (connection
+   session-store
+   current-epoch-ms
+   verify-pin
+   dummy-password-hash
+   attempt-lock
+   after-verification)
+  #:transparent)
+
+(define (system-current-epoch-ms)
+  (inexact->exact (floor (current-inexact-milliseconds))))
+
+(define (system-current-monotonic-ms)
+  (inexact->exact (floor (current-inexact-monotonic-milliseconds))))
+
+(define (check-procedure who value arity name)
+  (unless (and (procedure? value) (procedure-arity-includes? value arity))
+    (raise-arguments-error who "invalid procedure" name value)))
+
+(define (make-authentication-service
+         connection
+         #:session-store [session-store #f]
+         #:current-monotonic-ms
+         [current-monotonic-ms system-current-monotonic-ms]
+         #:current-epoch-ms [current-epoch-ms system-current-epoch-ms]
+         #:verify-pin [verify-pin verify-operator-pin]
+         #:dummy-password-hash [dummy-password-hash #f]
+         #:after-verification [after-verification void])
+  (define who 'make-authentication-service)
+  (unless (db:connection? connection)
+    (raise-argument-error who "connection?" connection))
+  (check-procedure who current-monotonic-ms 0 "current-monotonic-ms")
+  (check-procedure who current-epoch-ms 0 "current-epoch-ms")
+  (check-procedure who verify-pin 2 "verify-pin")
+  (check-procedure who after-verification 0 "after-verification")
+  (define effective-session-store
+    (or session-store
+        (make-operator-session-store
+         #:current-monotonic-ms current-monotonic-ms
+         #:current-epoch-ms current-epoch-ms)))
+  (unless (operator-session-store? effective-session-store)
+    (raise-argument-error who "operator-session-store?" effective-session-store))
+  (define effective-dummy-hash
+    (or dummy-password-hash (force default-dummy-password-hash)))
+  (unless (operator-pin-password-hash-supported? effective-dummy-hash)
+    (raise-argument-error
+     who "supported-operator-pin-password-hash?" effective-dummy-hash))
+  (authentication-service
+   connection
+   effective-session-store
+   current-epoch-ms
+   verify-pin
+   effective-dummy-hash
+   (make-semaphore 1)
+   after-verification))
+
+(define (operator->principal operator)
+  (authenticated-operator
+   (operator-identity-operator-id operator)
+   (operator-identity-display-name operator)
+   (operator-identity-role operator)))
+
+(define (attempt-login-under-lock service operator-id pin)
+  (define connection (authentication-service-connection service))
+  (define now ((authentication-service-current-epoch-ms service)))
+  (define valid-id?
+    (and (string? operator-id) (positive? (string-length operator-id))))
+  (define operator (and valid-id? (load-operator connection operator-id)))
+  (define credential
+    (and operator (load-operator-pin-record connection operator-id)))
+  (define throttle
+    (and operator (load-operator-login-throttle connection operator-id)))
+  (define blocked?
+    (and throttle (operator-login-throttle-blocked? throttle now)))
+  (define eligible?
+    (and operator
+         (operator-identity-active? operator)
+         credential
+         (operator-pin-verification-input-valid? pin)
+         (operator-pin-password-hash-supported?
+          (operator-pin-record-password-hash credential))
+         (not blocked?)))
+  (define checked-hash
+    (if eligible?
+        (operator-pin-record-password-hash credential)
+        (authentication-service-dummy-password-hash service)))
+  ;; Invalid syntax still incurs the current real Argon2 cost using a fixed
+  ;; safe input; database/account distinctions do not get a fast path.
+  (define checked-pin
+    (if (operator-pin-verification-input-valid? pin) pin dummy-pin))
+  (define verified?
+    (with-handlers ([exn:fail? (lambda (_exception) #f)])
+      ((authentication-service-verify-pin service) checked-pin checked-hash)))
+  ((authentication-service-after-verification service))
+  (cond
+    [(and eligible? verified?)
+     (define confirmation
+       (confirm-operator-login!
+        connection
+        operator-id
+        (operator-pin-record-password-hash credential)
+        (operator-pin-record-credential-revision credential)))
+     (cond
+       [(operator-login-confirmed? confirmation)
+        (define current-operator
+          (operator-login-confirmed-operator confirmation))
+        (define issued
+          (operator-session-store-issue!
+           (authentication-service-session-store service)
+           operator-id
+           (operator-pin-record-credential-revision credential)))
+        (authentication-login-succeeded
+         (issued-operator-session-access-token issued)
+         (operator->principal current-operator)
+         (issued-operator-session-session-id issued)
+         (issued-operator-session-absolute-expires-at-epoch-ms issued))]
+       [else (authentication-login-failed)])]
+    [else
+     (when (and operator (not blocked?))
+       (record-operator-login-failure! connection operator-id now))
+     (authentication-login-failed)]))
+
+(define (authentication-service-login service operator-id pin)
+  (unless (authentication-service? service)
+    (raise-argument-error
+     'authentication-service-login "authentication-service?" service))
+  (call-with-semaphore
+   (authentication-service-attempt-lock service)
+   (lambda ()
+     (with-handlers ([exn:fail?
+                      (lambda (_exception)
+                        (authentication-login-unavailable))])
+       (attempt-login-under-lock service operator-id pin)))))
+
+(define (authentication-service-authenticate service access-token)
+  (unless (authentication-service? service)
+    (raise-argument-error
+     'authentication-service-authenticate "authentication-service?" service))
+  (define store (authentication-service-session-store service))
+  (define session (operator-session-store-find store access-token))
+  (cond
+    [(not session) (authentication-session-invalid)]
+    [else
+     (with-handlers ([exn:fail?
+                      (lambda (_exception)
+                        ;; A transient authoritative-state failure is not proof
+                        ;; that this capability was revoked. Fail closed for the
+                        ;; request but retain it for a later retry.
+                        (authentication-session-unavailable))])
+       (define connection (authentication-service-connection service))
+       (define operator
+         (load-operator connection (operator-session-operator-id session)))
+       (define credential
+         (and operator
+              (load-operator-pin-record
+               connection (operator-session-operator-id session))))
+       (cond
+         [(not (and operator
+                    (operator-identity-active? operator)
+                    credential
+                    (= (operator-pin-record-credential-revision credential)
+                       (operator-session-credential-revision session))))
+          (operator-session-store-invalidate! store access-token)
+          (authentication-session-invalid)]
+         [else
+          ;; Refresh only after authoritative security state is confirmed. A
+          ;; concurrently replaced/expired register session cannot be revived.
+          (define refreshed
+            (operator-session-store-refresh! store access-token))
+          (if refreshed
+              (authentication-session-authenticated
+               (operator->principal operator) refreshed)
+              (authentication-session-invalid))]))]))
+
+(define (authentication-service-logout service access-token)
+  (define authenticated
+    (authentication-service-authenticate service access-token))
+  (cond
+    [(authentication-session-authenticated? authenticated)
+     (operator-session-store-invalidate!
+      (authentication-service-session-store service) access-token)
+     (authentication-logout-succeeded)]
+    [else authenticated]))

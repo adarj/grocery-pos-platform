@@ -114,13 +114,19 @@ without credentials. It does not alter transaction events, command receipts,
 cash movements, shift reconciliation, or historical cashier snapshots. See
 [Operator Identity and PIN Credentials](../security/operator-identity-and-pin-credentials.md).
 
+Migration version 8, `create_operator_login_throttle`, adds durable
+per-known-operator online PIN-failure state. It creates no rows by default and
+does not persist bearer sessions or alter business, operator-role, or credential
+facts. See [Authenticated Sessions and Register Lock](../security/authenticated-sessions-and-register-lock.md).
+
 The migration runner treats recorded history as an exact prefix of the known
-ordered migration list. A fresh database applies versions 1 through 7. Real
+ordered migration list. A fresh database applies versions 1 through 8. Real
 v1/v2 databases upgrade through the remaining sequence, while a real v3
 database preserves its merchandise rows and receives zero-tax mappings. A
 correct v4 database gains empty operational tables, and a correct v5 database
 with no open shift gains empty cash-accountability tables. A correct v6 database
-preserves every M6 fact and gains operator identity state. Unknown, skipped,
+preserves every M6 fact and gains operator identity state; a correct v7 database
+gains an empty login-throttle table. Unknown, skipped,
 reordered, renamed, or drifted migration state fails rather than being silently
 repaired.
 

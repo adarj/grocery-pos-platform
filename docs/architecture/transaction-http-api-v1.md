@@ -453,9 +453,10 @@ errors, corrupt journal contents, raw command JSON, or application persistence
 details.
 
 The server accepts only literal loopback addresses but is still an application
-trust boundary. Transaction HTTP API v1 does not add authentication,
-actor/session authorization, or remote-service security claims. The surrounding
-server now enforces a native 64 KiB request-body limit and exposes separate
+trust boundary. The surrounding server requires a current process-local bearer
+session before dispatching this transaction API, but Transaction HTTP API v1
+still does not embed actor/session identity or define role authorization. The
+server also enforces a native 64 KiB request-body limit and exposes separate
 `/ready` infrastructure state. ADR-0018 permits bounded connector-level SQLite
 busy retry, never whole-command retry. The transaction API still adds no
 payment behavior or external-effect exactly-once semantics. Flutter now has a
@@ -464,6 +465,6 @@ tender, pre-payment line removal/void, authoritative tax/change, completion,
 next-sale cashier slice, and exact completed-sale receipt lookup. Receipt
 printing, timestamps, broad sale search, paid reversal/refund, and manager
 authorization are not part of the current surface. Register/cashier selection
-is persistent attribution only; it is not PIN/password authentication. The current
+remains persistent attribution distinct from the authenticated operator. The current
 single-category line-tax model and on-screen receipt are not claims of
 universal tax or fiscal compliance.

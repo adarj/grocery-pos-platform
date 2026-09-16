@@ -28,6 +28,9 @@ support_extract_path="$work_root/support-extracted"
 core_log="$work_root/pos-core.log"
 core_pid=''
 base_url=''
+access_token=''
+test_operator_id='cashier-development-01'
+test_operator_pin='80421637'
 
 cleanup() {
   if [[ -n "$core_pid" ]] && kill -0 "$core_pid" 2>/dev/null; then
@@ -51,6 +54,29 @@ run_packaged_script catalog.rkt activate \
 run_packaged_script register-configuration.rkt activate \
   "$repository_root/fixtures/development/register-configuration-v1.json" \
   "$database_path" >/dev/null
+
+# Enroll the already configured cashier through the packaged production
+# operator service. The PIN is sent over stdin and is never placed in argv.
+TEST_DB_PATH="$database_path" TEST_PAYLOAD_ROOT="$payload_root" racket -e \
+  '(require db)
+   (define payload (string->path (getenv "TEST_PAYLOAD_ROOT")))
+   (define operator-module (build-path payload "pos/application/operator-service.rkt"))
+   (define sqlite-module (build-path payload "pos/persistence/sqlite-connection.rkt"))
+   (define migration-module (build-path payload "pos/persistence/pos-database-migrations.rkt"))
+   (define open-pos (dynamic-require sqlite-module (quote open-pos-sqlite-connection)))
+   (define validate (dynamic-require migration-module (quote validate-pos-database-schema!)))
+   (define make-service (dynamic-require operator-module (quote make-operator-service)))
+   (define enroll (dynamic-require operator-module (quote operator-service-enroll-pin)))
+   (define succeeded? (dynamic-require operator-module (quote operator-pin-enrollment-succeeded?)))
+   (define pin (read-line))
+   (define connection (open-pos (getenv "TEST_DB_PATH") (quote read/write)))
+   (dynamic-wind
+     void
+     (lambda ()
+       (validate connection #:require-current? #t)
+       (unless (succeeded? (enroll (make-service connection) "cashier-development-01" pin))
+         (error (quote packaged-auth-smoke) "credential enrollment failed")))
+     (lambda () (disconnect connection)))' <<<"$test_operator_pin"
 
 PIN_MODULE="$payload_root/pos/security/operator-pin.rkt" racket -e \
   '(define module-path (string->path (getenv "PIN_MODULE")))
@@ -90,7 +116,7 @@ start_core() {
       fail "packaged POS Core exited before readiness"
     fi
     if readiness="$(curl --silent --show-error --max-time 1 "$base_url/ready" 2>/dev/null)" &&
-      jq -e '.ok == true and .status == "ready" and .database_schema_version == 7' \
+      jq -e '.ok == true and .status == "ready" and .database_schema_version == 8' \
         <<<"$readiness" >/dev/null; then
       return
     fi
@@ -126,9 +152,25 @@ stop_core_with_sigterm() {
 
 post_json() {
   curl --silent --show-error --fail-with-body \
+    --header "Authorization: Bearer $access_token" \
     --header 'Content-Type: application/json' \
     --data "$2" \
     "$base_url$1"
+}
+
+login_core() {
+  local login
+  login="$(curl --silent --show-error --fail-with-body \
+    --header 'Content-Type: application/json' \
+    --data "$(jq -cn \
+      --arg operator_id "$test_operator_id" \
+      --arg pin "$test_operator_pin" \
+      '{operator_id: $operator_id, pin: $pin}')" \
+    "$base_url/auth/login")"
+  jq -e '.ok == true and .token_type == "Bearer" and
+    .session.operator_id == "cashier-development-01"' \
+    <<<"$login" >/dev/null || fail "packaged authentication failed"
+  access_token="$(jq -r '.access_token' <<<"$login")"
 }
 
 start_core
@@ -136,6 +178,12 @@ start_core
 health="$(curl --silent --show-error --fail "$base_url/health")"
 jq -e '.ok == true and .service == "grocery-pos-core"' <<<"$health" >/dev/null ||
   fail "packaged /health response is invalid"
+
+anonymous_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  "$base_url/register-context")"
+[[ "$anonymous_status" == '401' ]] ||
+  fail "packaged business API accepted an anonymous request"
+login_core
 
 shift="$(post_json '/shifts/open' '{"cashier_id":"cashier-development-01","opening_cash_minor_units":10000}')"
 jq -e '.ok == true and (.shift.shift_id | type == "string")' <<<"$shift" >/dev/null ||
@@ -150,9 +198,22 @@ jq -e '.ok == true and .command_result.outcome_kind == "accepted"' <<<"$scanned"
   fail "packaged transaction scan failed"
 
 stop_core_with_sigterm
+old_access_token="$access_token"
 start_core
 
-recovered="$(curl --silent --show-error --fail "$base_url/transactions/txn-package-restart")"
+stale_response="$work_root/stale-session.json"
+stale_status="$(curl --silent --output "$stale_response" --write-out '%{http_code}' \
+  --header "Authorization: Bearer $old_access_token" \
+  "$base_url/transactions/txn-package-restart")"
+[[ "$stale_status" == '401' ]] &&
+  jq -e '.ok == false and .error.code == "authentication_required"' \
+    "$stale_response" >/dev/null ||
+  fail "packaged POS Core restart did not invalidate the old session"
+login_core
+
+recovered="$(curl --silent --show-error --fail \
+  --header "Authorization: Bearer $access_token" \
+  "$base_url/transactions/txn-package-restart")"
 jq -e '.ok == true and .transaction.status == "open" and .transaction.version == 2 and (.transaction.line_items | length) == 1 and .transaction.total_minor_units == 219' \
   <<<"$recovered" >/dev/null ||
   fail "durable packaged transaction was not recovered after restart"
@@ -183,7 +244,7 @@ run_packaged_script catalog.rkt activate \
   "$restore_target_path" >/dev/null
 restore_result="$(run_packaged_script database-recovery.rkt restore-offline \
   "$backup_path" "$restore_target_path")"
-jq -e '.ok == true and .operation == "restore_offline" and .restored_schema_version == 7' \
+jq -e '.ok == true and .operation == "restore_offline" and .restored_schema_version == 8' \
   <<<"$restore_result" >/dev/null ||
   fail "packaged offline restore failed"
 recovery_directory="$(jq -r '.recovery_evidence_directory' <<<"$restore_result")"
@@ -192,7 +253,9 @@ recovery_directory="$(jq -r '.recovery_evidence_directory' <<<"$restore_result")
 
 database_path="$restore_target_path"
 start_core
+login_core
 restored_transaction="$(curl --silent --show-error --fail \
+  --header "Authorization: Bearer $access_token" \
   "$base_url/transactions/txn-package-restart")"
 jq -e '.ok == true and .transaction.status == "open" and .transaction.version == 2' \
   <<<"$restored_transaction" >/dev/null ||

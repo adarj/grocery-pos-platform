@@ -4,6 +4,8 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import 'models/command_result.dart';
+import 'authentication_client.dart';
+import 'models/authentication.dart';
 import 'models/canonical_receipt.dart';
 import 'models/json_fields.dart';
 import 'models/pos_core_failure.dart';
@@ -14,22 +16,30 @@ import 'models/transaction_command.dart';
 import 'models/transaction_snapshot.dart';
 import 'pos_core_client.dart';
 
-final class HttpPosCoreClient implements PosCoreClient {
+final class HttpPosCoreClient
+    implements PosCoreClient, PosAuthenticationClient {
   HttpPosCoreClient({
     required this.baseUri,
     http.Client? httpClient,
+    MemoryAuthenticationSession? authenticationSession,
     this.timeout = const Duration(seconds: 3),
   }) : _httpClient = httpClient ?? http.Client(),
-       _ownsHttpClient = httpClient == null;
+       _ownsHttpClient = httpClient == null,
+       authenticationSession =
+           authenticationSession ?? MemoryAuthenticationSession();
 
   final Uri baseUri;
   final Duration timeout;
   final http.Client _httpClient;
   final bool _ownsHttpClient;
+  final MemoryAuthenticationSession authenticationSession;
 
   @override
   Future<PosCoreHealth> fetchHealth() async {
-    final response = await _get(baseUri.resolve('/health'));
+    final response = await _get(
+      baseUri.resolve('/health'),
+      authenticated: false,
+    );
     final body = _decodeObject(response);
 
     if (response.statusCode != 200) {
@@ -41,7 +51,10 @@ final class HttpPosCoreClient implements PosCoreClient {
 
   @override
   Future<PosCoreReadiness> fetchReadiness() async {
-    final response = await _get(baseUri.resolve('/ready'));
+    final response = await _get(
+      baseUri.resolve('/ready'),
+      authenticated: false,
+    );
     final body = _decodeObject(response);
 
     if (response.statusCode == 200 || response.statusCode == 503) {
@@ -301,15 +314,88 @@ final class HttpPosCoreClient implements PosCoreClient {
     return summary;
   }
 
+  @override
+  Future<AuthenticationLogin> login(String operatorId, String pin) async {
+    final response = await _postJson(
+      baseUri.resolve('/auth/login'),
+      <String, Object?>{'operator_id': operatorId, 'pin': pin},
+      authenticated: false,
+    );
+    final body = _decodeObject(response);
+    if (response.statusCode == 200 &&
+        requireJsonBool(body, 'ok', 'login response')) {
+      final token = requireJsonString(
+        body,
+        'access_token',
+        'login response',
+        nonEmpty: true,
+      );
+      if (requireJsonString(body, 'token_type', 'login response') != 'Bearer') {
+        throw const PosCoreInvalidResponseFailure(
+          'POS Core login token type is unsupported.',
+        );
+      }
+      final session = AuthenticatedOperatorSession.fromJson(
+        expectJsonObject(body['session'], 'login response session'),
+      );
+      return AuthenticationLogin(accessToken: token, session: session);
+    }
+    if (body.containsKey('error')) {
+      throw _serverFailureFrom(body, response.statusCode);
+    }
+    throw const PosCoreInvalidResponseFailure(
+      'POS Core login response is inconsistent.',
+    );
+  }
+
+  @override
+  Future<AuthenticatedOperatorSession> fetchAuthenticatedSession() async {
+    final body = await _successfulQueryObject(
+      await _get(baseUri.resolve('/auth/session')),
+      'authenticated session response',
+    );
+    final session = AuthenticatedOperatorSession.fromJson(
+      expectJsonObject(
+        body['session'],
+        'authenticated session response session',
+      ),
+    );
+    authenticationSession.updateSession(session);
+    return session;
+  }
+
+  @override
+  Future<void> logout(String accessToken) async {
+    final response = await _postJson(
+      baseUri.resolve('/auth/logout'),
+      const <String, Object?>{},
+      tokenOverride: accessToken,
+      includeBody: false,
+    );
+    final body = _decodeObject(response);
+    if (response.statusCode == 200 &&
+        requireJsonBool(body, 'ok', 'logout response')) {
+      return;
+    }
+    if (body.containsKey('error')) {
+      throw _serverFailureFrom(body, response.statusCode);
+    }
+    throw const PosCoreInvalidResponseFailure(
+      'POS Core logout response is inconsistent.',
+    );
+  }
+
   void close() {
     if (_ownsHttpClient) {
       _httpClient.close();
     }
   }
 
-  Future<http.Response> _get(Uri uri) async {
+  Future<http.Response> _get(Uri uri, {bool authenticated = true}) async {
     try {
-      return await _httpClient.get(uri).timeout(timeout);
+      return await _httpClient
+          .get(uri, headers: _requestHeaders(authenticated: authenticated))
+          .timeout(timeout);
     } on Exception {
       throw const PosCoreTransportFailure('Unable to reach POS Core.');
     }
@@ -320,13 +406,7 @@ final class HttpPosCoreClient implements PosCoreClient {
     Map<String, Object?> body,
   ) async {
     try {
-      return await _httpClient
-          .post(
-            uri,
-            headers: const {'Content-Type': 'application/json'},
-            body: jsonEncode(body),
-          )
-          .timeout(timeout);
+      return await _postJson(uri, body);
     } on Exception {
       throw const PosCoreTransportFailure('Unable to reach POS Core.');
     }
@@ -363,7 +443,7 @@ final class HttpPosCoreClient implements PosCoreClient {
       return await _httpClient
           .post(
             baseUri.resolve('/transaction-commands'),
-            headers: const {'Content-Type': 'application/json'},
+            headers: _requestHeaders(json: true),
             body: jsonEncode(command.toJson()),
           )
           .timeout(timeout);
@@ -374,6 +454,45 @@ final class HttpPosCoreClient implements PosCoreClient {
         retrySameCommandId: true,
       );
     }
+  }
+
+  Future<http.Response> _postJson(
+    Uri uri,
+    Map<String, Object?> body, {
+    bool authenticated = true,
+    String? tokenOverride,
+    bool includeBody = true,
+  }) async {
+    try {
+      return await _httpClient
+          .post(
+            uri,
+            headers: _requestHeaders(
+              json: includeBody,
+              authenticated: authenticated,
+              tokenOverride: tokenOverride,
+            ),
+            body: includeBody ? jsonEncode(body) : null,
+          )
+          .timeout(timeout);
+    } on Exception {
+      throw const PosCoreTransportFailure('Unable to reach POS Core.');
+    }
+  }
+
+  Map<String, String> _requestHeaders({
+    bool json = false,
+    bool authenticated = true,
+    String? tokenOverride,
+  }) {
+    final headers = <String, String>{
+      if (json) 'Content-Type': 'application/json',
+    };
+    final token =
+        tokenOverride ??
+        (authenticated ? authenticationSession.accessToken : null);
+    if (token != null) headers['Authorization'] = 'Bearer $token';
+    return headers;
   }
 
   Map<String, Object?> _decodeObject(http.Response response) {
@@ -404,18 +523,28 @@ final class HttpPosCoreClient implements PosCoreClient {
     final reason = error.containsKey('reason')
         ? requireJsonString(error, 'reason', context, nonEmpty: true)
         : null;
-    final retrySameCommandId =
-        preserveRetrySameCommandId && error.containsKey('retry_same_command_id')
+    final authenticationRejectedBeforeCommand =
+        preserveRetrySameCommandId &&
+        statusCode == 401 &&
+        error['code'] == 'authentication_required';
+    final retrySameCommandId = authenticationRejectedBeforeCommand
+        ? true
+        : preserveRetrySameCommandId &&
+              error.containsKey('retry_same_command_id')
         ? requireJsonBool(error, 'retry_same_command_id', context)
         : false;
 
-    return PosCoreServerFailure(
+    final failure = PosCoreServerFailure(
       code: requireJsonString(error, 'code', context, nonEmpty: true),
       message: requireJsonString(error, 'message', context, nonEmpty: true),
       reason: reason,
       statusCode: statusCode,
       retrySameCommandId: retrySameCommandId,
     );
+    if (statusCode == 401 && failure.code == 'authentication_required') {
+      authenticationSession.clear();
+    }
+    return failure;
   }
 
   void _validateCommandResultEnvelope(

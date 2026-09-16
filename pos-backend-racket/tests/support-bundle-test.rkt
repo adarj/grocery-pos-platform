@@ -19,12 +19,15 @@
 (define pin-sentinel "80421637")
 (define credential-sentinel
   "$argon2id$v=19$m=19456,t=2,p=1$CREDENTIAL_HASH_MUST_NOT_BE_EXPORTED$hash")
+(define bearer-token-sentinel
+  "gpos_s1_BEARER_TOKEN_MUST_NOT_BE_EXPORTED_0123456789abcdef")
 (define privacy-sentinels
   (list privacy-sentinel
         operator-id-sentinel
         operator-name-sentinel
         pin-sentinel
-        credential-sentinel))
+        credential-sentinel
+        bearer-token-sentinel))
 
 (define (call-with-temporary-directory procedure)
   (define directory
@@ -91,7 +94,7 @@ SQL
           'ExecMainCode 1
           'ExecMainStatus 0
           'NRestarts 0
-          'Environment privacy-sentinel
+          'Environment bearer-token-sentinel
           'ExecStart privacy-sentinel))
 
 (define (fake-api-provider)
@@ -104,7 +107,7 @@ SQL
                   'ok #t
                   'service "grocery-pos-core"
                   'status "ready"
-                  'database_schema_version 7
+                  'database_schema_version 8
                   'exception privacy-sentinel)))
 
 (define (fake-storage-provider _state-path)
@@ -181,7 +184,7 @@ SQL
          (call-with-input-file
           (build-path extraction-path "database.json") read-json))
        (check-equal? (hash-ref database 'migration_status) "current")
-       (check-equal? (hash-ref database 'current_supported_migration_version) 7)
+       (check-equal? (hash-ref database 'current_supported_migration_version) 8)
        (check-false (hash-has-key? database 'path))
        (check-false (hash-has-key? database 'diagnostic))
 

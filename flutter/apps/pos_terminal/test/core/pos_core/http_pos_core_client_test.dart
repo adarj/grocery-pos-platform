@@ -4,6 +4,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:pos_terminal/core/pos_core/http_pos_core_client.dart';
+import 'package:pos_terminal/core/pos_core/authentication_client.dart';
+import 'package:pos_terminal/core/pos_core/models/authentication.dart';
 import 'package:pos_terminal/core/pos_core/models/command_result.dart';
 import 'package:pos_terminal/core/pos_core/models/canonical_receipt.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_failure.dart';
@@ -91,6 +93,122 @@ void main() {
       expect(health.service, 'grocery-pos-core');
     },
   );
+
+  test(
+    'login uses the public route and protected requests use memory bearer',
+    () async {
+      const token =
+          'gpos_s1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+      const session = AuthenticatedOperatorSession(
+        operatorId: 'operator-1',
+        displayName: 'Operator One',
+        role: 'cashier',
+        idleTimeoutSeconds: 300,
+        absoluteExpiresAtEpochMs: 9999999999999,
+      );
+      final memory = MemoryAuthenticationSession();
+      var requestNumber = 0;
+      final client = HttpPosCoreClient(
+        baseUri: baseUri,
+        authenticationSession: memory,
+        httpClient: MockClient((request) async {
+          requestNumber += 1;
+          if (requestNumber == 1) {
+            expect(request.url.path, '/auth/login');
+            expect(request.headers['authorization'], isNull);
+            expect(jsonDecode(request.body), {
+              'operator_id': 'operator-1',
+              'pin': '80421637',
+            });
+            return http.Response(
+              jsonBody({
+                'ok': true,
+                'access_token': token,
+                'token_type': 'Bearer',
+                'session': {
+                  'operator_id': 'operator-1',
+                  'display_name': 'Operator One',
+                  'role': 'cashier',
+                  'idle_timeout_seconds': 300,
+                  'absolute_expires_at_epoch_ms': 9999999999999,
+                },
+              }),
+              200,
+            );
+          }
+          expect(request.url.path, '/register-context');
+          expect(request.headers['authorization'], 'Bearer $token');
+          return http.Response(
+            jsonBody({
+              'ok': true,
+              'register_context': {
+                'configured': false,
+                'register': null,
+                'active_shift': null,
+              },
+            }),
+            200,
+          );
+        }),
+      );
+
+      final login = await client.login('operator-1', '80421637');
+      expect(login.accessToken, token);
+      expect(memory.accessToken, isNull);
+      memory.establish(
+        const AuthenticationLogin(accessToken: token, session: session),
+      );
+      await client.fetchRegisterContext();
+      expect(requestNumber, 2);
+    },
+  );
+
+  test('protected 401 clears memory bearer while 503 retains it', () async {
+    const token =
+        'gpos_s1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    const login = AuthenticationLogin(
+      accessToken: token,
+      session: AuthenticatedOperatorSession(
+        operatorId: 'operator-1',
+        displayName: 'Operator One',
+        role: 'cashier',
+        idleTimeoutSeconds: 300,
+        absoluteExpiresAtEpochMs: 9999999999999,
+      ),
+    );
+    final memory = MemoryAuthenticationSession()..establish(login);
+    var status = 503;
+    final client = HttpPosCoreClient(
+      baseUri: baseUri,
+      authenticationSession: memory,
+      httpClient: MockClient(
+        (_) async => http.Response(
+          jsonBody({
+            'ok': false,
+            'error': {
+              'code': status == 401
+                  ? 'authentication_required'
+                  : 'authentication_unavailable',
+              'message': 'Safe message.',
+            },
+          }),
+          status,
+        ),
+      ),
+    );
+
+    await expectLater(
+      client.fetchRegisterContext(),
+      throwsA(isA<PosCoreServerFailure>()),
+    );
+    expect(memory.accessToken, token);
+    status = 401;
+    await expectLater(
+      client.fetchRegisterContext(),
+      throwsA(isA<PosCoreServerFailure>()),
+    );
+    expect(memory.accessToken, isNull);
+  });
 
   test('fetchReadiness parses ready production state', () async {
     final client = HttpPosCoreClient(
@@ -246,6 +364,60 @@ void main() {
       );
     }
   });
+
+  test(
+    'authentication rejection keeps the exact persisted command retryable',
+    () async {
+      final memory = MemoryAuthenticationSession()
+        ..establish(
+          const AuthenticationLogin(
+            accessToken:
+                'gpos_s1_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+            session: AuthenticatedOperatorSession(
+              operatorId: 'operator-1',
+              displayName: 'Operator One',
+              role: 'cashier',
+              idleTimeoutSeconds: 300,
+              absoluteExpiresAtEpochMs: 9999999999999,
+            ),
+          ),
+        );
+      final client = HttpPosCoreClient(
+        baseUri: baseUri,
+        authenticationSession: memory,
+        httpClient: MockClient(
+          (_) async => http.Response(
+            jsonBody({
+              'ok': false,
+              'error': {
+                'code': 'authentication_required',
+                'message': 'Authentication is required.',
+              },
+            }),
+            401,
+          ),
+        ),
+      );
+
+      await expectLater(
+        client.executeCommand(startCommand),
+        throwsA(
+          isA<PosCoreServerFailure>()
+              .having(
+                (failure) => failure.code,
+                'code',
+                'authentication_required',
+              )
+              .having(
+                (failure) => failure.retrySameCommandId,
+                'retrySameCommandId',
+                isTrue,
+              ),
+        ),
+      );
+      expect(memory.authenticated, isFalse);
+    },
+  );
 
   test(
     'command transport failure is uncertain and never auto-retried',

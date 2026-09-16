@@ -45,6 +45,7 @@ final class RealPosCoreFixture {
   bool _disposed = false;
   bool _catalogPrepared = false;
   bool _operationalConfigurationPrepared = false;
+  bool _operatorCredentialPrepared = false;
 
   String get databasePath => _join(temporaryDirectory.path, 'pos.db');
 
@@ -278,6 +279,10 @@ final class RealPosCoreFixture {
       await _runOperationalConfigurationActivation(configurationPath);
       _operationalConfigurationPrepared = true;
     }
+    if (!_operatorCredentialPrepared) {
+      await _runOperatorCredentialEnrollment();
+      _operatorCredentialPrepared = true;
+    }
   }
 
   Future<void> _runCatalogActivation(String catalogPath) async {
@@ -350,6 +355,46 @@ final class RealPosCoreFixture {
     if (exitCode != 0) {
       throw StateError(
         'Register configuration activation for POS Core fixture failed with '
+        'exit code $exitCode.\nstdout:\n$output\nstderr:\n$errorOutput',
+      );
+    }
+  }
+
+  Future<void> _runOperatorCredentialEnrollment() async {
+    final backendDirectory = _join(repositoryRoot.path, 'pos-backend-racket');
+    final process = await Process.start(
+      'racket',
+      [
+        'tests/support/enroll-integration-operator.rkt',
+        databasePath,
+        'cashier-development-01',
+      ],
+      workingDirectory: backendDirectory,
+      environment: Platform.environment,
+    );
+    process.stdin.writeln('80421637');
+    await process.stdin.close();
+    final stdoutFuture = process.stdout.transform(utf8.decoder).join();
+    final stderrFuture = process.stderr.transform(utf8.decoder).join();
+
+    int exitCode;
+    try {
+      exitCode = await process.exitCode.timeout(
+        _referenceDataActivationTimeout,
+      );
+    } on TimeoutException {
+      process.kill(ProcessSignal.sigkill);
+      await process.exitCode.timeout(_shutdownTimeout);
+      throw TimeoutException(
+        'Timed out enrolling the isolated integration operator.',
+        _referenceDataActivationTimeout,
+      );
+    }
+    final output = await stdoutFuture;
+    final errorOutput = await stderrFuture;
+    if (exitCode != 0) {
+      throw StateError(
+        'Operator credential enrollment for POS Core fixture failed with '
         'exit code $exitCode.\nstdout:\n$output\nstderr:\n$errorOutput',
       );
     }

@@ -76,17 +76,24 @@ SQL
         #(4 "create_tax_categories")
         #(5 "create_register_operations")
         #(6 "create_shift_cash_accountability")
-        #(7 "create_operator_identity_credentials")))
+        #(7 "create_operator_identity_credentials")
+        #(8 "create_operator_login_throttle")))
+
+(define (rewind-current-fixture-to-v7! connection)
+  (migrate-pos-database! connection)
+  (query-exec connection "DROP TABLE operator_login_throttle")
+  (query-exec connection "DELETE FROM pos_schema_migrations WHERE version = 8"))
 
 (define (rewind-current-fixture-to-v6! connection)
   ;; The v1-v6 definitions remain owned by the production migrator. Rewinding
   ;; only the newly owned v7 objects gives this test a populated, valid v6
   ;; prefix without copying historical SQL into another fixture.
   (migrate-pos-database! connection)
+  (query-exec connection "DROP TABLE operator_login_throttle")
   (query-exec connection "DROP TABLE operator_pin_credentials")
   (query-exec connection "DROP TABLE operator_roles")
   (query-exec connection "DROP TABLE operators")
-  (query-exec connection "DELETE FROM pos_schema_migrations WHERE version = 7"))
+  (query-exec connection "DELETE FROM pos_schema_migrations WHERE version >= 7"))
 
 (define m6-business-tables
   '(transaction_events
@@ -191,7 +198,7 @@ SQL
      (lambda (connection)
        (install-frozen-v1! connection)
 
-       (check-equal? current-pos-database-schema-version 7)
+       (check-equal? current-pos-database-schema-version 8)
        (check-equal?
         (read-pos-database-migration-history connection)
         (list #(1 "create_transaction_events")))
@@ -245,7 +252,7 @@ SQL
 
        (query-exec
         connection
-        "INSERT INTO pos_schema_migrations (version, name) VALUES (8, 'unknown')")
+        "INSERT INTO pos_schema_migrations (version, name) VALUES (9, 'unknown')")
        (define unsupported-history
          (read-pos-database-migration-history connection))
        (check-equal?
@@ -255,7 +262,7 @@ SQL
         exn:fail?
         (lambda () (validate-pos-database-schema! connection))))))
 
-  (test-case "fresh database migrates through versions 1 through 7"
+  (test-case "fresh database migrates through versions 1 through 8"
     (call-with-test-database
      (lambda (connection)
        (migrate-pos-database! connection)
@@ -302,6 +309,63 @@ SQL
          connection
         "SELECT version, name FROM pos_schema_migrations ORDER BY version")
         expected-migration-history))))
+
+  (test-case "v8 adds strict durable throttle state without changing v7 data"
+    (call-with-test-database
+     (lambda (connection)
+       (rewind-current-fixture-to-v7! connection)
+       (query-exec connection "PRAGMA foreign_keys = ON")
+       (query-exec
+        connection
+        "INSERT INTO operators VALUES ('manager-1', 'Manager One', 1)")
+       (query-exec
+        connection
+        "INSERT INTO operator_roles VALUES ('manager-1', 'manager')")
+       (query-exec
+        connection
+        #<<SQL
+INSERT INTO operator_pin_credentials
+  (operator_id, password_hash, credential_revision)
+VALUES
+  ('manager-1',
+   '$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0c2FsdA$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g',
+   1)
+SQL
+        )
+       (define v7-state
+         (for/hash ([table (in-list (append m6-business-tables
+                                            '(operators
+                                              operator_roles
+                                              operator_pin_credentials)))])
+           (values table
+                   (query-rows connection
+                               (format "SELECT * FROM ~a ORDER BY rowid" table)))))
+
+       (migrate-pos-database! connection)
+
+       (for ([(table rows) (in-hash v7-state)])
+         (check-equal?
+          (query-rows connection (format "SELECT * FROM ~a ORDER BY rowid" table))
+          rows))
+       (check-equal?
+        (query-value connection "SELECT COUNT(*) FROM operator_login_throttle")
+        0)
+       (check-equal?
+        (query-rows connection "PRAGMA table_info('operator_login_throttle')")
+        (list (vector 0 "operator_id" "TEXT" 1 sql-null 1)
+              (vector 1 "consecutive_failures" "INTEGER" 1 sql-null 0)
+              (vector 2 "last_failed_at_epoch_ms" "INTEGER" 1 sql-null 0)
+              (vector 3 "blocked_until_epoch_ms" "INTEGER" 1 sql-null 0)))
+       (check-not-exn
+        (lambda ()
+          (validate-pos-database-schema! connection #:require-current? #t)))
+       (for ([statement
+              (in-list
+               '("INSERT INTO operator_login_throttle VALUES ('manager-1', 0, 0, 0)"
+                 "INSERT INTO operator_login_throttle VALUES ('manager-1', 1, -1, 0)"
+                 "INSERT INTO operator_login_throttle VALUES ('manager-1', 1, 10, 9)"
+                 "INSERT INTO operator_login_throttle VALUES ('missing', 1, 10, 10)"))])
+         (check-exn exn:fail:sql? (lambda () (query-exec connection statement)))))))
 
   (test-case "v7 backfills active and inactive cashiers without changing M6 state"
     (call-with-test-database
@@ -445,7 +509,7 @@ SQL
        (check-equal? (transaction-status recovered) 'open)
        (check-equal? (transaction-subtotal recovered) (money 199)))))
 
-  (test-case "valid v7 migration is safe to run again"
+  (test-case "valid v8 migration is safe to run again"
     (call-with-test-database
      (lambda (connection)
        (migrate-pos-database! connection)
@@ -473,7 +537,7 @@ SQL
        (migrate-pos-database! connection)
        (query-exec
         connection
-       "INSERT INTO pos_schema_migrations (version, name) VALUES (8, 'unknown')")
+       "INSERT INTO pos_schema_migrations (version, name) VALUES (9, 'unknown')")
        (check-exn exn:fail?
                   (lambda () (migrate-pos-database! connection)))))
 

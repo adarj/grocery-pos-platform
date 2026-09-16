@@ -12,15 +12,21 @@
          "../pos/persistence/operational-configuration-snapshot-codec.rkt"
          "../pos/persistence/pos-database-migrations.rkt"
          "../pos/persistence/sqlite-register-operations.rkt"
-         "../pos/support/readiness.rkt")
+         "../pos/support/readiness.rkt"
+         "support/authentication.rkt")
 
 (define config-json
   "{\"schema_version\":1,\"register\":{\"register_id\":\"register-one\",\"display_name\":\"Register One\"},\"cashiers\":[{\"cashier_id\":\"active\",\"display_name\":\"Alice\",\"active\":true},{\"cashier_id\":\"inactive\",\"display_name\":\"Inactive\",\"active\":false}]}")
+(define test-access-token (box #f))
 
 (define (request* method path [body #f])
   (request method
            (string->url path)
-           (if body (list (header #"Content-Type" #"application/json")) '())
+           (append
+            (if body (list (header #"Content-Type" #"application/json")) '())
+            (if (unbox test-access-token)
+                (list (test-authorization-header (unbox test-access-token)))
+                '()))
            (delay '())
            body
            "127.0.0.1" 7340 "127.0.0.1"))
@@ -49,6 +55,8 @@
        (set-box! clock-values (rest (unbox clock-values)))
        value)
      #:generate-shift-id (lambda () "shift-one")))
+  (define auth-service (make-test-authentication-service connection))
+  (set-box! test-access-token (issue-test-access-token auth-service))
   (define app
     (make-app
      (make-transaction-service
@@ -56,6 +64,7 @@
       #:catalog-lookup fake-catalog-lookup
       #:current-epoch-ms (lambda () 1500))
      register-service
+     #:authentication-service auth-service
      #:readiness-probe
      (lambda () (runtime-ready current-pos-database-schema-version))))
 

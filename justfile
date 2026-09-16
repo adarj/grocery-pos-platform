@@ -31,7 +31,7 @@ test-flutter:
     cd flutter/apps/pos_terminal && flutter test
 
 test-pos-integration:
-    cd flutter/apps/pos_terminal && flutter test --concurrency=1 integration/real_pos_core_test.dart
+    cd flutter/apps/pos_terminal && flutter test --concurrency=1 --timeout=2m integration/real_pos_core_test.dart
 
 analyze-flutter:
     cd flutter/apps/pos_terminal && flutter analyze
@@ -75,7 +75,7 @@ soak-m6 ITERATIONS="1000":
 
 # Optional extended real-process crash campaign; Tier A runs three iterations.
 crash-m6 ITERATIONS="100":
-    cd flutter/apps/pos_terminal && M6_CRASH_ITERATIONS={{quote(ITERATIONS)}} flutter test --concurrency=1 integration/real_pos_core_test.dart --plain-name "repeated accepted commands survive abrupt POS Core process death"
+    cd flutter/apps/pos_terminal && M6_CRASH_ITERATIONS={{quote(ITERATIONS)}} flutter test --concurrency=1 --timeout=2m integration/real_pos_core_test.dart --plain-name "repeated accepted commands survive abrupt POS Core process death"
 
 # Read-only qualification observations for an already booted reference host.
 qualify-m6-kinoite:

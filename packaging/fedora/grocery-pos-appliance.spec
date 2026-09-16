@@ -1,13 +1,13 @@
 Name:           grocery-pos-appliance
 Version:        0.0.0
-Release:        0.1.dev%{?dist}
+Release:        0.2.dev%{?dist}
 Summary:        Fedora Kinoite lifecycle assets for Grocery POS registers
 License:        LicenseRef-Project-Undecided
 URL:            https://github.com/adarj/grocery-pos-platform
 Source0:        %{name}-%{version}.tar.gz
 
 BuildArch:      noarch
-Requires:       grocery-pos-core >= 0.0.0-0.4.dev
+Requires:       grocery-pos-core >= 0.0.0-0.5.dev
 Requires:       coreutils
 Requires:       flatpak
 Requires:       kde-settings-plasmalogin
@@ -54,5 +54,8 @@ install -D -m 0644 packaging/fedora/grocery-pos-terminal.service \
 /usr/lib/systemd/user/grocery-pos-terminal.service
 
 %changelog
+* Mon Sep 14 2026 Grocery POS Platform <internal@invalid> - 0.0.0-0.2.dev
+- Require the POS Core authenticated-session API used by the kiosk terminal.
+
 * Fri Sep 11 2026 Grocery POS Platform <internal@invalid> - 0.0.0-0.1.dev
 - Establish the Fedora Kinoite kiosk provisioning and lifecycle boundary.

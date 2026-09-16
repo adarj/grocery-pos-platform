@@ -152,7 +152,13 @@ Verified capabilities currently include:
   roles, same-ID cashier compatibility, and optional Argon2id PIN credentials
   with no default identities or credentials;
 * root-only packaged operator bootstrap administration with no-echo PIN entry,
-  a fixed canonical database target, and no HTTP authentication cutover yet;
+  a fixed canonical database target, and no HTTP enrollment escape hatch;
+* migration v8 durable per-known-operator login throttling, process-local
+  single-register bearer sessions, five-minute idle/twelve-hour absolute
+  expiry, credential-revision binding, and generic anti-enumeration failures;
+* authenticated local business routes plus a Flutter register lock with
+  memory-only bearer state, manual/inactivity locking, and exact-command
+  recovery preserved across reauthentication and POS Core restart;
 * idempotent persistent transaction application service with deterministic
   two-connection concurrency and file-backed restart/retry coverage;
 * explicit SQLite WAL/FULL connection policy with foreign-key enforcement,
@@ -190,7 +196,7 @@ Verified capabilities currently include:
   cash sales, restart recovery, uncertain transport, durable same-command
   receipt resolution, net drawer movements, shift reconciliation, and mixed
   one-shift endurance;
-* Flutter-to-Racket local health connection;
+* Flutter-to-Racket public health/readiness plus local operator authentication;
 * nixGL-based Flutter GUI launch in the current VM environment;
 * GitHub Actions workflow definitions for scaffold/Nix validation, Racket
   tests, and Flutter analysis/tests;
@@ -269,9 +275,12 @@ just register-config-validate fixtures/development/register-configuration-v1.jso
 just register-config-activate fixtures/development/register-configuration-v1.json .local/sqlite/pos-dev.db
 ```
 
-POS Core does not auto-seed identities. After startup, Flutter selects the
-development cashier and opens a shift. This is identity attribution, not
-PIN/password authentication.
+POS Core does not auto-seed identities or credentials. Before the Checkpoint 2
+terminal can unlock, an administrator must explicitly create/enroll at least
+one active operator through the root-only appliance bootstrap tool described in
+[Operator Identity and PIN Credentials](docs/security/operator-identity-and-pin-credentials.md).
+Cashier selection and shift attribution remain distinct from authentication;
+role-specific authorization is not implemented yet.
 
 ### Terminal 1 — POS Core
 

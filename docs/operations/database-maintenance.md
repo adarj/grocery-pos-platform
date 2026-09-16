@@ -126,7 +126,7 @@ just db-backup-validate BACKUP
 ```
 
 Validation requires a regular nonempty file, healthy full integrity results,
-zero foreign-key violations, exact current migration history through v7, and
+zero foreign-key violations, exact current migration history through v8, and
 all current Grocery POS schema/application validators. It is strictly
 read-only: no migration, WAL conversion, repair, or restore is attempted.
 

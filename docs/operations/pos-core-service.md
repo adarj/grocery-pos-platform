@@ -100,6 +100,12 @@ SIGTERM with a 30-second timeout. `Restart=on-failure` waits five seconds and
 allows at most three starts in 60 seconds. Administrator stop stays stopped;
 persistent startup failure is not hidden by a database reset.
 
+POS Core bearer sessions are intentionally process-local. A normal or abnormal
+service restart preserves SQLite business, credential, and login-throttle state
+but invalidates every register token. `/health` and `/ready` may recover while
+the cashier terminal correctly returns to its lock screen. Do not treat this as
+credential loss or attempt to persist tokens outside the service.
+
 The package does not enable or start the unit and has no install-time migration
 or database scriptlet. Explicit appliance provisioning builds and validates the
 initial database first, then enables/starts the unit and requires `/ready`.
@@ -152,8 +158,23 @@ data. See the [restore runbook](database-restore.md) and
 root-only local bootstrap tool fixed to the canonical database; PIN enrollment
 uses a no-echo repeated prompt and no PIN argv. See
 [Operator Identity and PIN Credentials](../security/operator-identity-and-pin-credentials.md).
-HTTP authentication/authorization, scheduled backup, retention, encryption,
-and replication remain unimplemented.
+The runtime HTTP authentication and register-lock contract is documented in
+[Authenticated Sessions and Register Lock](../security/authenticated-sessions-and-register-lock.md).
+Role-based authorization, scheduled backup, retention, encryption, and
+replication remain unimplemented.
+
+Before activating an upgraded Checkpoint 2 terminal, confirm that at least one
+active operator has an enrolled credential:
+
+```text
+sudo grocery-pos-auth status
+sudo grocery-pos-auth operator list
+```
+
+If necessary, create the first manager and enroll its PIN with the explicit
+root bootstrap commands above. No account or credential is generated during
+package installation, migration, or appliance provisioning, and `/ready` does
+not imply that an unlock credential exists.
 
 ## Provisioning prerequisite
 

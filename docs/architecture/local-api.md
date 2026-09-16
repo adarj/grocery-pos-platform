@@ -101,7 +101,7 @@ a control.
 
 The Racket process now constructs its durable transaction service before the
 HTTP listener starts. Startup resolves `SQLITE_DB_PATH`, migrates and validates
-the POS database through schema v7 using a dedicated connection after
+the POS database through schema v8 using a dedicated connection after
 establishing WAL with FULL synchronous durability. Every production connection
 explicitly enables foreign-key enforcement, retains a 1000-page WAL automatic
 checkpoint threshold, and uses the bounded Racket connector busy policy.
@@ -138,10 +138,48 @@ in the same transaction-command writer boundary. See
 [Shift Cash Accountability](cash-accountability.md).
 
 Migration 7 adds operator principals, fixed roles, and optional Argon2id PIN
-credentials. It deliberately adds no login, session, authorization, or
-`Authorization` HTTP behavior in this checkpoint. Existing cashier IDs remain
-sufficient operational attribution until the later M7 API cutover. See
+credentials. Migration 8 adds durable per-known-operator login throttling.
+Bearer sessions remain process-local, and the runtime now supplies an explicit
+authentication service to the HTTP application. See
 [Operator Identity and PIN Credentials](../security/operator-identity-and-pin-credentials.md).
+
+## Authentication
+
+`POST /auth/login` is public and accepts exactly two string fields:
+
+```json
+{
+  "operator_id": "operator-123",
+  "pin": "80421637"
+}
+```
+
+Successful login returns an opaque 256-bit bearer capability and safe current
+operator/session presentation fields. Missing, inactive, unenrolled, blocked,
+and wrong-credential cases all return HTTP 401 with
+`authentication_failed`; the response never identifies the internal cause.
+Malformed request JSON remains a distinct 400 validation failure.
+
+`GET /auth/session` and `POST /auth/logout` require exactly one
+`Authorization: Bearer TOKEN` header. Query parameters, cookies, body fields,
+environment variables, and files are not bearer transports. Authentication
+responses use `Cache-Control: no-store`; missing/invalid protected credentials
+return `authentication_required` and a Bearer challenge.
+
+`GET /health`, `GET /ready`, and `POST /auth/login` remain public. Every other
+implemented business or auth-session route is protected. Authentication runs
+before its business handler, so an anonymous transaction command creates no
+event, receipt, cash movement, shift change, or command receipt. A genuine
+temporary failure while revalidating session security state returns sanitized
+HTTP 503 `authentication_unavailable` rather than mislabeling a credential as
+invalid.
+
+The server enforces five-minute idle and twelve-hour absolute expiry and checks
+current operator active state, credential presence, and credential revision on
+every protected request. POS Core restart invalidates all bearer sessions.
+Current roles are returned with authenticated principal state, but no
+role-specific authorization policy exists until Checkpoint 3. See
+[Authenticated Sessions and Register Lock](../security/authenticated-sessions-and-register-lock.md).
 
 ## Health Endpoint
 
@@ -177,7 +215,7 @@ production SQLite boundary. A ready response is HTTP 200:
 
 ```json
 {
-  "database_schema_version": 6,
+  "database_schema_version": 8,
   "ok": true,
   "service": "grocery-pos-core",
   "status": "ready"
@@ -398,9 +436,10 @@ Where practical:
 * `409` indicates a valid request that conflicts with current domain state;
 * `5xx` indicates an internal service failure.
 
-HTTP 503 is reserved here for a functioning `/ready` endpoint reporting that
-the runtime/persistence boundary is not ready. It does not replace existing
-domain statuses or transaction-command uncertainty semantics.
+HTTP 503 is used by `/ready` when the runtime/persistence boundary is not ready
+and by protected authentication when authoritative security state is
+temporarily unavailable. It does not replace existing domain statuses or
+transaction-command uncertainty semantics.
 
 Domain-specific error codes remain necessary even when an HTTP status code is supplied.
 
@@ -475,6 +514,9 @@ Currently implemented:
 ```text
 GET /health
 GET /ready
+POST /auth/login
+GET /auth/session
+POST /auth/logout
 POST /transaction-commands
 GET /transactions/{transaction_id}
 GET /receipts/{transaction_id}
@@ -485,7 +527,8 @@ POST /shifts/{shift_id}/close
 GET /shifts/{shift_id}/cash-summary
 ```
 
-The transaction routes expose the durable typed-command mutation,
+The health/readiness/login routes are public; all other routes above require an
+Authorization bearer. The transaction routes expose the durable typed-command mutation,
 authoritative current-state replay query, and canonical completed-sale receipt
 derived from that same replay. Receipt lookup creates no command or cashier
 recovery record. Command-specific mutation routes, broad sale search, and
@@ -495,7 +538,8 @@ Shift open/close are operational resource writes, not transaction commands.
 They create no command ID or same-command retry marker; explicit
 `GET /register-context` and exact shift cash-summary reads resolve transport
 uncertainty. Opening and counted cash are exact integer minor units. Flutter
-does not calculate expected cash or over/short. Cashier selection is attribution
-only and provides no authentication claim.
+does not calculate expected cash or over/short. The authenticated operator and
+the business cashier/shift attribution remain distinct until later
+authorization policy deliberately relates them.
 
 The domain model should drive the interface, not the reverse.

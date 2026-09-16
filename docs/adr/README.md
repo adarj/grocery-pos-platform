@@ -33,3 +33,4 @@ ADRs document important architectural decisions, their context, and their conseq
 - [ADR-0025: Run the cashier UI as a dedicated Plasma kiosk account and system Flatpak](0025-run-cashier-ui-as-dedicated-plasma-flatpak-kiosk.md)
 - [ADR-0026: Require evidence-tiered reliability qualification before Milestone 6 acceptance](0026-require-evidence-tiered-m6-reliability-qualification.md)
 - [ADR-0027: Separate operator identity from cashier attribution and store local PIN credentials with Argon2id](0027-separate-operator-identity-and-pin-credentials.md)
+- [ADR-0028: Use process-local bearer sessions with persistent login throttling](0028-use-process-local-bearer-sessions-with-persistent-login-throttling.md)

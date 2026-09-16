@@ -72,7 +72,7 @@ wal_autocheckpoint: 1000 pages
 If policy setup or verification fails after the underlying connection opens,
 the constructor disconnects it before propagating the failure. This policy is
 separate from schema migration history and does not encode connection settings
-in migration 7. See
+in any migration. See
 [ADR-0018](../adr/0018-use-wal-with-full-synchronous-durability.md).
 
 ## Startup schema lifecycle
@@ -84,7 +84,7 @@ succeeded:
 open dedicated SQLite connection in create mode
   -> establish and verify WAL
   -> establish and verify per-connection durability policy
-  -> run and validate POS database migrations through v7
+  -> run and validate POS database migrations through v8
   -> disconnect dedicated startup connection
   -> construct request-time database resources
   -> construct HTTP application
@@ -194,10 +194,13 @@ data. See [Local Catalog](catalog.md).
 
 The runtime also constructs `register-operations-service` over the same virtual
 connection. Production composition injects a UTC epoch-millisecond clock and a
-cryptographically random 128-bit `shift_` identifier generator. The same clock
-is injected into transaction service planning so new operational start and
-terminal events record one consistent POS-Core-owned time source. Replay never
-calls it.
+cryptographically random 128-bit `shift_` identifier generator. The same epoch
+clock is injected into transaction service planning so new operational start
+and terminal events record one consistent POS-Core-owned time source. Replay
+never calls it. Authentication additionally receives an independently
+injectable process-monotonic clock: monotonic time alone enforces ephemeral
+session idle/absolute deadlines, while epoch time remains appropriate for
+durable login throttling and client-facing expiry metadata.
 
 Runtime migration creates but does not populate register/cashier tables. New
 transaction starts safely reject until an operator activates configuration and
@@ -211,15 +214,23 @@ drawer state at startup. See [Shift Cash Accountability](cash-accountability.md)
 
 Migration v7 adds local operator principals, fixed roles, and optional
 Argon2id PIN credentials. Existing cashiers gain same-ID operator stubs without
-credentials. Runtime readiness validates the new schema and relationships but
-does not hash PINs or require credential enrollment. Authentication is not yet
-part of the HTTP composition; operator bootstrap is a separate root-only
-administrative boundary. See
-[Operator Identity and PIN Credentials](../security/operator-identity-and-pin-credentials.md).
+credentials. Migration v8 adds durable per-known-operator login throttling and
+no default rows. Runtime readiness validates both schemas and relationships but
+does not hash PINs or require credential enrollment.
 
-`make-app` requires the constructed transaction service and an explicit runtime
-readiness probe, then returns the servlet handler. The service and probe are
-captured explicitly rather than stored in globals.
+The runtime constructs one authentication service over the existing bounded
+virtual SQLite connection. That service owns a concurrency-safe, process-local
+single-register session store and a serialized Argon2 attempt boundary. Bearer
+sessions are not persisted: restart locks the register while durable throttle,
+credential, and transaction state survive. Every protected request re-reads
+current operator active/credential-revision state before dispatching its
+business handler. See [Operator Identity and PIN Credentials](../security/operator-identity-and-pin-credentials.md)
+and [Authenticated Sessions and Register Lock](../security/authenticated-sessions-and-register-lock.md).
+
+`make-app` requires the constructed transaction, authentication, and register
+services plus an explicit runtime readiness probe, then returns the servlet
+handler. The services and probe are captured explicitly rather than stored in
+globals.
 Transaction routes delegate to that service through the transport-only adapter
 documented in [Transaction HTTP API v1](transaction-http-api-v1.md).
 
@@ -360,7 +371,7 @@ Focused file-backed tests establish:
   transaction-history loss;
 - normal `read/write` production opening rejecting a non-WAL database;
 - policy failure disconnecting the newly opened connection;
-- fresh runtime migration through schema v7;
+- fresh runtime migration through schema v8;
 - an empty persistent catalog rejecting the former development barcode rather
   than falling back to a fake;
 - active/inactive/unknown persistent catalog lookup behavior and exact
@@ -374,7 +385,10 @@ Focused file-backed tests establish:
 - runtime stop followed by restart, transaction recovery, and same-command-ID
   receipt recovery without duplicate events;
 - read/write request connections refusing to recreate a missing database;
-- unchanged `/health` and unknown-route behavior through `make-app`;
+- public `/health` and `/ready`, strict login/session/logout behavior, and
+  authenticated business-route dispatch through `make-app`;
+- process-local restart invalidation, idle/absolute expiry, current role and
+  credential-revision binding, plus durable bounded login throttling;
 - strict literal-loopback configuration before database startup;
 - separate 200/503 liveness/readiness behavior under live database loss;
 - current, historical-prefix, missing, stopped, and non-WAL readiness states
@@ -401,8 +415,9 @@ Focused file-backed tests establish:
 
 This runtime composition and HTTP adapter do not add:
 
-- authenticated or remote API access;
-- HTTP login/session handling, PIN enforcement, or authorization;
+- remote API access or remote authentication;
+- role-based authorization, manager approval, actor attribution, credential
+  reset, or security audit events;
 - catalog HTTP administration, patch updates, or cloud synchronization;
 - application-level busy retry/backoff or whole-command retry;
 - custom checkpoint scheduling, manual checkpoint tooling, or WAL metrics;

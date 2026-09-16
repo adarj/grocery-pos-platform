@@ -32,7 +32,7 @@ fi
   fail "unexpected RPM package name"
 [[ "$(rpm -qp --queryformat '%{VERSION}' "$rpm_path")" == "0.0.0" ]] ||
   fail "unexpected internal RPM version"
-[[ "$(rpm -qp --queryformat '%{RELEASE}' "$rpm_path")" == "0.4.dev" ]] ||
+[[ "$(rpm -qp --queryformat '%{RELEASE}' "$rpm_path")" == "0.5.dev" ]] ||
   fail "unexpected internal RPM release"
 [[ "$(rpm -qp --queryformat '%{ARCH}' "$rpm_path")" == "noarch" ]] ||
   fail "RPM architecture is not noarch"
@@ -80,13 +80,18 @@ required_files=(
   "$payload_root/main.rkt"
   "$payload_root/pos/runtime.rkt"
   "$payload_root/pos/api/server.rkt"
+  "$payload_root/pos/api/auth-http.rkt"
+  "$payload_root/pos/application/authentication-service.rkt"
   "$payload_root/pos/persistence/sqlite-connection.rkt"
   "$payload_root/pos/persistence/sqlite-maintenance.rkt"
   "$payload_root/pos/persistence/atomic-file.rkt"
   "$payload_root/pos/persistence/sqlite-restore.rkt"
   "$payload_root/pos/persistence/sqlite-operators.rkt"
+  "$payload_root/pos/persistence/sqlite-authentication.rkt"
+  "$payload_root/pos/persistence/sqlite-auth-throttle.rkt"
   "$payload_root/pos/domain/operator-identity.rkt"
   "$payload_root/pos/security/operator-pin.rkt"
+  "$payload_root/pos/security/operator-session.rkt"
   "$payload_root/pos/application/operator-service.rkt"
   "$payload_root/pos/support/appliance-recovery.rkt"
   "$payload_root/pos/support/support-bundle.rkt"
@@ -165,6 +170,19 @@ if grep -Eq '^/var/lib/grocery-pos(/|$)|^/run/grocery-pos(/|$)|^/var/log/grocery
 fi
 if grep -R -a -F -l '/nix/store/' "$extract_root" >/dev/null; then
   fail "installed payload contains a /nix/store reference"
+fi
+if grep -R -a -E -l 'GROCERY_POS_DISABLE_AUTH|GROCERY_POS_AUTH_BYPASS' \
+  "$payload_root" >/dev/null; then
+  fail "installed payload contains an authentication bypass switch"
+fi
+if grep -R -a -E -l 'CREATE TABLE[^;]*(bearer|operator)_sessions' \
+  "$payload_root/pos" >/dev/null; then
+  fail "installed payload persists bearer sessions in SQLite"
+fi
+if grep -E -- '--pin([=[:space:]]|$)' \
+  "$extract_root/usr/bin/grocery-pos-auth" \
+  "$payload_root/scripts/operator-auth.rkt" >/dev/null; then
+  fail "installed operator administration accepts a PIN through argv"
 fi
 
 require_unit_line() {

@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pos_terminal/app/pos_terminal_app.dart';
+import 'package:pos_terminal/core/pos_core/authentication_client.dart';
+import 'package:pos_terminal/core/pos_core/models/authentication.dart';
 import 'package:pos_terminal/core/pos_core/models/command_result.dart';
 import 'package:pos_terminal/core/pos_core/models/canonical_receipt.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_failure.dart';
@@ -15,6 +17,7 @@ import 'package:pos_terminal/core/pos_core/pos_core_client.dart';
 import 'package:pos_terminal/features/cashier/cashier_id_generator.dart';
 import 'package:pos_terminal/features/cashier/cashier_session_controller.dart';
 import 'package:pos_terminal/features/cashier/cashier_session_store.dart';
+import 'package:pos_terminal/features/authentication/authentication_controller.dart';
 
 final class MemoryCashierSessionStore implements CashierSessionStore {
   PersistedCashierSession? persisted;
@@ -42,23 +45,28 @@ final class FixedCashierIds implements CashierIdGenerator {
 }
 
 mixin FakeRegisterOperations {
-  Future<RegisterContext> fetchRegisterContext() async => const RegisterContext(
-    configured: true,
-    register: RegisterIdentity(
-      registerId: 'register-test',
-      displayName: 'Test Register',
-    ),
-    activeShift: RegisterShift(
-      shiftId: 'shift-test',
-      registerId: 'register-test',
-      registerDisplayName: 'Test Register',
-      cashierId: 'cashier-test',
-      cashierDisplayName: 'Test Cashier',
-      openedAtEpochMs: 0,
-      closedAtEpochMs: null,
-      activeTransactionId: null,
-    ),
-  );
+  int registerContextRequests = 0;
+
+  Future<RegisterContext> fetchRegisterContext() async {
+    registerContextRequests += 1;
+    return const RegisterContext(
+      configured: true,
+      register: RegisterIdentity(
+        registerId: 'register-test',
+        displayName: 'Test Register',
+      ),
+      activeShift: RegisterShift(
+        shiftId: 'shift-test',
+        registerId: 'register-test',
+        registerDisplayName: 'Test Register',
+        cashierId: 'cashier-test',
+        cashierDisplayName: 'Test Cashier',
+        openedAtEpochMs: 0,
+        closedAtEpochMs: null,
+        activeTransactionId: null,
+      ),
+    );
+  }
 
   Future<List<CashierIdentity>> fetchActiveCashiers() async => const [];
 
@@ -104,7 +112,12 @@ class FakeConnectedPosCoreClient
   }
 
   @override
-  Future<PosCoreReadiness> fetchReadiness() => throw UnimplementedError();
+  Future<PosCoreReadiness> fetchReadiness() async => PosCoreReadiness.fromJson({
+    'ok': true,
+    'service': 'grocery-pos-core',
+    'status': 'ready',
+    'database_schema_version': 8,
+  });
 
   @override
   Future<PosCommandResult> executeCommand(TransactionCommand command) {
@@ -114,6 +127,50 @@ class FakeConnectedPosCoreClient
   @override
   Future<TransactionSnapshot> fetchTransaction(String transactionId) {
     throw UnimplementedError();
+  }
+}
+
+final class FakeAuthenticationClient implements PosAuthenticationClient {
+  FakeAuthenticationClient({
+    this.loginFailure,
+    this.logoutFailure,
+    this.loginResult,
+  });
+
+  Object? loginFailure;
+  Object? logoutFailure;
+  AuthenticationLogin? loginResult;
+  int logoutRequests = 0;
+  String? logoutToken;
+
+  static const session = AuthenticatedOperatorSession(
+    operatorId: 'operator-test',
+    displayName: 'Operator Test',
+    role: 'cashier',
+    idleTimeoutSeconds: 300,
+    absoluteExpiresAtEpochMs: 9999999999999,
+  );
+
+  @override
+  Future<AuthenticationLogin> login(String operatorId, String pin) async {
+    if (loginFailure case final failure?) throw failure;
+    return loginResult ??
+        const AuthenticationLogin(
+          accessToken:
+              'gpos_s1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          session: session,
+        );
+  }
+
+  @override
+  Future<AuthenticatedOperatorSession> fetchAuthenticatedSession() async =>
+      session;
+
+  @override
+  Future<void> logout(String accessToken) async {
+    logoutRequests += 1;
+    logoutToken = accessToken;
+    if (logoutFailure case final failure?) throw failure;
   }
 }
 
@@ -131,7 +188,12 @@ class FakeUnavailablePosCoreClient
   }
 
   @override
-  Future<PosCoreReadiness> fetchReadiness() => throw UnimplementedError();
+  Future<PosCoreReadiness> fetchReadiness() async => PosCoreReadiness.fromJson({
+    'ok': true,
+    'service': 'grocery-pos-core',
+    'status': 'ready',
+    'database_schema_version': 8,
+  });
 
   @override
   Future<PosCommandResult> executeCommand(TransactionCommand command) {
@@ -171,20 +233,246 @@ final class FakeConnectingPosCoreClient
   }
 }
 
-PosTerminalApp testApp(PosCoreClient client) {
+PosTerminalApp testApp(
+  PosCoreClient client, {
+  bool authenticated = false,
+  PosAuthenticationClient? authenticationClient,
+  MemoryAuthenticationSession? memory,
+  CashierSessionStore? cashierStore,
+}) {
+  final authenticationMemory = memory ?? MemoryAuthenticationSession();
+  if (authenticated) {
+    authenticationMemory.establish(
+      const AuthenticationLogin(
+        accessToken:
+            'gpos_s1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        session: FakeAuthenticationClient.session,
+      ),
+    );
+  }
   return PosTerminalApp(
     client: client,
     cashierController: CashierSessionController(
       client: client,
       idGenerator: FixedCashierIds(),
-      sessionStore: MemoryCashierSessionStore(),
+      sessionStore: cashierStore ?? MemoryCashierSessionStore(),
+    ),
+    authenticationController: AuthenticationController(
+      client: authenticationClient ?? FakeAuthenticationClient(),
+      sessionMemory: authenticationMemory,
     ),
   );
 }
 
 void main() {
+  testWidgets('ready terminal starts locked without fetching protected state', (
+    tester,
+  ) async {
+    final client = FakeConnectedPosCoreClient();
+    await tester.pumpWidget(testApp(client));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Register Locked'), findsOneWidget);
+    expect(client.registerContextRequests, 0);
+    expect(find.text('Test Register'), findsNothing);
+  });
+
+  testWidgets('successful login unlocks and clears the submitted PIN', (
+    tester,
+  ) async {
+    final client = FakeConnectedPosCoreClient();
+    await tester.pumpWidget(testApp(client));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+      find.byKey(const Key('operator-id-input')),
+      'operator-test',
+    );
+    await tester.enterText(
+      find.byKey(const Key('operator-pin-input')),
+      '80421637',
+    );
+    await tester.tap(find.byKey(const Key('operator-login-button')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Test Register'), findsOneWidget);
+    expect(client.registerContextRequests, 1);
+    expect(find.byKey(const Key('operator-pin-input')), findsNothing);
+  });
+
+  testWidgets('generic login failure remains locked and clears PIN input', (
+    tester,
+  ) async {
+    final client = FakeConnectedPosCoreClient();
+    final auth = FakeAuthenticationClient(
+      loginFailure: const PosCoreServerFailure(
+        code: 'authentication_failed',
+        message: 'Operator sign-in failed.',
+        statusCode: 401,
+      ),
+    );
+    await tester.pumpWidget(testApp(client, authenticationClient: auth));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('operator-id-input')),
+      'operator-test',
+    );
+    await tester.enterText(
+      find.byKey(const Key('operator-pin-input')),
+      '80421638',
+    );
+    await tester.tap(find.byKey(const Key('operator-login-button')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Register Locked'), findsOneWidget);
+    expect(find.byKey(const Key('authentication-failure')), findsOneWidget);
+    final pinField = tester.widget<TextField>(
+      find.byKey(const Key('operator-pin-input')),
+    );
+    expect(pinField.controller!.text, isEmpty);
+    expect(client.registerContextRequests, 0);
+  });
+
+  testWidgets('manual lock survives logout failure and preserves recovery', (
+    tester,
+  ) async {
+    final client = FakeConnectedPosCoreClient();
+    final memory = MemoryAuthenticationSession();
+    final authentication = FakeAuthenticationClient(
+      logoutFailure: const PosCoreTransportFailure('Connection refused.'),
+    );
+    final cashierStore = MemoryCashierSessionStore()
+      ..persisted = PersistedCashierSession(
+        activeTransactionId: 'txn-manual-lock',
+        pendingCommand: ScanBarcodeCommand(
+          commandId: 'cmd-manual-lock',
+          transactionId: 'txn-manual-lock',
+          expectedVersion: 1,
+          barcode: '049000001234',
+        ),
+      );
+    await tester.pumpWidget(
+      testApp(
+        client,
+        authenticated: true,
+        authenticationClient: authentication,
+        memory: memory,
+        cashierStore: cashierStore,
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(memory.authenticated, isTrue);
+
+    await tester.tap(find.byKey(const Key('register-lock-button')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Register Locked'), findsOneWidget);
+    expect(memory.accessToken, isNull);
+    expect(find.text('Test Register'), findsNothing);
+    expect(authentication.logoutRequests, 1);
+    expect(
+      authentication.logoutToken,
+      'gpos_s1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    );
+    expect(cashierStore.persisted!.activeTransactionId, 'txn-manual-lock');
+    expect(
+      cashierStore.persisted!.pendingCommand!.commandId,
+      'cmd-manual-lock',
+    );
+  });
+
+  testWidgets(
+    'operator switch destroys protected navigation and reloads fresh state',
+    (tester) async {
+      final client = FakeConnectedPosCoreClient();
+      const aliceSession = AuthenticatedOperatorSession(
+        operatorId: 'alice',
+        displayName: 'Alice',
+        role: 'cashier',
+        idleTimeoutSeconds: 300,
+        absoluteExpiresAtEpochMs: 9999999999999,
+      );
+      const bobSession = AuthenticatedOperatorSession(
+        operatorId: 'bob',
+        displayName: 'Bob',
+        role: 'cashier',
+        idleTimeoutSeconds: 300,
+        absoluteExpiresAtEpochMs: 9999999999999,
+      );
+      final memory = MemoryAuthenticationSession()
+        ..establish(
+          const AuthenticationLogin(
+            accessToken:
+                'gpos_s1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            session: aliceSession,
+          ),
+        );
+      final authentication = FakeAuthenticationClient(
+        loginResult: const AuthenticationLogin(
+          accessToken:
+              'gpos_s1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+          session: bobSession,
+        ),
+      );
+      final cashierStore = MemoryCashierSessionStore()
+        ..persisted = PersistedCashierSession(
+          activeTransactionId: 'txn-pending',
+          pendingCommand: ScanBarcodeCommand(
+            commandId: 'cmd-pending',
+            transactionId: 'txn-pending',
+            expectedVersion: 1,
+            barcode: '049000001234',
+          ),
+        );
+      await tester.pumpWidget(
+        testApp(
+          client,
+          authenticationClient: authentication,
+          memory: memory,
+          cashierStore: cashierStore,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(client.registerContextRequests, 1);
+      await tester.tap(find.text('Open Register'));
+      await tester.pumpAndSettle();
+      expect(find.text('Grocery POS'), findsOneWidget);
+
+      memory.clear();
+      await tester.pump();
+      expect(find.text('Grocery POS'), findsNothing);
+      expect(find.text('Register Locked'), findsOneWidget);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Register Locked'), findsOneWidget);
+      expect(cashierStore.persisted!.activeTransactionId, 'txn-pending');
+      expect(cashierStore.persisted!.pendingCommand!.commandId, 'cmd-pending');
+
+      await tester.enterText(find.byKey(const Key('operator-id-input')), 'bob');
+      await tester.enterText(
+        find.byKey(const Key('operator-pin-input')),
+        '80421637',
+      );
+      await tester.tap(find.byKey(const Key('operator-login-button')));
+      await tester.pumpAndSettle();
+
+      expect(memory.session!.operatorId, 'bob');
+      expect(client.registerContextRequests, 2);
+      expect(find.text('Open Register'), findsOneWidget);
+      expect(find.text('Grocery POS'), findsNothing);
+      expect(
+        Navigator.of(tester.element(find.text('Open Register'))).canPop(),
+        isFalse,
+      );
+      expect(cashierStore.persisted!.activeTransactionId, 'txn-pending');
+      expect(cashierStore.persisted!.pendingCommand!.commandId, 'cmd-pending');
+    },
+  );
+
   testWidgets('shows connected state when POS Core is healthy', (tester) async {
-    await tester.pumpWidget(testApp(FakeConnectedPosCoreClient()));
+    await tester.pumpWidget(
+      testApp(FakeConnectedPosCoreClient(), authenticated: true),
+    );
 
     await tester.pumpAndSettle();
 
@@ -232,7 +520,9 @@ void main() {
   testWidgets('Open Register navigates from healthy status to cashier', (
     tester,
   ) async {
-    await tester.pumpWidget(testApp(FakeConnectedPosCoreClient()));
+    await tester.pumpWidget(
+      testApp(FakeConnectedPosCoreClient(), authenticated: true),
+    );
     await tester.pumpAndSettle();
 
     await tester.tap(find.text('Open Register'));
@@ -245,7 +535,9 @@ void main() {
   testWidgets('connected gateway opens exact completed-sale lookup', (
     tester,
   ) async {
-    await tester.pumpWidget(testApp(FakeConnectedPosCoreClient()));
+    await tester.pumpWidget(
+      testApp(FakeConnectedPosCoreClient(), authenticated: true),
+    );
     await tester.pumpAndSettle();
 
     await tester.tap(find.text('Lookup Completed Sale'));

@@ -8,7 +8,9 @@
          operator-pin-argon2-memory-kib
          operator-pin-argon2-iterations
          operator-pin-argon2-parallelism
+         operator-pin-verification-input-valid?
          operator-pin-valid?
+         operator-pin-password-hash-supported?
          hash-operator-pin
          verify-operator-pin)
 
@@ -37,12 +39,26 @@
   (or (follows-step? 1)
       (follows-step? -1)))
 
-(define (operator-pin-valid? pin)
+(define (operator-pin-verification-input-valid? pin)
   (and (string? pin)
-       (regexp-match? #px"^[0-9]{8,12}$" pin)
+       (regexp-match? #px"^[0-9]{8,12}$" pin)))
+
+(define (operator-pin-valid? pin)
+  (and (operator-pin-verification-input-valid? pin)
        (not (repeated-motif? pin 1))
        (not (repeated-motif? pin 2))
        (not (simple-numeric-sequence? pin))))
+
+;; Validate the complete credential-v1 envelope before allowing database-owned
+;; parameters to reach the native Argon2 provider. The encoded salt/hash bounds
+;; cover the current 16-byte salt and 32-byte derived key with deliberate room
+;; for compatible encodings, without accepting unbounded parser input.
+(define operator-pin-phc-pattern
+  #px"^\\$argon2id\\$v=19\\$m=19456,t=2,p=1\\$[A-Za-z0-9+/]{16,64}\\$[A-Za-z0-9+/]{32,128}$")
+
+(define (operator-pin-password-hash-supported? password-hash)
+  (and (string? password-hash)
+       (regexp-match? operator-pin-phc-pattern password-hash)))
 
 (define argon2id-implementation
   (get-kdf 'argon2id argon2-factory))
@@ -75,13 +91,16 @@
    (lambda (pin-bytes)
      (pwhash argon2id-implementation pin-bytes argon2id-config))))
 
-(define (verify-operator-pin pin password-hash)
+(define (verify-operator-pin pin
+                             password-hash
+                             #:verify-provider
+                             [verify-provider pwhash-verify])
   (and
-   (operator-pin-valid? pin)
-   (string? password-hash)
-   (string-prefix? password-hash "$argon2id$")
+   (operator-pin-verification-input-valid? pin)
+   (operator-pin-password-hash-supported? password-hash)
    (with-handlers ([exn:fail? (lambda (_exception) #f)])
      (call-with-pin-bytes
       pin
       (lambda (pin-bytes)
-        (pwhash-verify argon2id-implementation pin-bytes password-hash))))))
+        (verify-provider
+         argon2id-implementation pin-bytes password-hash))))))
