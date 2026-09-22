@@ -24,6 +24,7 @@ Future<void> main() async {
     client: client,
     idGenerator: SecureCashierIdGenerator(),
     sessionStore: FileCashierSessionStore.fromEnvironment(),
+    currentOperatorId: () => authenticationMemory.session?.operatorId,
   );
   await cashierController.restoreLocalSession();
 

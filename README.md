@@ -159,6 +159,11 @@ Verified capabilities currently include:
 * authenticated local business routes plus a Flutter register lock with
   memory-only bearer state, manual/inactivity locking, and exact-command
   recovery preserved across reauthentication and POS Core restart;
+* migration v9 atomic transaction-command actor attribution plus fixed,
+  deny-by-default cashier/supervisor/manager permissions and durable
+  transaction/shift ownership enforcement;
+* server-derived shift identity, manager-only close-any, blind-count-safe open
+  cash summaries, and operator-bound Flutter transaction recovery;
 * idempotent persistent transaction application service with deterministic
   two-connection concurrency and file-backed restart/retry coverage;
 * explicit SQLite WAL/FULL connection policy with foreign-key enforcement,
@@ -280,7 +285,9 @@ terminal can unlock, an administrator must explicitly create/enroll at least
 one active operator through the root-only appliance bootstrap tool described in
 [Operator Identity and PIN Credentials](docs/security/operator-identity-and-pin-credentials.md).
 Cashier selection and shift attribution remain distinct from authentication;
-role-specific authorization is not implemented yet.
+the authenticated operator now supplies shift identity, while Racket enforces
+the fixed role and resource-ownership policy documented in
+[Authorization and Ownership](docs/security/authorization-and-ownership.md).
 
 ### Terminal 1 — POS Core
 

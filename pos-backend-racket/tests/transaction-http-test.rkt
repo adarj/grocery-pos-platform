@@ -470,6 +470,7 @@ SQL
         (hash-ref (response-json open-response) 'transaction)
         (hasheq
          'transaction_id "txn-query"
+         'owned_by_authenticated_operator #f
          'version 1
          'status "open"
          'line_items '()
@@ -889,9 +890,10 @@ SQL
             (register-operations-open-shift
              (make-register-operations-service
               seed-connection
-              #:current-epoch-ms (lambda () 1000)
+             #:current-epoch-ms (lambda () 1000)
               #:generate-shift-id (lambda () "shift-http"))
-             "http-cashier"
+             (authenticated-operator
+              "http-cashier" "HTTP Cashier" 'cashier)
              (money 0)))
           (lambda () (db:disconnect seed-connection)))
         (define runtime-A

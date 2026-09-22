@@ -242,27 +242,30 @@ database shows `Register configuration required`, points to the explicit CLI
 workflow, blocks `Open Register`, and still permits historical receipt lookup.
 Flutter does not create a default identity.
 
-A configured register with no shift loads the active cashier directory,
-accepts exact opening cash through the shared integer-only money parser, and
-offers `Select Cashier` / `Open Shift`. The request sends the exact cashier ID
-and nonnegative opening minor units. While it is pending the action cannot be submitted again. Transport
+A configured register with no shift shows the authenticated operator, accepts
+exact opening cash through the shared integer-only money parser, and offers
+`Open Shift`. The request sends only nonnegative opening minor units; Racket
+derives and validates the shift cashier. While it is pending the action cannot
+be submitted again. Transport
 uncertainty offers `Refresh Register State`; it never enters transaction
 same-command recovery.
 
-An active shift displays its snapshotted register/cashier names, opaque shift
-ID, explicitly UTC open time, and backend opening cash. It enables
-`Open Register`, receipt lookup, and a close-reconciliation workflow. The
+An active own shift displays its snapshotted register/cashier names, opaque
+shift ID, and explicitly UTC open time. It enables `Open Register`, receipt
+lookup, and a close-reconciliation workflow. Another operator's active shift
+shows register-in-use and cannot be adopted for transaction work. The
 cashier enters an independent physical count; expected cash is not prefilled.
 An active-sale close rejection tells the operator to finish or void the sale;
 Flutter never abandons transaction state to force closure. Success first shows
 the authoritative opening, sales, expected, counted, and signed over/short
-values, then `Done` returns to cashier selection.
+values, then `Done` returns to the authenticated register home.
 
-`ShiftCashSummary` strictly parses nonnegative opening/sales/expected/count
-fields, a nonnegative completed-sale count, explicit open/closed status, and a
-signed variance only for a closed reconciliation. Widgets render those values
-independently even if they appear arithmetically surprising. Flutter never
-calculates expected cash or over/short.
+`ShiftCashSummary` strictly discriminates `limited` and `full`. A limited open
+view permits only shift ID, status, and view. A full view requires nonnegative
+opening/sales/expected/count fields, a nonnegative completed-sale count, and a
+signed variance only for closed reconciliation. Widgets render returned values
+independently even if arithmetically surprising. Flutter never calculates
+expected cash or over/short.
 
 An uncertain open or close is recovered through `GET /register-context` and
 `GET /shifts/{shift_id}/cash-summary`; Flutter does not automatically repeat the
@@ -274,10 +277,18 @@ strict identity fields, and valid configured/shift nullability. Operational
 writes create no transaction command ID and do not touch
 `CashierSessionStore`.
 
-Cashier selection remains operational attribution and is distinct from the
-authenticated operator. Checkpoint 2 authenticates every active enrolled
-operator equally; Flutter does not infer role permissions or bind the operator
-to a shift. Those decisions remain Racket-owned future authorization policy.
+Flutter parses server-supplied permissions into typed presentation hints; it
+contains no role-to-permission matrix. Racket relates the authenticated
+operator to durable cashier/shift ownership and independently enforces every
+operation. Local recovery schema v2 stores only its operator owner, active
+transaction ID, and optional exact pending command. A different operator
+cannot send or erase that state. Legacy schema-v1 state binds only after
+authoritative current shift-slot evidence agrees or an authorized transaction
+query supplies `owned_by_authenticated_operator: true` from durable operational
+context. This second proof preserves exact completion/void recovery after the
+active slot is released. A legacy pending start whose transaction does not
+exist remains preserved but unbound rather than being assigned from its local
+ID alone.
 
 ## Register authentication and lock
 
@@ -557,9 +568,10 @@ This slice does not implement automatic retry, retry timers, cached/offline
 transaction truth, quantity editing, post-payment refund/reversal, split
 tender, card/external payment behavior, receipt printing, receipt numbering or
 date/recent-sale search, drawer hardware, cash drops, paid-outs, refunds, or
-general accounting reports. It also does not implement role-specific endpoint
-authorization, manager approval, credential reset, transaction actor
-attribution, security audit, or variance approval.
+general accounting reports. Fixed endpoint/resource authorization and command
+actor attribution are implemented in Racket; Flutter only consumes the
+server-computed permission list. Manager approval, credential reset, the
+general security audit ledger, and variance approval remain deferred.
 Current recovery payloads may contain an opaque barcode, integer cash amount,
 or nonnegative removal line index; void and lifecycle commands have empty
 payloads. The recovery record is never logged.

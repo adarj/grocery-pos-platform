@@ -51,6 +51,7 @@ final class _RegisterLockScreenState extends State<RegisterLockScreen> {
           return PosCoreStatusScreen(
             client: widget.client,
             cashierController: widget.cashierController,
+            session: widget.authenticationController.session!,
           );
         }
         return FutureBuilder<bool>(

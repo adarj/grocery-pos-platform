@@ -6,6 +6,7 @@
          "../application/authentication-service.rkt"
          "../domain/operator-identity.rkt"
          "../persistence/strict-json.rkt"
+         "../security/authorization-policy.rkt"
          "../security/operator-session.rkt")
 
 (provide handle-login-request
@@ -98,6 +99,9 @@
    'operator_id (authenticated-operator-operator-id principal)
    'display_name (authenticated-operator-display-name principal)
    'role (operator-role->string (authenticated-operator-role principal))
+   'permissions
+   (operator-role-permission-strings
+    (authenticated-operator-role principal))
    'idle_timeout_seconds (quotient operator-session-idle-timeout-ms 1000)
    'absolute_expires_at_epoch_ms absolute-expires-at-epoch-ms))
 
@@ -193,4 +197,3 @@
        [(authentication-session-unavailable? result)
         (authentication-unavailable-response)]
        [else (authentication-required-response)]))))
-

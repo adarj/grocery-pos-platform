@@ -4,7 +4,15 @@
          web-server/http)
 
 (provide json-response
-         api-error-response)
+         api-error-response
+         authorization-denied-response)
+
+(define (authorization-denied-response)
+  (api-error-response
+   "authorization_denied"
+   "Operator is not authorized for this operation."
+   #:status 403
+   #:status-message #"Forbidden"))
 
 (define (jsexpr->utf8-bytes value)
   (string->bytes/utf-8 (jsexpr->string value)))

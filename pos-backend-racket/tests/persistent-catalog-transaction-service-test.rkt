@@ -5,7 +5,14 @@
          rackunit
          "../pos/application/transaction-command-receipt.rkt"
          "../pos/application/transaction-command.rkt"
-         "../pos/application/transaction-service.rkt"
+         "../pos/application/authentication-service.rkt"
+         (rename-in "../pos/application/transaction-service.rkt"
+                    [transaction-service-execute-command
+                     execute-command/authorized]
+                    [transaction-service-load-transaction
+                     load-transaction/authorized]
+                    [transaction-service-load-canonical-receipt
+                     load-canonical-receipt/authorized])
          "../pos/domain/canonical-receipt.rkt"
          "../pos/domain/catalog-item.rkt"
          "../pos/domain/money.rkt"
@@ -16,6 +23,20 @@
          "../pos/persistence/pos-database-migrations.rkt"
          "../pos/persistence/sqlite-catalog.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt")
+
+(define test-principal
+  (authenticated-operator "legacy-catalog-test-operator"
+                          "Legacy catalog test operator"
+                          'manager))
+
+(define (transaction-service-execute-command service command)
+  (execute-command/authorized service test-principal command))
+
+(define (transaction-service-load-transaction service transaction-id)
+  (load-transaction/authorized service test-principal transaction-id))
+
+(define (transaction-service-load-canonical-receipt service transaction-id)
+  (load-canonical-receipt/authorized service test-principal transaction-id))
 
 (define barcode "049000001234")
 

@@ -77,18 +77,35 @@ SQL
         #(5 "create_register_operations")
         #(6 "create_shift_cash_accountability")
         #(7 "create_operator_identity_credentials")
-        #(8 "create_operator_login_throttle")))
+        #(8 "create_operator_login_throttle")
+        #(9 "create_transaction_command_actor_attributions")))
+
+(define (rewind-current-fixture-to-v8! connection)
+  (migrate-pos-database! connection)
+  (query-exec connection "DROP TABLE transaction_command_actor_attributions")
+  (query-exec
+   connection
+   "DROP TABLE transaction_command_legacy_unattributed_receipts")
+  (query-exec connection "DELETE FROM pos_schema_migrations WHERE version = 9"))
 
 (define (rewind-current-fixture-to-v7! connection)
   (migrate-pos-database! connection)
+  (query-exec connection "DROP TABLE transaction_command_actor_attributions")
+  (query-exec
+   connection
+   "DROP TABLE transaction_command_legacy_unattributed_receipts")
   (query-exec connection "DROP TABLE operator_login_throttle")
-  (query-exec connection "DELETE FROM pos_schema_migrations WHERE version = 8"))
+  (query-exec connection "DELETE FROM pos_schema_migrations WHERE version >= 8"))
 
 (define (rewind-current-fixture-to-v6! connection)
   ;; The v1-v6 definitions remain owned by the production migrator. Rewinding
   ;; only the newly owned v7 objects gives this test a populated, valid v6
   ;; prefix without copying historical SQL into another fixture.
   (migrate-pos-database! connection)
+  (query-exec connection "DROP TABLE transaction_command_actor_attributions")
+  (query-exec
+   connection
+   "DROP TABLE transaction_command_legacy_unattributed_receipts")
   (query-exec connection "DROP TABLE operator_login_throttle")
   (query-exec connection "DROP TABLE operator_pin_credentials")
   (query-exec connection "DROP TABLE operator_roles")
@@ -198,7 +215,7 @@ SQL
      (lambda (connection)
        (install-frozen-v1! connection)
 
-       (check-equal? current-pos-database-schema-version 8)
+       (check-equal? current-pos-database-schema-version 9)
        (check-equal?
         (read-pos-database-migration-history connection)
         (list #(1 "create_transaction_events")))
@@ -252,7 +269,7 @@ SQL
 
        (query-exec
         connection
-        "INSERT INTO pos_schema_migrations (version, name) VALUES (9, 'unknown')")
+        "INSERT INTO pos_schema_migrations (version, name) VALUES (10, 'unknown')")
        (define unsupported-history
          (read-pos-database-migration-history connection))
        (check-equal?
@@ -262,7 +279,7 @@ SQL
         exn:fail?
         (lambda () (validate-pos-database-schema! connection))))))
 
-  (test-case "fresh database migrates through versions 1 through 8"
+  (test-case "fresh database migrates through versions 1 through 9"
     (call-with-test-database
      (lambda (connection)
        (migrate-pos-database! connection)
@@ -309,6 +326,110 @@ SQL
          connection
         "SELECT version, name FROM pos_schema_migrations ORDER BY version")
         expected-migration-history))))
+
+  (test-case "v9 adds strict command actor attribution without fabricating history"
+    (call-with-test-database
+     (lambda (connection)
+       (rewind-current-fixture-to-v8! connection)
+       (query-exec connection "PRAGMA foreign_keys = ON")
+       (query-exec
+        connection
+        #<<SQL
+INSERT INTO transaction_command_receipts
+  (command_id, transaction_id, command_schema_version, command_type,
+   expected_version, command_json, outcome_kind, outcome_code,
+   outcome_stream_version)
+VALUES
+  ('cmd-v8', 'txn-v8', 1, 'start_transaction', 0,
+   '{"schema_version":1,"command_id":"cmd-v8","transaction_id":"txn-v8","expected_version":0,"command_type":"start_transaction","payload":{}}',
+   'accepted', 'accepted', 1)
+SQL
+        )
+       (query-exec connection
+                   "INSERT INTO operators VALUES ('operator-v8', 'Operator V8', 1)")
+       (query-exec connection
+                   "INSERT INTO operator_roles VALUES ('operator-v8', 'cashier')")
+       (query-exec connection
+                   "INSERT INTO operator_login_throttle VALUES ('operator-v8', 4, 1000, 6000)")
+       (define receipts-before
+         (query-rows connection
+                     "SELECT * FROM transaction_command_receipts ORDER BY command_id"))
+       (define security-before
+         (list
+          (query-rows connection "SELECT * FROM operators ORDER BY operator_id")
+          (query-rows connection "SELECT * FROM operator_roles ORDER BY operator_id")
+          (query-rows connection "SELECT * FROM operator_login_throttle ORDER BY operator_id")))
+
+       (migrate-pos-database! connection)
+
+       (check-equal?
+        (query-rows connection
+                    "SELECT * FROM transaction_command_receipts ORDER BY command_id")
+        receipts-before)
+       (check-equal?
+        (list
+         (query-rows connection "SELECT * FROM operators ORDER BY operator_id")
+         (query-rows connection "SELECT * FROM operator_roles ORDER BY operator_id")
+         (query-rows connection "SELECT * FROM operator_login_throttle ORDER BY operator_id"))
+        security-before)
+       (check-equal?
+        (query-value connection
+                     "SELECT COUNT(*) FROM transaction_command_actor_attributions")
+        0)
+       (check-equal?
+        (query-list
+         connection
+         #<<SQL
+SELECT command_id
+FROM transaction_command_legacy_unattributed_receipts
+ORDER BY command_id
+SQL
+         )
+        '("cmd-v8"))
+       (check-equal?
+        (query-rows
+         connection
+         "PRAGMA table_info('transaction_command_legacy_unattributed_receipts')")
+        (list (vector 0 "command_id" "TEXT" 1 sql-null 1)))
+       (migrate-pos-database! connection)
+       (check-equal?
+        (query-list
+         connection
+         "SELECT command_id FROM transaction_command_legacy_unattributed_receipts ORDER BY command_id")
+        '("cmd-v8"))
+       (check-equal?
+        (query-rows
+         connection
+         "PRAGMA table_info('transaction_command_actor_attributions')")
+        (list (vector 0 "command_id" "TEXT" 1 sql-null 1)
+              (vector 1 "operator_id" "TEXT" 1 sql-null 0)))
+       (check-exn
+        exn:fail:sql?
+        (lambda ()
+          (query-exec
+           connection
+           "INSERT INTO transaction_command_actor_attributions VALUES ('missing', 'operator-v8')")))
+       (query-exec
+        connection
+        #<<SQL
+INSERT INTO transaction_command_receipts
+  (command_id, transaction_id, command_schema_version, command_type,
+   expected_version, command_json, outcome_kind, outcome_code,
+   outcome_stream_version)
+VALUES
+  ('cmd-v9', 'txn-v9', 1, 'start_transaction', 0,
+   '{"schema_version":1,"command_id":"cmd-v9","transaction_id":"txn-v9","expected_version":0,"command_type":"start_transaction","payload":{}}',
+   'accepted', 'accepted', 1)
+SQL
+        )
+       (check-not-exn
+        (lambda ()
+          (query-exec
+           connection
+           "INSERT INTO transaction_command_actor_attributions VALUES ('cmd-v9', 'deleted-operator')")))
+       (check-not-exn
+        (lambda ()
+          (validate-pos-database-schema! connection #:require-current? #t))))))
 
   (test-case "v8 adds strict durable throttle state without changing v7 data"
     (call-with-test-database
@@ -537,7 +658,7 @@ SQL
        (migrate-pos-database! connection)
        (query-exec
         connection
-       "INSERT INTO pos_schema_migrations (version, name) VALUES (9, 'unknown')")
+        "INSERT INTO pos_schema_migrations (version, name) VALUES (10, 'unknown')")
        (check-exn exn:fail?
                   (lambda () (migrate-pos-database! connection)))))
 

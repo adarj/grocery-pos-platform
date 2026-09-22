@@ -41,7 +41,7 @@ validate selected backup read-only
 
 Both validations require the Checkpoint 2 contract: a regular nonempty SQLite
 file, healthy full integrity check, zero foreign-key violations, exact current
-v1-v8 migration history, and valid Grocery POS schema/application invariants.
+v1-v9 migration history, and valid Grocery POS schema/application invariants.
 Validation never migrates, repairs, or converts the backup to WAL.
 
 Before the service stops, a failure removes ordinary staging where safe and

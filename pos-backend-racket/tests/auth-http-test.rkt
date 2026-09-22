@@ -110,8 +110,18 @@
     (define body (response-json login))
     (check-true (hash-ref body 'ok))
     (check-equal? (hash-ref body 'token_type) "Bearer")
-    (check-equal? (hash-ref (hash-ref body 'session) 'idle_timeout_seconds) 300)
-    (check-false (hash-has-key? (hash-ref body 'session) 'credential_revision)))
+    (define session (hash-ref body 'session))
+    (check-equal? (hash-ref session 'idle_timeout_seconds) 300)
+    (check-equal?
+     (hash-ref session 'permissions)
+     '("register.read"
+       "transaction.read.own"
+       "transaction.operate.own"
+       "receipt.read.own"
+       "shift.open.own"
+       "shift.close.own"
+       "shift.cash_summary.read.own"))
+    (check-false (hash-has-key? session 'credential_revision)))
 
   (test-case "anonymous transaction request is rejected before business effects"
     (define response
@@ -163,6 +173,15 @@
     (define session-body (response-json session-response))
     (check-equal?
      (hash-ref (hash-ref session-body 'session) 'operator_id) "operator-1")
+    (check-equal?
+     (hash-ref (hash-ref session-body 'session) 'permissions)
+     '("register.read"
+       "transaction.read.own"
+       "transaction.operate.own"
+       "receipt.read.own"
+       "shift.open.own"
+       "shift.close.own"
+       "shift.cash_summary.read.own"))
     (check-false (regexp-match? (regexp-quote token) (format "~s" session-body)))
     (define logout-response
       (app (make-request #"POST" "/auth/logout" #:headers (list auth-header))))

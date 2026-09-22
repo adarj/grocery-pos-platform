@@ -6,6 +6,7 @@
          racket/file
          "../pos/runtime-config.rkt"
          "../pos/runtime.rkt"
+         "../pos/application/authentication-service.rkt"
          "../pos/application/transaction-command-receipt.rkt"
          "../pos/application/transaction-command.rkt"
          "../pos/application/register-operations-service.rkt"
@@ -21,6 +22,9 @@
          "../pos/persistence/sqlite-register-operations.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt")
 
+(define runtime-principal
+  (authenticated-operator "runtime-cashier" "Runtime Cashier" 'cashier))
+
 (define (call-with-temporary-database proc)
   (define directory
     (make-temporary-file "grocery-pos-runtime-~a" 'directory))
@@ -35,7 +39,7 @@
   (pos-runtime-config "127.0.0.1" 7340 database-path))
 
 (define (execute service command)
-  (transaction-service-execute-command service command))
+  (transaction-service-execute-command service runtime-principal command))
 
 (define (resolved-receipt result)
   (check-true (transaction-service-command-resolved? result))
@@ -106,7 +110,7 @@
        connection
        #:current-epoch-ms (lambda () 1000)
        #:generate-shift-id (lambda () "shift-runtime"))
-      "runtime-cashier"
+      runtime-principal
       (money 0)))))
 
 (define (check-command-outcome result kind code)
@@ -162,7 +166,8 @@
                   (vector 5 "create_register_operations")
                   (vector 6 "create_shift_cash_accountability")
                   (vector 7 "create_operator_identity_credentials")
-                  (vector 8 "create_operator_login_throttle")))
+                  (vector 8 "create_operator_login_throttle")
+                  (vector 9 "create_transaction_command_actor_attributions")))
            (with-connection
             database-path
             (lambda (connection)
@@ -315,7 +320,8 @@ SQL
             "accepted")
 
            (define recovered
-             (transaction-service-load-transaction service "txn-persisted"))
+             (transaction-service-load-transaction
+              service runtime-principal "txn-persisted"))
            (check-pred transaction-service-success? recovered)
            (define events
              (with-connection
@@ -423,7 +429,8 @@ SQL
                   (vector 5 "create_register_operations")
                   (vector 6 "create_shift_cash_accountability")
                   (vector 7 "create_operator_identity_credentials")
-                  (vector 8 "create_operator_login_throttle")))
+                  (vector 8 "create_operator_login_throttle")
+                  (vector 9 "create_transaction_command_actor_attributions")))
            (define service
              (pos-runtime-transaction-service runtime-B))
            (define retry-receipt
@@ -431,7 +438,8 @@ SQL
            (check-equal? retry-receipt original-receipt)
            (check-equal? catalog-lookups 1)
            (define recovered
-             (transaction-service-load-transaction service "txn-001"))
+             (transaction-service-load-transaction
+              service runtime-principal "txn-001"))
            (check-true (transaction-service-success? recovered))
            (check-equal? (transaction-service-success-version recovered) 2)
            (with-connection

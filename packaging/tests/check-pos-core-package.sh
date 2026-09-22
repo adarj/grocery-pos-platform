@@ -32,7 +32,7 @@ fi
   fail "unexpected RPM package name"
 [[ "$(rpm -qp --queryformat '%{VERSION}' "$rpm_path")" == "0.0.0" ]] ||
   fail "unexpected internal RPM version"
-[[ "$(rpm -qp --queryformat '%{RELEASE}' "$rpm_path")" == "0.5.dev" ]] ||
+[[ "$(rpm -qp --queryformat '%{RELEASE}' "$rpm_path")" == "0.6.dev" ]] ||
   fail "unexpected internal RPM release"
 [[ "$(rpm -qp --queryformat '%{ARCH}' "$rpm_path")" == "noarch" ]] ||
   fail "RPM architecture is not noarch"
@@ -92,6 +92,9 @@ required_files=(
   "$payload_root/pos/domain/operator-identity.rkt"
   "$payload_root/pos/security/operator-pin.rkt"
   "$payload_root/pos/security/operator-session.rkt"
+  "$payload_root/pos/security/authorization-policy.rkt"
+  "$payload_root/pos/domain/transaction-command-actor-attribution.rkt"
+  "$payload_root/pos/persistence/transaction-command-actor-attribution-store.rkt"
   "$payload_root/pos/application/operator-service.rkt"
   "$payload_root/pos/support/appliance-recovery.rkt"
   "$payload_root/pos/support/support-bundle.rkt"

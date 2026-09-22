@@ -195,6 +195,7 @@ fixture({
       client: client,
       idGenerator: ids,
       sessionStore: MemoryCashierSessionStore(),
+      currentOperatorId: () => 'operator-test',
     ),
     client: client,
     ids: ids,

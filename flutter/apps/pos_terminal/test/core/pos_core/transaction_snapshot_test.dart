@@ -11,6 +11,7 @@ void main() {
     Object? changeDue,
   }) => {
     'transaction_id': 'txn-001',
+    'owned_by_authenticated_operator': true,
     'version': 2,
     'status': status,
     'line_items': [
@@ -31,6 +32,7 @@ void main() {
     final snapshot = TransactionSnapshot.fromJson(snapshotJson());
 
     expect(snapshot.transactionId, 'txn-001');
+    expect(snapshot.ownedByAuthenticatedOperator, isTrue);
     expect(snapshot.version, 2);
     expect(snapshot.status, TransactionStatus.open);
     expect(snapshot.lineItems, hasLength(1));

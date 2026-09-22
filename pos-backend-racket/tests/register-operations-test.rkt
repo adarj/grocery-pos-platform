@@ -2,12 +2,25 @@
 
 (require (prefix-in db: db)
          rackunit
-         "../pos/application/register-operations-service.rkt"
+         "../pos/application/authentication-service.rkt"
+         (rename-in "../pos/application/register-operations-service.rkt"
+                    [register-operations-open-shift open-shift/authorized]
+                    [register-operations-close-shift close-shift/authorized])
          "../pos/domain/money.rkt"
          "../pos/domain/register-operations.rkt"
          "../pos/persistence/operational-configuration-snapshot-codec.rkt"
          "../pos/persistence/pos-database-migrations.rkt"
          "../pos/persistence/sqlite-register-operations.rkt")
+
+(define (cashier-principal cashier-id)
+  (authenticated-operator cashier-id cashier-id 'cashier))
+
+(define (register-operations-open-shift service cashier-id opening-cash)
+  (open-shift/authorized service (cashier-principal cashier-id) opening-cash))
+
+(define (register-operations-close-shift service shift-id counted-cash)
+  (close-shift/authorized
+   service (cashier-principal "cashier-alice") shift-id counted-cash))
 
 (define config-json
   #<<JSON

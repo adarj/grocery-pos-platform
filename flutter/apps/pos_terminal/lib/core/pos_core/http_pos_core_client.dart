@@ -248,13 +248,7 @@ final class HttpPosCoreClient
   }
 
   @override
-  Future<ShiftOperationResult> openShift(
-    String cashierId,
-    int openingCashMinorUnits,
-  ) async {
-    if (cashierId.isEmpty) {
-      throw ArgumentError.value(cashierId, 'cashierId', 'must not be empty');
-    }
+  Future<ShiftOperationResult> openShift(int openingCashMinorUnits) async {
     if (openingCashMinorUnits < 0) {
       throw ArgumentError.value(
         openingCashMinorUnits,
@@ -263,7 +257,6 @@ final class HttpPosCoreClient
       );
     }
     return _operationalShiftWrite('/shifts/open', <String, Object?>{
-      'cashier_id': cashierId,
       'opening_cash_minor_units': openingCashMinorUnits,
     });
   }

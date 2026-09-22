@@ -30,6 +30,7 @@ const _developmentCashierId = 'cashier-development-01';
 const _developmentCashierName = 'Development Cashier';
 const _developmentOpeningCash = 10000;
 const _developmentOperatorPin = '80421637';
+const _authorizationTestPin = '58310472';
 
 int _crashCampaignIterations() {
   final configured = Platform.environment['M6_CRASH_ITERATIONS'];
@@ -82,6 +83,7 @@ final class _IntegrationCashier {
       client: client,
       idGenerator: ids,
       sessionStore: store,
+      currentOperatorId: () => client.authenticationSession.session?.operatorId,
     );
     await controller.restoreLocalSession();
     return _IntegrationCashier._(
@@ -121,10 +123,7 @@ Future<RealPosCoreFixture> _startFixture({bool openShift = true}) async {
 Future<RegisterShift> _openDevelopmentShift(RealPosCoreFixture fixture) async {
   final client = await _authenticatedClient(fixture);
   try {
-    return (await client.openShift(
-      _developmentCashierId,
-      _developmentOpeningCash,
-    )).shift;
+    return (await client.openShift(_developmentOpeningCash)).shift;
   } finally {
     client.close();
   }
@@ -133,21 +132,42 @@ Future<RegisterShift> _openDevelopmentShift(RealPosCoreFixture fixture) async {
 Future<HttpPosCoreClient> _authenticatedClient(
   RealPosCoreFixture fixture,
 ) async {
+  return _authenticatedClientFor(
+    fixture,
+    _developmentCashierId,
+    _developmentOperatorPin,
+  );
+}
+
+Future<HttpPosCoreClient> _authenticatedClientFor(
+  RealPosCoreFixture fixture,
+  String operatorId,
+  String pin,
+) async {
   final client = HttpPosCoreClient(
     baseUri: fixture.baseUri,
     timeout: const Duration(seconds: 3),
   );
   try {
-    final login = await client.login(
-      _developmentCashierId,
-      _developmentOperatorPin,
-    );
+    final login = await client.login(operatorId, pin);
     client.authenticationSession.establish(login);
     return client;
-  } catch (_) {
+  } catch (error) {
     client.close();
-    rethrow;
+    throw StateError(
+      'Integration operator $operatorId could not authenticate: $error\n'
+      '${fixture.diagnostics()}',
+    );
   }
+}
+
+Future<void> _authenticateAs(
+  HttpPosCoreClient client,
+  String operatorId,
+  String pin,
+) async {
+  final login = await client.login(operatorId, pin);
+  client.authenticationSession.establish(login);
 }
 
 Future<ShiftOperationResult> _closeAtExpectedCash(
@@ -155,7 +175,7 @@ Future<ShiftOperationResult> _closeAtExpectedCash(
   String shiftId,
 ) async {
   final summary = await client.fetchShiftCashSummary(shiftId);
-  return client.closeShift(shiftId, summary.expectedCashMinorUnits);
+  return client.closeShift(shiftId, summary.expectedCashMinorUnits!);
 }
 
 Future<_IntegrationCashier> _createCashier(
@@ -249,7 +269,7 @@ void main() {
 
       final initiallyReady = await client.fetchReadiness();
       expect(initiallyReady.ready, isTrue);
-      expect(initiallyReady.databaseSchemaVersion, 8);
+      expect(initiallyReady.databaseSchemaVersion, 9);
 
       await File(
         fixture.databasePath,
@@ -305,10 +325,7 @@ void main() {
       expect(cashiers.single.cashierId, _developmentCashierId);
       expect(cashiers.single.displayName, _developmentCashierName);
 
-      final opened = await client.openShift(
-        _developmentCashierId,
-        _developmentOpeningCash,
-      );
+      final opened = await client.openShift(_developmentOpeningCash);
       expect(opened.shift.shiftId, isNotEmpty);
       expect(opened.shift.registerId, _developmentRegisterId);
       expect(opened.shift.registerDisplayName, _developmentRegisterName);
@@ -318,7 +335,7 @@ void main() {
       expect(opened.shift.activeTransactionId, isNull);
       expect(opened.cashSummary.openingCashMinorUnits, _developmentOpeningCash);
 
-      final repeated = await client.openShift(_developmentCashierId, 999);
+      final repeated = await client.openShift(999);
       expect(repeated.shift.shiftId, opened.shift.shiftId);
       expect(
         repeated.cashSummary.openingCashMinorUnits,
@@ -328,6 +345,248 @@ void main() {
         (await client.fetchRegisterContext()).activeShift!.shiftId,
         opened.shift.shiftId,
       );
+    },
+  );
+
+  test(
+    'real multi-operator authorization enforces role and ownership',
+    () async {
+      final fixture = await RealPosCoreFixture.create();
+      addTearDown(fixture.dispose);
+      await fixture.prepareReferenceData();
+      final configurationFile = File(
+        '${fixture.temporaryDirectory.path}${Platform.pathSeparator}'
+        'authorization-register-configuration-v1.json',
+      );
+      const operators = <(String, String, String)>[
+        ('cashier-alice', 'Alice Cashier', 'cashier'),
+        ('cashier-bob', 'Bob Cashier', 'cashier'),
+        ('supervisor-sam', 'Sam Supervisor', 'supervisor'),
+        (_developmentCashierId, 'Morgan Manager', 'manager'),
+      ];
+      await configurationFile.writeAsString(
+        jsonEncode({
+          'schema_version': 1,
+          'register': {
+            'register_id': _developmentRegisterId,
+            'display_name': _developmentRegisterName,
+          },
+          'cashiers': [
+            for (final (operatorId, displayName, _) in operators)
+              {
+                'cashier_id': operatorId,
+                'display_name': displayName,
+                'active': true,
+              },
+          ],
+        }),
+        flush: true,
+      );
+      await fixture.activateOperationalConfigurationSnapshot(
+        configurationFile.path,
+      );
+      await fixture.enrollIntegrationOperators(
+        operators: <(String, String)>[
+          for (final (operatorId, _, role) in operators)
+            if (operatorId != _developmentCashierId) (operatorId, role),
+        ],
+        pin: _authorizationTestPin,
+      );
+      await fixture.start();
+
+      final alice = await _authenticatedClientFor(
+        fixture,
+        'cashier-alice',
+        _authorizationTestPin,
+      );
+      addTearDown(alice.close);
+      final aliceShift = await alice.openShift(10000);
+      expect(aliceShift.shift.cashierId, 'cashier-alice');
+      expect(aliceShift.cashSummary.view, ShiftCashSummaryView.limited);
+
+      final start = StartTransactionCommand(
+        commandId: 'cmd_cp3_actor_restart',
+        transactionId: 'txn_cp3_actor_restart',
+        expectedVersion: 0,
+      );
+      expect((await alice.executeCommand(start)).accepted, isTrue);
+
+      await fixture.killAbruptly();
+      await fixture.start();
+      final aliceAfterRestart = await _authenticatedClientFor(
+        fixture,
+        'cashier-alice',
+        _authorizationTestPin,
+      );
+      addTearDown(aliceAfterRestart.close);
+      final recovered = await aliceAfterRestart.executeCommand(start);
+      expect(recovered.outcomeKind, PosCommandOutcomeKind.accepted);
+      expect(recovered.outcomeStreamVersion, 1);
+
+      final bob = aliceAfterRestart;
+      await _authenticateAs(bob, 'cashier-bob', _authorizationTestPin);
+      await expectLater(
+        bob.executeCommand(start),
+        throwsA(
+          isA<PosCoreServerFailure>()
+              .having((failure) => failure.statusCode, 'statusCode', 403)
+              .having(
+                (failure) => failure.code,
+                'code',
+                'authorization_denied',
+              ),
+        ),
+      );
+      await expectLater(
+        bob.fetchTransaction(start.transactionId),
+        throwsA(
+          isA<PosCoreServerFailure>()
+              .having((failure) => failure.statusCode, 'statusCode', 404)
+              .having(
+                (failure) => failure.code,
+                'code',
+                'transaction_not_found',
+              ),
+        ),
+      );
+
+      final sam = aliceAfterRestart;
+      await _authenticateAs(sam, 'supervisor-sam', _authorizationTestPin);
+      expect(
+        (await sam.fetchTransaction(start.transactionId)).transactionId,
+        start.transactionId,
+      );
+      expect(await sam.fetchActiveCashiers(), hasLength(4));
+      expect(
+        (await sam.fetchShiftCashSummary(aliceShift.shift.shiftId)).view,
+        ShiftCashSummaryView.full,
+      );
+      await expectLater(
+        sam.executeCommand(
+          ScanBarcodeCommand(
+            commandId: 'cmd_sam_foreign_scan',
+            transactionId: start.transactionId,
+            expectedVersion: 1,
+            barcode: _developmentBarcode,
+          ),
+        ),
+        throwsA(
+          isA<PosCoreServerFailure>().having(
+            (failure) => failure.code,
+            'code',
+            'authorization_denied',
+          ),
+        ),
+      );
+
+      final morgan = aliceAfterRestart;
+      await _authenticateAs(
+        morgan,
+        _developmentCashierId,
+        _developmentOperatorPin,
+      );
+      expect(
+        (await morgan.fetchTransaction(start.transactionId)).transactionId,
+        start.transactionId,
+      );
+      await expectLater(
+        morgan.executeCommand(
+          ScanBarcodeCommand(
+            commandId: 'cmd_morgan_foreign_scan',
+            transactionId: start.transactionId,
+            expectedVersion: 1,
+            barcode: _developmentBarcode,
+          ),
+        ),
+        throwsA(
+          isA<PosCoreServerFailure>().having(
+            (failure) => failure.code,
+            'code',
+            'authorization_denied',
+          ),
+        ),
+      );
+
+      final aliceAgain = aliceAfterRestart;
+      await _authenticateAs(aliceAgain, 'cashier-alice', _authorizationTestPin);
+      await expectLater(
+        aliceAgain.fetchActiveCashiers(),
+        throwsA(
+          isA<PosCoreServerFailure>().having(
+            (failure) => failure.code,
+            'code',
+            'authorization_denied',
+          ),
+        ),
+      );
+      final limited = await aliceAgain.fetchShiftCashSummary(
+        aliceShift.shift.shiftId,
+      );
+      expect(limited.view, ShiftCashSummaryView.limited);
+      expect(limited.expectedCashMinorUnits, isNull);
+
+      final commands = <TransactionCommand>[
+        ScanBarcodeCommand(
+          commandId: 'cmd_alice_scan',
+          transactionId: start.transactionId,
+          expectedVersion: 1,
+          barcode: _developmentBarcode,
+        ),
+        TenderCashCommand(
+          commandId: 'cmd_alice_tender',
+          transactionId: start.transactionId,
+          expectedVersion: 2,
+          amountMinorUnits: 500,
+        ),
+        CompleteTransactionCommand(
+          commandId: 'cmd_alice_complete',
+          transactionId: start.transactionId,
+          expectedVersion: 3,
+        ),
+      ];
+      for (final command in commands) {
+        expect((await aliceAgain.executeCommand(command)).accepted, isTrue);
+      }
+      final closedAlice = await aliceAgain.closeShift(
+        aliceShift.shift.shiftId,
+        10219,
+      );
+      expect(closedAlice.cashSummary.view, ShiftCashSummaryView.full);
+      expect(closedAlice.cashSummary.overShortMinorUnits, 0);
+      final recoveredAfterClose = await aliceAgain.executeCommand(start);
+      expect(recoveredAfterClose.outcomeKind, PosCommandOutcomeKind.accepted);
+      expect(recoveredAfterClose.outcomeStreamVersion, 1);
+
+      final bobAgain = aliceAfterRestart;
+      await _authenticateAs(bobAgain, 'cashier-bob', _authorizationTestPin);
+      await expectLater(
+        bobAgain.fetchReceipt(start.transactionId),
+        throwsA(
+          isA<PosCoreServerFailure>().having(
+            (failure) => failure.code,
+            'code',
+            'transaction_not_found',
+          ),
+        ),
+      );
+      final bobShift = await bobAgain.openShift(5000);
+
+      final managerAgain = aliceAfterRestart;
+      await _authenticateAs(
+        managerAgain,
+        _developmentCashierId,
+        _developmentOperatorPin,
+      );
+      expect(
+        (await managerAgain.fetchReceipt(start.transactionId)).transactionId,
+        start.transactionId,
+      );
+      final managerClose = await managerAgain.closeShift(
+        bobShift.shift.shiftId,
+        5000,
+      );
+      expect(managerClose.shift.cashierId, 'cashier-bob');
+      expect(managerClose.cashSummary.view, ShiftCashSummaryView.full);
     },
   );
 
@@ -678,6 +937,7 @@ void main() {
       );
       await firstCashier.store.save(
         PersistedCashierSession(
+          operatorId: _developmentCashierId,
           activeTransactionId: beforeRemove.transactionId,
           pendingCommand: exactCommand,
         ),
@@ -876,7 +1136,7 @@ void main() {
       // recovery boundary for an operational write whose response was lost.
       await cashier.client.closeShift(
         shiftId,
-        openSummary.expectedCashMinorUnits,
+        openSummary.expectedCashMinorUnits!,
       );
       final recovered = await cashier.client.fetchShiftCashSummary(shiftId);
       expect(recovered.status, ShiftCashStatus.closed);
@@ -926,7 +1186,7 @@ void main() {
       expect(summary.expectedCashMinorUnits, 10438);
       final closed = await cashier.client.closeShift(
         shiftId,
-        summary.expectedCashMinorUnits - 25,
+        summary.expectedCashMinorUnits! - 25,
       );
       expect(closed.cashSummary.status, ShiftCashStatus.closed);
       expect(closed.cashSummary.countedCashMinorUnits, 10413);
@@ -1008,7 +1268,7 @@ void main() {
       );
       final closed = await cashier.client.closeShift(
         shiftId,
-        summary.expectedCashMinorUnits + 17,
+        summary.expectedCashMinorUnits! + 17,
       );
       expect(closed.shift.closedAtEpochMs, isNotNull);
       expect(closed.shift.activeTransactionId, isNull);
@@ -1202,6 +1462,7 @@ void main() {
       );
       await firstCashier.store.save(
         PersistedCashierSession(
+          operatorId: _developmentCashierId,
           activeTransactionId: opened.transactionId,
           pendingCommand: exactCommand,
         ),
@@ -1238,6 +1499,80 @@ void main() {
   );
 
   test(
+    'legacy v1 completion recovery rebinds after the active slot is released',
+    () async {
+      final fixture = await _startFixture();
+      final firstCashier = await _createCashier(
+        fixture,
+        'legacy_completion_before',
+      );
+
+      await firstCashier.controller.startTransaction();
+      await firstCashier.controller.scanBarcode(_developmentBarcode);
+      await firstCashier.controller.tenderCash(500);
+      final beforeCompletion = _snapshot(firstCashier.controller);
+      final exactCommand = CompleteTransactionCommand(
+        commandId: 'cmd_legacy_completion_lost_response',
+        transactionId: beforeCompletion.transactionId,
+        expectedVersion: beforeCompletion.version,
+      );
+      final recoveryFile = File(fixture.recoveryFilePath);
+      await recoveryFile.parent.create(recursive: true);
+      await recoveryFile.writeAsString(
+        jsonEncode({
+          'schema_version': 1,
+          'active_transaction_id': exactCommand.transactionId,
+          'pending_command': exactCommand.toJson(),
+        }),
+        flush: true,
+      );
+
+      final discarded = await firstCashier.client.executeCommand(exactCommand);
+      expect(discarded.outcomeKind, PosCommandOutcomeKind.accepted);
+      expect(
+        (await firstCashier.client.fetchRegisterContext())
+            .activeShift!
+            .activeTransactionId,
+        isNull,
+      );
+
+      firstCashier.close();
+      await fixture.restart();
+      final restoredCashier = await _createCashier(
+        fixture,
+        'legacy_completion_after',
+      );
+      expect(restoredCashier.controller.legacyRecoveryUnbound, isTrue);
+      expect(
+        restoredCashier.controller.state.pendingCommand!.toJson(),
+        exactCommand.toJson(),
+      );
+
+      final context = await restoredCashier.client.fetchRegisterContext();
+      expect(context.activeShift!.activeTransactionId, isNull);
+      await restoredCashier.controller.reconcileRecoveryOwnership(context);
+      expect(restoredCashier.controller.legacyRecoveryUnbound, isFalse);
+      expect(
+        (await restoredCashier.store.load())!.pendingCommand!.toJson(),
+        exactCommand.toJson(),
+      );
+
+      await restoredCashier.controller.retryPendingCommand();
+
+      expect(
+        restoredCashier.controller.state.lastCommandResult!.commandId,
+        exactCommand.commandId,
+      );
+      expect(restoredCashier.controller.state.pendingCommand, isNull);
+      final recovered = _snapshot(restoredCashier.controller);
+      expect(recovered.status, TransactionStatus.completed);
+      expect(recovered.version, beforeCompletion.version + 1);
+      expect(recovered.lineItems, hasLength(1));
+    },
+    timeout: const Timeout(Duration(minutes: 2)),
+  );
+
+  test(
     'repeated accepted commands survive abrupt POS Core process death',
     () async {
       final fixture = await _startFixture();
@@ -1269,6 +1604,7 @@ void main() {
               );
         await cashier.store.save(
           PersistedCashierSession(
+            operatorId: _developmentCashierId,
             activeTransactionId: beforeCrash.transactionId,
             pendingCommand: exactCommand,
           ),
@@ -1511,7 +1847,6 @@ void main() {
       );
 
       final secondShift = await cashier.client.openShift(
-        _developmentCashierId,
         _developmentOpeningCash,
       );
       expect(

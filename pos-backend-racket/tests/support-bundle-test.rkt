@@ -16,6 +16,7 @@
 (define privacy-sentinel "SUPPORT_BUNDLE_MUST_NOT_CONTAIN_THIS_SENTINEL")
 (define operator-id-sentinel "OPERATOR_ID_MUST_NOT_BE_EXPORTED")
 (define operator-name-sentinel "OPERATOR_NAME_MUST_NOT_BE_EXPORTED")
+(define command-actor-sentinel "COMMAND_ACTOR_MUST_NOT_BE_EXPORTED")
 (define pin-sentinel "80421637")
 (define credential-sentinel
   "$argon2id$v=19$m=19456,t=2,p=1$CREDENTIAL_HASH_MUST_NOT_BE_EXPORTED$hash")
@@ -25,6 +26,7 @@
   (list privacy-sentinel
         operator-id-sentinel
         operator-name-sentinel
+        command-actor-sentinel
         pin-sentinel
         credential-sentinel
         bearer-token-sentinel))
@@ -66,7 +68,26 @@ INSERT INTO operator_pin_credentials
   (operator_id, password_hash, credential_revision)
 VALUES (?, ?, 1)
 SQL
-       operator-id-sentinel credential-sentinel))
+       operator-id-sentinel credential-sentinel)
+      (db:query-exec
+       connection
+       #<<SQL
+INSERT INTO transaction_command_receipts
+  (command_id, transaction_id, command_schema_version, command_type,
+   expected_version, command_json, outcome_kind, outcome_code,
+   outcome_stream_version)
+VALUES
+  ('support-actor-command', ?, 1, 'start_transaction', 0,
+   ?, 'accepted', 'accepted', 1)
+SQL
+       privacy-sentinel
+       (format
+        "{\"schema_version\":1,\"command_id\":\"support-actor-command\",\"transaction_id\":\"~a\",\"expected_version\":0,\"command_type\":\"start_transaction\",\"payload\":{}}"
+        privacy-sentinel))
+      (db:query-exec
+       connection
+       "INSERT INTO transaction_command_actor_attributions (command_id, operator_id) VALUES ('support-actor-command', ?)"
+       command-actor-sentinel))
     (lambda () (db:disconnect connection))))
 
 (define (fake-platform-provider)
@@ -107,7 +128,7 @@ SQL
                   'ok #t
                   'service "grocery-pos-core"
                   'status "ready"
-                  'database_schema_version 8
+                  'database_schema_version 9
                   'exception privacy-sentinel)))
 
 (define (fake-storage-provider _state-path)
@@ -184,7 +205,7 @@ SQL
          (call-with-input-file
           (build-path extraction-path "database.json") read-json))
        (check-equal? (hash-ref database 'migration_status) "current")
-       (check-equal? (hash-ref database 'current_supported_migration_version) 8)
+       (check-equal? (hash-ref database 'current_supported_migration_version) 9)
        (check-false (hash-has-key? database 'path))
        (check-false (hash-has-key? database 'diagnostic))
 

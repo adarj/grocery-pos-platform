@@ -220,4 +220,37 @@ void main() {
     expect(reconstructed.status, AuthenticationStatus.locked);
     expect(reconstructedMemory.accessToken, isNull);
   });
+
+  test('refreshed server permissions notify authenticated presentation', () async {
+    final memory = MemoryAuthenticationSession();
+    final controller = AuthenticationController(
+      client: FakeAuthClient(),
+      sessionMemory: memory,
+      inactivityScheduler: FakeScheduler(),
+    );
+    await controller.login('operator-1', '80421637');
+    var notifications = 0;
+    controller.addListener(() => notifications += 1);
+
+    memory.updateSession(
+      const AuthenticatedOperatorSession(
+        operatorId: 'operator-1',
+        displayName: 'Operator One',
+        role: 'supervisor',
+        permissions: <OperatorPermission>{
+          OperatorPermission.registerRead,
+          OperatorPermission.transactionReadAny,
+        },
+        idleTimeoutSeconds: 300,
+        absoluteExpiresAtEpochMs: 9999999999999,
+      ),
+    );
+
+    expect(notifications, 1);
+    expect(controller.session?.role, 'supervisor');
+    expect(
+      controller.session?.permits(OperatorPermission.transactionReadAny),
+      isTrue,
+    );
+  });
 }

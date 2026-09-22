@@ -116,6 +116,11 @@ final class AuthenticationController extends ChangeNotifier {
       _inactivityScheduler.cancel();
       _status = AuthenticationStatus.locked;
       notifyListeners();
+    } else if (_sessionMemory.authenticated && authenticated) {
+      // A deliberate /auth/session refresh may change the current role and
+      // server-computed presentation permissions without replacing the bearer
+      // capability. Rebuild authenticated presentation from that safe state.
+      notifyListeners();
     }
   }
 

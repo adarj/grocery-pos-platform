@@ -65,6 +65,18 @@ final class RealPosCoreFixture {
 
   bool get isRunning => _process != null && _observedExitCode == null;
 
+  Future<void> prepareReferenceData() async {
+    if (_disposed) {
+      throw StateError('A disposed POS Core fixture cannot be prepared.');
+    }
+    if (_process != null) {
+      throw StateError(
+        'Reference data must be prepared before POS Core starts.',
+      );
+    }
+    await _prepareReferenceDataIfNeeded();
+  }
+
   int get processId {
     final process = _process;
     if (process == null || _observedExitCode != null) {
@@ -163,6 +175,30 @@ final class RealPosCoreFixture {
       );
     }
     await _runOperationalConfigurationActivation(configurationPath);
+  }
+
+  Future<void> enrollIntegrationOperator({
+    required String operatorId,
+    required String pin,
+    required String role,
+  }) async {
+    if (_disposed) {
+      throw StateError('A disposed POS Core fixture cannot enroll operators.');
+    }
+    await _runOperatorCredentialEnrollment(
+      pin: pin,
+      operators: <(String, String)>[(operatorId, role)],
+    );
+  }
+
+  Future<void> enrollIntegrationOperators({
+    required List<(String, String)> operators,
+    required String pin,
+  }) async {
+    if (_disposed) {
+      throw StateError('A disposed POS Core fixture cannot enroll operators.');
+    }
+    await _runOperatorCredentialEnrollment(pin: pin, operators: operators);
   }
 
   Future<void> stop() async {
@@ -280,7 +316,12 @@ final class RealPosCoreFixture {
       _operationalConfigurationPrepared = true;
     }
     if (!_operatorCredentialPrepared) {
-      await _runOperatorCredentialEnrollment();
+      await _runOperatorCredentialEnrollment(
+        pin: '80421637',
+        operators: const <(String, String)>[
+          ('cashier-development-01', 'manager'),
+        ],
+      );
       _operatorCredentialPrepared = true;
     }
   }
@@ -360,19 +401,23 @@ final class RealPosCoreFixture {
     }
   }
 
-  Future<void> _runOperatorCredentialEnrollment() async {
+  Future<void> _runOperatorCredentialEnrollment({
+    required String pin,
+    required List<(String, String)> operators,
+  }) async {
     final backendDirectory = _join(repositoryRoot.path, 'pos-backend-racket');
+    final arguments = <String>[
+      'tests/support/enroll-integration-operator.rkt',
+      databasePath,
+      for (final (operatorId, role) in operators) ...[operatorId, role],
+    ];
     final process = await Process.start(
       'racket',
-      [
-        'tests/support/enroll-integration-operator.rkt',
-        databasePath,
-        'cashier-development-01',
-      ],
+      arguments,
       workingDirectory: backendDirectory,
       environment: Platform.environment,
     );
-    process.stdin.writeln('80421637');
+    process.stdin.writeln(pin);
     await process.stdin.close();
     final stdoutFuture = process.stdout.transform(utf8.decoder).join();
     final stderrFuture = process.stderr.transform(utf8.decoder).join();

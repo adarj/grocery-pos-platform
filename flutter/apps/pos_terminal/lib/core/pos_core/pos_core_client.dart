@@ -21,10 +21,7 @@ abstract interface class PosCoreClient {
 
   Future<List<CashierIdentity>> fetchActiveCashiers();
 
-  Future<ShiftOperationResult> openShift(
-    String cashierId,
-    int openingCashMinorUnits,
-  );
+  Future<ShiftOperationResult> openShift(int openingCashMinorUnits);
 
   Future<ShiftOperationResult> closeShift(
     String shiftId,

@@ -125,9 +125,10 @@
       "unsupported receipt query result: ~e"
       result)]))
 
-(define (handle-receipt-query-request transaction-service transaction-id)
+(define (handle-receipt-query-request transaction-service principal transaction-id)
   (with-handlers ([exn:fail? (lambda (_exception) (internal-error-response))])
     (receipt-result-response
      (transaction-service-load-canonical-receipt
       transaction-service
+      principal
       transaction-id))))

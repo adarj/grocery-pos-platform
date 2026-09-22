@@ -3,10 +3,13 @@
 (require (prefix-in db: db)
          racket/file
          rackunit
+         "../pos/application/authentication-service.rkt"
          "../pos/application/register-operations-service.rkt"
          "../pos/application/transaction-command-receipt.rkt"
          "../pos/application/transaction-command.rkt"
-         "../pos/application/transaction-service.rkt"
+         (rename-in "../pos/application/transaction-service.rkt"
+                    [transaction-service-execute-command
+                     execute-command/authorized])
          "../pos/domain/catalog-item.rkt"
          "../pos/domain/fake-catalog.rkt"
          "../pos/domain/money.rkt"
@@ -24,6 +27,12 @@
          "../pos/persistence/transaction-command-receipt-store.rkt"
          "../pos/persistence/transaction-command-unit-of-work.rkt")
 
+(define cashier-one-principal
+  (authenticated-operator "cashier-one" "Alice" 'cashier))
+
+(define (transaction-service-execute-command service command)
+  (execute-command/authorized service cashier-one-principal command))
+
 (define configuration-json
   "{\"schema_version\":1,\"register\":{\"register_id\":\"register-one\",\"display_name\":\"Register One\"},\"cashiers\":[{\"cashier_id\":\"cashier-one\",\"display_name\":\"Alice\",\"active\":true}]}")
 
@@ -38,7 +47,7 @@
     connection
     #:current-epoch-ms (lambda () 1000)
    #:generate-shift-id (lambda () "shift-one"))
-   "cashier-one"
+   cashier-one-principal
    (money 10000)))
 
 (define (make-operational-service connection clock
@@ -232,7 +241,7 @@ SQL
        (check-pred
         register-shift-closed?
         (register-operations-close-shift
-         close-service "shift-one" (money 10000)))
+         close-service cashier-one-principal "shift-one" (money 10000)))
 
        (check-equal?
         (resolved-receipt

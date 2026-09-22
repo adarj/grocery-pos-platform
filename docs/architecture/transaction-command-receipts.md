@@ -257,6 +257,20 @@ returns its original outcome and version without another business action. If a
 failure occurred before the atomic unit of work, no receipt or event exists and
 the same command ID remains eligible for execution.
 
+## Authenticated actor recovery
+
+Schema v9 records one operator ID beside every newly committed durable command
+receipt. Receipt, actor attribution, events, and operational effects commit in
+the same Unit of Work. Duplicate resolution checks actor identity during the
+early lookup and again under `BEGIN IMMEDIATE`.
+
+The same operator may recover the exact original outcome after reauthentication,
+role change, shift close, or POS Core restart. A different operator receives
+generic authorization denial before command payload or outcome details are
+compared. Exact pre-v9 receipts remain recoverable but are never retroactively
+attributed. Actor metadata is not read by transaction replay or receipt
+derivation. See [Authorization and Ownership](../security/authorization-and-ownership.md).
+
 ## Load and corruption handling
 
 Lookup by global command ID returns found, not-found, or failed. Not-found is a

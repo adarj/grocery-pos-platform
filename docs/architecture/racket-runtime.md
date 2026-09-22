@@ -84,7 +84,7 @@ succeeded:
 open dedicated SQLite connection in create mode
   -> establish and verify WAL
   -> establish and verify per-connection durability policy
-  -> run and validate POS database migrations through v8
+  -> run and validate POS database migrations through v9
   -> disconnect dedicated startup connection
   -> construct request-time database resources
   -> construct HTTP application
@@ -218,6 +218,11 @@ credentials. Migration v8 adds durable per-known-operator login throttling and
 no default rows. Runtime readiness validates both schemas and relationships but
 does not hash PINs or require credential enrollment.
 
+Migration v9 adds command actor attribution without fabricating rows for
+historical receipts. Fresh durable command outcomes write receipt and actor in
+the existing Unit of Work. Runtime authorization derives ownership from
+transaction operational context and shifts, never from request claims.
+
 The runtime constructs one authentication service over the existing bounded
 virtual SQLite connection. That service owns a concurrency-safe, process-local
 single-register session store and a serialized Argon2 attempt boundary. Bearer
@@ -226,6 +231,8 @@ credential, and transaction state survive. Every protected request re-reads
 current operator active/credential-revision state before dispatching its
 business handler. See [Operator Identity and PIN Credentials](../security/operator-identity-and-pin-credentials.md)
 and [Authenticated Sessions and Register Lock](../security/authenticated-sessions-and-register-lock.md).
+Fixed grants, ownership, cross-actor retry denial, and limited/full cash-summary
+views are documented in [Authorization and Ownership](../security/authorization-and-ownership.md).
 
 `make-app` requires the constructed transaction, authentication, and register
 services plus an explicit runtime readiness probe, then returns the servlet
@@ -260,6 +267,9 @@ The implemented routes are:
 ```text
 GET /health
 GET /ready
+POST /auth/login
+GET /auth/session
+POST /auth/logout
 POST /transaction-commands
 GET /transactions/{transaction_id}
 GET /receipts/{transaction_id}
@@ -371,7 +381,7 @@ Focused file-backed tests establish:
   transaction-history loss;
 - normal `read/write` production opening rejecting a non-WAL database;
 - policy failure disconnecting the newly opened connection;
-- fresh runtime migration through schema v8;
+- fresh runtime migration through schema v9;
 - an empty persistent catalog rejecting the former development barcode rather
   than falling back to a fake;
 - active/inactive/unknown persistent catalog lookup behavior and exact
@@ -416,8 +426,7 @@ Focused file-backed tests establish:
 This runtime composition and HTTP adapter do not add:
 
 - remote API access or remote authentication;
-- role-based authorization, manager approval, actor attribution, credential
-  reset, or security audit events;
+- manager approval, credential reset, or general security audit events;
 - catalog HTTP administration, patch updates, or cloud synchronization;
 - application-level busy retry/backoff or whole-command retry;
 - custom checkpoint scheduling, manual checkpoint tooling, or WAL metrics;

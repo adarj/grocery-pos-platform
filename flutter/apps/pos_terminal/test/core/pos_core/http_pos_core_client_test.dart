@@ -10,6 +10,7 @@ import 'package:pos_terminal/core/pos_core/models/command_result.dart';
 import 'package:pos_terminal/core/pos_core/models/canonical_receipt.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_failure.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_readiness.dart';
+import 'package:pos_terminal/core/pos_core/models/register_operations.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_command.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_snapshot.dart';
 
@@ -42,6 +43,7 @@ void main() {
     'ok': true,
     'transaction': {
       'transaction_id': 'txn/opaque value?',
+      'owned_by_authenticated_operator': true,
       'version': 1,
       'status': 'open',
       'line_items': <Object?>[],
@@ -129,6 +131,7 @@ void main() {
                   'operator_id': 'operator-1',
                   'display_name': 'Operator One',
                   'role': 'cashier',
+                  'permissions': ['register.read', 'transaction.operate.own'],
                   'idle_timeout_seconds': 300,
                   'absolute_expires_at_epoch_ms': 9999999999999,
                 },
@@ -154,6 +157,10 @@ void main() {
 
       final login = await client.login('operator-1', '80421637');
       expect(login.accessToken, token);
+      expect(
+        login.session.permissions,
+        contains(OperatorPermission.transactionOperateOwn),
+      );
       expect(memory.accessToken, isNull);
       memory.establish(
         const AuthenticationLogin(accessToken: token, session: session),
@@ -696,18 +703,30 @@ void main() {
 
   Map<String, Object?> cashSummaryJson({
     String status = 'open',
+    String? view,
     int? counted,
     int? overShort,
-  }) => {
-    'shift_id': 'shift/opaque',
-    'status': status,
-    'opening_cash_minor_units': 10000,
-    'completed_cash_sale_count': 1,
-    'cash_sales_minor_units': 219,
-    'expected_cash_minor_units': 10219,
-    'counted_cash_minor_units': counted,
-    'over_short_minor_units': overShort,
-  };
+  }) {
+    final effectiveView = view ?? (status == 'open' ? 'limited' : 'full');
+    if (effectiveView == 'limited') {
+      return {
+        'shift_id': 'shift/opaque',
+        'status': status,
+        'view': effectiveView,
+      };
+    }
+    return {
+      'shift_id': 'shift/opaque',
+      'status': status,
+      'view': effectiveView,
+      'opening_cash_minor_units': 10000,
+      'completed_cash_sale_count': 1,
+      'cash_sales_minor_units': 219,
+      'expected_cash_minor_units': 10219,
+      'counted_cash_minor_units': counted,
+      'over_short_minor_units': overShort,
+    };
+  }
 
   test(
     'register context and active cashier queries use typed GET routes',
@@ -767,7 +786,6 @@ void main() {
             expect(request.headers['content-type'], 'application/json');
             expect(request.url.path, '/shifts/open');
             expect(jsonDecode(request.body), {
-              'cashier_id': 'cashier-one',
               'opening_cash_minor_units': 10000,
             });
             return http.Response(
@@ -814,11 +832,12 @@ void main() {
           );
         }),
       );
-      final opened = await client.openShift('cashier-one', 10000);
+      final opened = await client.openShift(10000);
       final closed = await client.closeShift(opened.shift.shiftId, 10194);
       final fetched = await client.fetchShiftCashSummary(opened.shift.shiftId);
       expect(opened.shift.closedAtEpochMs, isNull);
-      expect(opened.cashSummary.openingCashMinorUnits, 10000);
+      expect(opened.cashSummary.view, ShiftCashSummaryView.limited);
+      expect(opened.cashSummary.openingCashMinorUnits, isNull);
       expect(closed.shift.closedAtEpochMs, 2000);
       expect(closed.cashSummary.overShortMinorUnits, -25);
       expect(fetched.overShortMinorUnits, -25);
@@ -835,7 +854,7 @@ void main() {
         ),
       );
       await expectLater(
-        client.openShift('cashier-one', 0),
+        client.openShift(0),
         throwsA(
           isA<PosCoreTransportFailure>().having(
             (failure) => failure.retrySameCommandId,

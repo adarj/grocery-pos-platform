@@ -185,10 +185,13 @@ final class RegisterContext {
 
 enum ShiftCashStatus { open, closed }
 
+enum ShiftCashSummaryView { limited, full }
+
 final class ShiftCashSummary {
   const ShiftCashSummary({
     required this.shiftId,
     required this.status,
+    this.view = ShiftCashSummaryView.full,
     required this.openingCashMinorUnits,
     required this.completedCashSaleCount,
     required this.cashSalesMinorUnits,
@@ -207,6 +210,52 @@ final class ShiftCashSummary {
         'Shift cash summary status is unsupported.',
       ),
     };
+    final viewValue = requireJsonString(json, 'view', context);
+    final view = switch (viewValue) {
+      'limited' => ShiftCashSummaryView.limited,
+      'full' => ShiftCashSummaryView.full,
+      _ => throw const PosCoreInvalidResponseFailure(
+        'Shift cash summary view is unsupported.',
+      ),
+    };
+    if (view == ShiftCashSummaryView.limited) {
+      const expected = <String>{'shift_id', 'status', 'view'};
+      if (json.keys.toSet().difference(expected).isNotEmpty ||
+          expected.difference(json.keys.toSet()).isNotEmpty ||
+          status != ShiftCashStatus.open) {
+        throw const PosCoreInvalidResponseFailure(
+          'A limited cash summary must contain only open-shift identity.',
+        );
+      }
+      return ShiftCashSummary(
+        shiftId: requireJsonString(json, 'shift_id', context, nonEmpty: true),
+        status: status,
+        view: view,
+        openingCashMinorUnits: null,
+        completedCashSaleCount: null,
+        cashSalesMinorUnits: null,
+        expectedCashMinorUnits: null,
+        countedCashMinorUnits: null,
+        overShortMinorUnits: null,
+      );
+    }
+    const fullFields = <String>{
+      'shift_id',
+      'status',
+      'view',
+      'opening_cash_minor_units',
+      'completed_cash_sale_count',
+      'cash_sales_minor_units',
+      'expected_cash_minor_units',
+      'counted_cash_minor_units',
+      'over_short_minor_units',
+    };
+    if (json.keys.toSet().difference(fullFields).isNotEmpty ||
+        fullFields.difference(json.keys.toSet()).isNotEmpty) {
+      throw const PosCoreInvalidResponseFailure(
+        'A full cash summary must contain its canonical financial fields.',
+      );
+    }
     final counted = requireJsonNullableNonnegativeInt(
       json,
       'counted_cash_minor_units',
@@ -242,6 +291,7 @@ final class ShiftCashSummary {
     return ShiftCashSummary(
       shiftId: requireJsonString(json, 'shift_id', context, nonEmpty: true),
       status: status,
+      view: view,
       openingCashMinorUnits: requireJsonNonnegativeInt(
         json,
         'opening_cash_minor_units',
@@ -269,10 +319,11 @@ final class ShiftCashSummary {
 
   final String shiftId;
   final ShiftCashStatus status;
-  final int openingCashMinorUnits;
-  final int completedCashSaleCount;
-  final int cashSalesMinorUnits;
-  final int expectedCashMinorUnits;
+  final ShiftCashSummaryView view;
+  final int? openingCashMinorUnits;
+  final int? completedCashSaleCount;
+  final int? cashSalesMinorUnits;
+  final int? expectedCashMinorUnits;
   final int? countedCashMinorUnits;
   final int? overShortMinorUnits;
 }
@@ -296,7 +347,9 @@ final class ShiftOperationResult {
     );
     if (shift.shiftId != summary.shiftId ||
         ((shift.closedAtEpochMs == null) !=
-            (summary.status == ShiftCashStatus.open))) {
+            (summary.status == ShiftCashStatus.open)) ||
+        (shift.closedAtEpochMs != null &&
+            summary.view != ShiftCashSummaryView.full)) {
       throw const PosCoreInvalidResponseFailure(
         'Shift operation identity or lifecycle disagrees with its cash summary.',
       );

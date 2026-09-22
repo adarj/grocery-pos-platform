@@ -46,10 +46,11 @@ final class FixedCashierIds implements CashierIdGenerator {
 
 mixin FakeRegisterOperations {
   int registerContextRequests = 0;
+  String shiftCashierId = 'operator-test';
 
   Future<RegisterContext> fetchRegisterContext() async {
     registerContextRequests += 1;
-    return const RegisterContext(
+    return RegisterContext(
       configured: true,
       register: RegisterIdentity(
         registerId: 'register-test',
@@ -59,7 +60,7 @@ mixin FakeRegisterOperations {
         shiftId: 'shift-test',
         registerId: 'register-test',
         registerDisplayName: 'Test Register',
-        cashierId: 'cashier-test',
+        cashierId: shiftCashierId,
         cashierDisplayName: 'Test Cashier',
         openedAtEpochMs: 0,
         closedAtEpochMs: null,
@@ -70,10 +71,8 @@ mixin FakeRegisterOperations {
 
   Future<List<CashierIdentity>> fetchActiveCashiers() async => const [];
 
-  Future<ShiftOperationResult> openShift(
-    String cashierId,
-    int openingCashMinorUnits,
-  ) => throw UnimplementedError();
+  Future<ShiftOperationResult> openShift(int openingCashMinorUnits) =>
+      throw UnimplementedError();
 
   Future<ShiftOperationResult> closeShift(
     String shiftId,
@@ -84,10 +83,11 @@ mixin FakeRegisterOperations {
       const ShiftCashSummary(
         shiftId: 'shift-test',
         status: ShiftCashStatus.open,
-        openingCashMinorUnits: 0,
-        completedCashSaleCount: 0,
-        cashSalesMinorUnits: 0,
-        expectedCashMinorUnits: 0,
+        view: ShiftCashSummaryView.limited,
+        openingCashMinorUnits: null,
+        completedCashSaleCount: null,
+        cashSalesMinorUnits: null,
+        expectedCashMinorUnits: null,
         countedCashMinorUnits: null,
         overShortMinorUnits: null,
       );
@@ -116,7 +116,7 @@ class FakeConnectedPosCoreClient
     'ok': true,
     'service': 'grocery-pos-core',
     'status': 'ready',
-    'database_schema_version': 8,
+    'database_schema_version': 9,
   });
 
   @override
@@ -192,7 +192,7 @@ class FakeUnavailablePosCoreClient
     'ok': true,
     'service': 'grocery-pos-core',
     'status': 'ready',
-    'database_schema_version': 8,
+    'database_schema_version': 9,
   });
 
   @override
@@ -256,6 +256,7 @@ PosTerminalApp testApp(
       client: client,
       idGenerator: FixedCashierIds(),
       sessionStore: cashierStore ?? MemoryCashierSessionStore(),
+      currentOperatorId: () => authenticationMemory.session?.operatorId,
     ),
     authenticationController: AuthenticationController(
       client: authenticationClient ?? FakeAuthenticationClient(),
@@ -343,6 +344,7 @@ void main() {
     );
     final cashierStore = MemoryCashierSessionStore()
       ..persisted = PersistedCashierSession(
+        operatorId: 'operator-test',
         activeTransactionId: 'txn-manual-lock',
         pendingCommand: ScanBarcodeCommand(
           commandId: 'cmd-manual-lock',
@@ -384,7 +386,7 @@ void main() {
   testWidgets(
     'operator switch destroys protected navigation and reloads fresh state',
     (tester) async {
-      final client = FakeConnectedPosCoreClient();
+      final client = FakeConnectedPosCoreClient()..shiftCashierId = 'alice';
       const aliceSession = AuthenticatedOperatorSession(
         operatorId: 'alice',
         displayName: 'Alice',
@@ -416,6 +418,7 @@ void main() {
       );
       final cashierStore = MemoryCashierSessionStore()
         ..persisted = PersistedCashierSession(
+          operatorId: 'alice',
           activeTransactionId: 'txn-pending',
           pendingCommand: ScanBarcodeCommand(
             commandId: 'cmd-pending',
@@ -458,10 +461,11 @@ void main() {
 
       expect(memory.session!.operatorId, 'bob');
       expect(client.registerContextRequests, 2);
-      expect(find.text('Open Register'), findsOneWidget);
+      expect(find.text('Register In Use'), findsOneWidget);
+      expect(find.text('Open Register'), findsNothing);
       expect(find.text('Grocery POS'), findsNothing);
       expect(
-        Navigator.of(tester.element(find.text('Open Register'))).canPop(),
+        Navigator.of(tester.element(find.text('Register In Use'))).canPop(),
         isFalse,
       );
       expect(cashierStore.persisted!.activeTransactionId, 'txn-pending');

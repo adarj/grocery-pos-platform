@@ -9,8 +9,15 @@
          "../pos/domain/transaction-event.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt"
          "../pos/persistence/transaction-command-receipt-store.rkt"
-         "../pos/persistence/transaction-command-unit-of-work.rkt"
+         (rename-in "../pos/persistence/transaction-command-unit-of-work.rkt"
+                    [transaction-command-commit-plan
+                     transaction-command-commit-plan/without-actor])
          "../pos/persistence/pos-database-migrations.rkt")
+
+(define (transaction-command-commit-plan . fields)
+  (transaction-command-commit-plan-with-actor
+   (apply transaction-command-commit-plan/without-actor fields)
+   "unit-of-work-test-operator"))
 
 (define apples
   (sale-item-added "049000001234" "Test Apples" (money 199)))
@@ -58,6 +65,12 @@
     (load-transaction-command-receipt connection command-id))
   (check-pred receipt-load-found? result)
   (receipt-load-found-receipt result))
+
+(define (mark-receipt-as-pre-v9! connection command-id)
+  (db:query-exec
+   connection
+   "INSERT INTO transaction_command_legacy_unattributed_receipts (command_id) VALUES (?)"
+   command-id))
 
 (define (resolved-receipt result)
   (check-pred transaction-command-commit-resolved? result)
@@ -343,6 +356,7 @@
        (check-pred
         receipt-insert-succeeded?
         (insert-transaction-command-receipt! connection original))
+       (mark-receipt-as-pre-v9! connection "cmd-duplicate")
 
        (define result
          (commit-transaction-command-outcome!
@@ -366,6 +380,7 @@
        (define original
          (transaction-command-receipt command 'accepted "accepted" 2))
        (insert-transaction-command-receipt! connection original)
+       (mark-receipt-as-pre-v9! connection "cmd-delayed")
 
        (define result
          (commit-transaction-command-outcome!
@@ -390,6 +405,7 @@
          (transaction-command-receipt
           original-command 'accepted "accepted" 2))
        (insert-transaction-command-receipt! connection original-receipt)
+       (mark-receipt-as-pre-v9! connection "cmd-reuse")
        (define reused-command
          (scan-barcode-command
           "cmd-reuse" "txn-reuse" 1 "000000000002"))

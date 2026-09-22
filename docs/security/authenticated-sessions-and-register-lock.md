@@ -123,7 +123,9 @@ Missing, malformed, expired, replaced, logged-out, and unknown sessions share
 HTTP 401 `authentication_required`. Authentication responses use
 `Cache-Control: no-store`; 401 protected responses include a Bearer challenge.
 Tokens are never accepted through URLs, bodies, files, argv, or environment.
-HTTP 403 remains reserved for later authorization policy.
+HTTP 403 now means `authorization_denied` for a valid session. It neither
+revokes the bearer nor returns the missing permission; see
+[Authorization and Ownership](authorization-and-ownership.md).
 
 ## Flutter register lock and recovery
 
@@ -165,6 +167,7 @@ bearer tokens, Authorization headers, environment dumps, and database content.
 Project output must not log those values. The formal security audit ledger is
 not implemented yet.
 
-Checkpoint 2 authenticates all active enrolled operators equally. Role-based
-endpoint authorization, manager approval, actor attribution, credential reset,
-login audit events, cloud identity, and remote authentication remain deferred.
+Checkpoint 3 applies fixed role and resource-ownership authorization and
+durable transaction-command actor attribution. Manager approval, credential
+reset, login/security audit events, cloud identity, and remote authentication
+remain deferred.

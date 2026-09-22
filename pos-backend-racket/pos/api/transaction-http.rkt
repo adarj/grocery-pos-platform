@@ -124,6 +124,8 @@
       "Command ID is already associated with a different command."
       #:status 409
       #:status-message conflict-message)]
+    [(transaction-service-authorization-denied? result)
+     (authorization-denied-response)]
     [(transaction-service-command-persistence-failed? result)
      (api-error-response
       "command_persistence_failed"
@@ -139,7 +141,7 @@
       "unsupported transaction service command result: ~e"
       result)]))
 
-(define (execute-decoded-command transaction-service command)
+(define (execute-decoded-command transaction-service principal command)
   ;; Once a typed command exists, an escaping exception cannot prove that the
   ;; atomic commit did not land. The only safe client protocol is same-ID retry.
   (with-handlers
@@ -152,9 +154,10 @@
            #:status-message internal-server-error-message
            #:retry-same-command-id? #t))])
     (command-result-response
-     (transaction-service-execute-command transaction-service command))))
+     (transaction-service-execute-command
+      transaction-service principal command))))
 
-(define (handle-transaction-command-request transaction-service req)
+(define (handle-transaction-command-request transaction-service principal req)
   ;; Failures before a typed logical command exists are transport/internal
   ;; failures, not uncertain outcomes for a particular command identity.
   (with-handlers ([exn:fail? (lambda (_exception) (internal-error-response))])
@@ -181,6 +184,7 @@
             [(command-decode-success? decoded)
              (execute-decoded-command
               transaction-service
+              principal
               (command-decode-success-command decoded))]
             [else
              (error
@@ -213,9 +217,10 @@
    (money-minor-units
     (transaction-line-item-unit-price line-item))))
 
-(define (transaction->jsexpr transaction version)
+(define (transaction->jsexpr transaction version owned-by-operator?)
   (hasheq
    'transaction_id (transaction-id transaction)
+   'owned_by_authenticated_operator owned-by-operator?
    'version version
    'status (transaction-status->string (transaction-status transaction))
    'line_items
@@ -232,7 +237,7 @@
    'change_due_minor_units
    (nullable-money->jsexpr (transaction-change-due transaction))))
 
-(define (query-result-response result)
+(define (query-result-response result principal)
   (cond
     [(transaction-service-success? result)
      (json-response
@@ -241,7 +246,9 @@
        'transaction
        (transaction->jsexpr
         (transaction-service-success-transaction result)
-        (transaction-service-success-version result))))]
+        (transaction-service-success-version result)
+        (transaction-service-success-owned-by-principal?
+         result principal))))]
     [(transaction-service-not-found? result)
      (api-error-response
       "transaction_not_found"
@@ -258,9 +265,12 @@
 
 (define (handle-transaction-query-request
          transaction-service
+         principal
          transaction-id)
   (with-handlers ([exn:fail? (lambda (_exception) (internal-error-response))])
     (query-result-response
      (transaction-service-load-transaction
       transaction-service
-      transaction-id))))
+      principal
+      transaction-id)
+     principal)))

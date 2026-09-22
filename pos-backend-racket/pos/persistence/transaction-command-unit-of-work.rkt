@@ -3,11 +3,14 @@
 (require (prefix-in db: db)
          "../application/transaction-command-receipt.rkt"
          "../application/transaction-command.rkt"
+         "../domain/transaction-command-actor-attribution.rkt"
          "../domain/transaction-event.rkt"
          "sqlite-transaction-event-store.rkt"
+         "transaction-command-actor-attribution-store.rkt"
          "transaction-command-receipt-store.rkt")
 
 (provide (struct-out transaction-command-commit-plan)
+         transaction-command-commit-plan-with-actor
          transaction-command-commit-plan-with-pre-append-effect
          transaction-command-commit-plan-with-post-append-effect
          (struct-out transaction-command-operational-effect-succeeded)
@@ -15,6 +18,7 @@
          (struct-out transaction-command-operational-effect-failed)
          (struct-out transaction-command-commit-resolved)
          (struct-out transaction-command-commit-id-reused)
+         (struct-out transaction-command-commit-authorization-denied)
          (struct-out transaction-command-commit-failed)
          commit-transaction-command-outcome!)
 
@@ -29,7 +33,8 @@
    outcome-code
    events
    [pre-append-effect #:auto #:mutable]
-   [post-append-effect #:auto #:mutable])
+   [post-append-effect #:auto #:mutable]
+   [actor-operator-id #:auto #:mutable])
   #:auto-value #f
   #:transparent
   #:guard
@@ -75,6 +80,23 @@
      (transaction-command-receipt-outcome-kind validated-receipt)
      (transaction-command-receipt-outcome-code validated-receipt)
      (for/list ([event (in-list events)]) event))))
+
+(define (transaction-command-commit-plan-with-actor plan operator-id)
+  (define who 'transaction-command-commit-plan-with-actor)
+  (unless (transaction-command-commit-plan? plan)
+    (raise-argument-error who "transaction-command-commit-plan?" plan))
+  (unless (and (string? operator-id) (positive? (string-length operator-id)))
+    (raise-argument-error who "non-empty string?" operator-id))
+  (define existing
+    (transaction-command-commit-plan-actor-operator-id plan))
+  (when (and existing (not (string=? existing operator-id)))
+    (raise-arguments-error
+     who "commit plan is already bound to a different actor"
+     "existing operator ID" existing
+     "requested operator ID" operator-id))
+  (set-transaction-command-commit-plan-actor-operator-id!
+   plan (string->immutable-string operator-id))
+  plan)
 
 ;; Operational coordination is attached only by application composition after
 ;; the ordinary transaction decision has produced a valid plan. The effect is
@@ -142,6 +164,9 @@
 (struct transaction-command-commit-id-reused (command-id)
   #:transparent)
 
+(struct transaction-command-commit-authorization-denied ()
+  #:transparent)
+
 (struct transaction-command-commit-failed (code detail message)
   #:transparent)
 
@@ -172,11 +197,19 @@
    (receipt-load-failed-code result)
    (receipt-load-failed-message result)))
 
-(define (insert-receipt-or-abort! connection receipt insert-receipt!)
+(define (insert-receipt-or-abort!
+         connection receipt actor-operator-id insert-receipt! insert-attribution!)
   (define result
     (insert-receipt! connection receipt))
   (cond
-    [(receipt-insert-succeeded? result) receipt]
+    [(receipt-insert-succeeded? result)
+     (insert-attribution!
+      connection
+      (transaction-command-actor-attribution
+       (transaction-command-command-id
+        (transaction-command-receipt-command receipt))
+       actor-operator-id))
+     receipt]
     [(receipt-insert-rejected? result)
      (abort-transaction!
       (transaction-command-commit-failed
@@ -189,15 +222,18 @@
       "receipt store returned an unsupported insert result: ~e"
       result)]))
 
-(define (resolved-after-insert connection receipt insert-receipt!)
+(define (resolved-after-insert
+         connection receipt actor-operator-id insert-receipt! insert-attribution!)
   (transaction-command-commit-resolved
-   (insert-receipt-or-abort! connection receipt insert-receipt!)))
+   (insert-receipt-or-abort!
+    connection receipt actor-operator-id insert-receipt! insert-attribution!)))
 
 (define (resolve-unused-command!
          connection
          plan
          prepared-events
          insert-receipt!
+         insert-attribution!
          stream-version)
   (define command
     (transaction-command-commit-plan-command plan))
@@ -205,6 +241,8 @@
     (transaction-command-transaction-id command))
   (define decision-version
     (transaction-command-commit-plan-decision-stream-version plan))
+  (define actor-operator-id
+    (transaction-command-commit-plan-actor-operator-id plan))
   (define actual-version
     (stream-version connection transaction-id))
 
@@ -219,7 +257,7 @@
        'version-conflict
        "stream_version_conflict"
        actual-version)
-      insert-receipt!)]
+      actor-operator-id insert-receipt! insert-attribution!)]
     [(eq? (transaction-command-commit-plan-outcome-kind plan) 'accepted)
      (define effect
        (transaction-command-commit-plan-pre-append-effect plan))
@@ -238,7 +276,7 @@
           (transaction-command-operational-effect-rejected-outcome-code
            effect-result)
           decision-version)
-         insert-receipt!)]
+         actor-operator-id insert-receipt! insert-attribution!)]
        [(transaction-command-operational-effect-failed? effect-result)
         (abort-transaction!
          (transaction-command-commit-failed
@@ -269,7 +307,7 @@
                 'accepted
                 (transaction-command-commit-plan-outcome-code plan)
                 (journal-append-succeeded-new-version append-result))
-               insert-receipt!)]
+               actor-operator-id insert-receipt! insert-attribution!)]
              [(transaction-command-operational-effect-failed? post-result)
               (abort-transaction!
                (transaction-command-commit-failed
@@ -312,13 +350,15 @@
        (transaction-command-commit-plan-outcome-kind plan)
        (transaction-command-commit-plan-outcome-code plan)
        decision-version)
-      insert-receipt!)]))
+      actor-operator-id insert-receipt! insert-attribution!)]))
 
 (define (commit-transaction-command-outcome!
          connection
          plan
          #:insert-receipt!
          [insert-receipt! insert-transaction-command-receipt!]
+         #:insert-attribution!
+         [insert-attribution! insert-transaction-command-actor-attribution!]
          #:stream-version
          [stream-version transaction-stream-version/in-transaction])
   (define who 'commit-transaction-command-outcome!)
@@ -327,6 +367,15 @@
   (unless (transaction-command-commit-plan? plan)
     (raise-argument-error
      who "transaction-command-commit-plan?" plan))
+  (unless (and (string? (transaction-command-commit-plan-actor-operator-id plan))
+               (positive?
+                (string-length
+                 (transaction-command-commit-plan-actor-operator-id plan))))
+    (raise-arguments-error
+     who
+     "commit plan requires an authenticated actor"
+     "plan"
+     plan))
   (when (db:in-transaction? connection)
     (raise-arguments-error
      who
@@ -334,6 +383,7 @@
      "connection"
      connection))
   (check-procedure who insert-receipt! "insert-receipt!")
+  (check-procedure who insert-attribution! "insert-attribution!")
   (check-procedure who stream-version "stream-version")
 
   ;; Complete Schema v1 serialization before BEGIN IMMEDIATE. The prepared
@@ -361,10 +411,27 @@
          [(receipt-load-found? load-result)
           (define existing
             (receipt-load-found-receipt load-result))
-          (if (equal? (transaction-command-receipt-command existing)
-                      command)
-              (transaction-command-commit-resolved existing)
-              (transaction-command-commit-id-reused command-id))]
+          (define attribution
+            (load-transaction-command-actor-attribution connection command-id))
+          (define legacy-unattributed?
+            (transaction-command-receipt-legacy-unattributed?
+             connection command-id))
+          (cond
+            [(or (and attribution legacy-unattributed?)
+                 (and (not attribution) (not legacy-unattributed?)))
+             ;; The final writer check must not treat a broken modern receipt
+             ;; as historical merely because its actor row is absent.
+             (transaction-command-commit-authorization-denied)]
+            [(and attribution
+                  (not
+                   (string=?
+                    (transaction-command-actor-attribution-operator-id
+                     attribution)
+                    (transaction-command-commit-plan-actor-operator-id plan))))
+             (transaction-command-commit-authorization-denied)]
+            [(equal? (transaction-command-receipt-command existing) command)
+             (transaction-command-commit-resolved existing)]
+            [else (transaction-command-commit-id-reused command-id)])]
          [(receipt-load-failed? load-result)
           (receipt-load-failure-result load-result)]
          [(receipt-load-not-found? load-result)
@@ -373,6 +440,7 @@
            plan
            prepared-events
            insert-receipt!
+           insert-attribution!
            stream-version)]
          [else
           (error

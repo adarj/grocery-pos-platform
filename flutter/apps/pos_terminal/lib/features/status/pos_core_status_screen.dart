@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../../core/money/money_format.dart';
 import '../../core/money/money_input.dart';
 import '../../core/pos_core/models/pos_core_failure.dart';
+import '../../core/pos_core/models/authentication.dart';
 import '../../core/pos_core/models/pos_core_health.dart';
 import '../../core/pos_core/models/register_operations.dart';
 import '../../core/pos_core/pos_core_client.dart';
@@ -22,11 +23,13 @@ final class PosCoreStatusScreen extends StatefulWidget {
   const PosCoreStatusScreen({
     required this.client,
     required this.cashierController,
+    required this.session,
     super.key,
   });
 
   final PosCoreClient client;
   final CashierSessionController cashierController;
+  final AuthenticatedOperatorSession session;
 
   @override
   State<PosCoreStatusScreen> createState() => _PosCoreStatusScreenState();
@@ -38,7 +41,6 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
   bool _operationPending = false;
   String? _operationFeedback;
   String? _openingCashValidation;
-  String? _selectedCashierId;
   RegisterShift? _uncertainCloseShift;
   ShiftOperationResult? _closedResult;
 
@@ -60,19 +62,22 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
       return _RegisterHomeData(
         health: health,
         context: null,
-        cashiers: const [],
         cashSummary: null,
       );
     }
     final registerContext = await widget.client.fetchRegisterContext();
-    final cashiers =
-        registerContext.configured && registerContext.activeShift == null
-        ? await widget.client.fetchActiveCashiers()
-        : const <CashierIdentity>[];
+    await widget.cashierController.reconcileRecoveryOwnership(registerContext);
     ShiftCashSummary? cashSummary;
-    if (registerContext.activeShift != null) {
+    final activeShift = registerContext.activeShift;
+    final mayReadActiveSummary =
+        activeShift != null &&
+        (activeShift.cashierId == widget.session.operatorId ||
+            widget.session.permits(
+              OperatorPermission.shiftCashSummaryReadAny,
+            ));
+    if (mayReadActiveSummary) {
       cashSummary = await widget.client.fetchShiftCashSummary(
-        registerContext.activeShift!.shiftId,
+        activeShift.shiftId,
       );
     } else if (_uncertainCloseShift != null) {
       final recovered = await widget.client.fetchShiftCashSummary(
@@ -83,7 +88,6 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
     return _RegisterHomeData(
       health: health,
       context: registerContext,
-      cashiers: cashiers,
       cashSummary: cashSummary,
     );
   }
@@ -116,8 +120,7 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
   }
 
   Future<void> _openShift() async {
-    final cashierId = _selectedCashierId;
-    if (_operationPending || cashierId == null) return;
+    if (_operationPending) return;
     final openingCash = parseMoneyInputMinorUnits(_openingCashController.text);
     if (openingCash == null) {
       setState(() {
@@ -131,7 +134,7 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
       _openingCashValidation = null;
     });
     try {
-      await widget.client.openShift(cashierId, openingCash);
+      await widget.client.openShift(openingCash);
       if (!mounted) return;
       setState(() {
         _operationPending = false;
@@ -294,38 +297,16 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
           data.cashSummary!,
         );
       }
-      final validSelection = data.cashiers.any(
-        (cashier) => cashier.cashierId == _selectedCashierId,
-      );
-      if (!validSelection) {
-        _selectedCashierId = data.cashiers.isEmpty
-            ? null
-            : data.cashiers.first.cashierId;
-      }
       return _StatusLayout(
         title: registerContext.register!.displayName,
-        status: 'Select Cashier',
-        detail: 'Open a shift to begin cashier transactions.',
+        status: 'Open Shift',
+        detail:
+            'Operator: ${widget.session.displayName}\n'
+            'Open your shift to begin cashier transactions.',
         icon: Icons.badge_outlined,
         feedback: _operationFeedback,
         body: Column(
           children: [
-            DropdownButtonFormField<String>(
-              key: const Key('cashier-selection'),
-              initialValue: _selectedCashierId,
-              decoration: const InputDecoration(labelText: 'Cashier'),
-              items: [
-                for (final cashier in data.cashiers)
-                  DropdownMenuItem(
-                    value: cashier.cashierId,
-                    child: Text(cashier.displayName),
-                  ),
-              ],
-              onChanged: _operationPending
-                  ? null
-                  : (value) => setState(() => _selectedCashierId = value),
-            ),
-            const SizedBox(height: 16),
             TextField(
               key: const Key('opening-cash-input'),
               controller: _openingCashController,
@@ -345,14 +326,41 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
         ),
         actions: [
           FilledButton.icon(
+            key: const Key('open-shift-button'),
             style: _primaryStatusActionStyle,
-            onPressed: _operationPending || _selectedCashierId == null
-                ? null
-                : _openShift,
+            onPressed: _operationPending ? null : _openShift,
             icon: const Icon(Icons.login),
             label: Text(_operationPending ? 'Opening...' : 'Open Shift'),
           ),
           _lookupButton(),
+          _refreshButton(),
+        ],
+      );
+    }
+
+    final ownsShift = shift.cashierId == widget.session.operatorId;
+    final mayCloseForeign = widget.session.permits(
+      OperatorPermission.shiftCloseAny,
+    );
+    if (!ownsShift) {
+      return _StatusLayout(
+        title: shift.registerDisplayName,
+        status: 'Register In Use',
+        detail:
+            'The active shift belongs to ${shift.cashierDisplayName}.\n'
+            'Sign in as that operator to continue cashier work.',
+        icon: Icons.person_off_outlined,
+        feedback: _operationFeedback,
+        actions: [
+          if (mayCloseForeign)
+            OutlinedButton.icon(
+              style: _secondaryStatusActionStyle,
+              onPressed: _operationPending
+                  ? null
+                  : () => _confirmCloseShift(shift),
+              icon: const Icon(Icons.logout),
+              label: const Text('Close Shift'),
+            ),
           _refreshButton(),
         ],
       );
@@ -364,8 +372,7 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
       detail:
           'Cashier: ${shift.cashierDisplayName}\n'
           'Shift: ${shift.shiftId}\n'
-          'Opened: ${_formatUtcEpochMs(shift.openedAtEpochMs)}\n'
-          'Opening Cash: ${formatUsdMinorUnits(data.cashSummary!.openingCashMinorUnits)}',
+          'Opened: ${_formatUtcEpochMs(shift.openedAtEpochMs)}',
       icon: Icons.point_of_sale,
       feedback: _operationFeedback,
       actions: [
@@ -426,13 +433,11 @@ final class _RegisterHomeData {
   const _RegisterHomeData({
     required this.health,
     required this.context,
-    required this.cashiers,
     required this.cashSummary,
   });
 
   final PosCoreHealth health;
   final RegisterContext? context;
-  final List<CashierIdentity> cashiers;
   final ShiftCashSummary? cashSummary;
 }
 
@@ -443,16 +448,19 @@ final class _CashReconciliationView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (summary.view != ShiftCashSummaryView.full) {
+      return const Text('Full reconciliation is unavailable.');
+    }
     return Column(
       children: [
         _row(
           'Opening Cash',
-          formatUsdMinorUnits(summary.openingCashMinorUnits),
+          formatUsdMinorUnits(summary.openingCashMinorUnits!),
         ),
-        _row('Cash Sales', formatUsdMinorUnits(summary.cashSalesMinorUnits)),
+        _row('Cash Sales', formatUsdMinorUnits(summary.cashSalesMinorUnits!)),
         _row(
           'Expected Cash',
-          formatUsdMinorUnits(summary.expectedCashMinorUnits),
+          formatUsdMinorUnits(summary.expectedCashMinorUnits!),
         ),
         _row(
           'Counted Cash',

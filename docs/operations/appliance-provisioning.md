@@ -62,7 +62,7 @@ It installs the Flatpak system-wide, creates locked non-admin
 `grocery-pos-kiosk`, and prepares `/var/lib/grocery-pos` as mode `0750` owned by
 `grocery-pos:grocery-pos`. It builds the initial database at an unpublished
 same-filesystem path through canonical POS migration/catalog/register code,
-reaches schema v8, performs full current-schema/SQLite/foreign-key validation,
+reaches schema v9, performs full current-schema/SQLite/foreign-key validation,
 and publishes a
 standalone candidate as `pos.db` with no-overwrite atomic rename. The final DB
 is `grocery-pos:grocery-pos`, mode `0640`. Provisioning never overwrites an

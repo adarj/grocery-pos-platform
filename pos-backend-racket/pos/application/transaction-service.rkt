@@ -1,17 +1,21 @@
 #lang racket
 
 (require (prefix-in db: db)
+         "authentication-service.rkt"
          "transaction-command-receipt.rkt"
          "transaction-command.rkt"
          "../domain/canonical-receipt.rkt"
          "../domain/register-operations.rkt"
+         "../domain/transaction-command-actor-attribution.rkt"
          "../domain/transaction.rkt"
          (prefix-in op: "../domain/transaction-operational-context.rkt")
          "../persistence/sqlite-register-operations.rkt"
          "../persistence/sqlite-shift-cash-accountability.rkt"
          "../persistence/sqlite-transaction-event-store.rkt"
+         "../persistence/transaction-command-actor-attribution-store.rkt"
          "../persistence/transaction-command-receipt-store.rkt"
-         "../persistence/transaction-command-unit-of-work.rkt")
+         "../persistence/transaction-command-unit-of-work.rkt"
+         "../security/authorization-policy.rkt")
 
 (provide make-transaction-service
          transaction-service?
@@ -21,6 +25,7 @@
          transaction-service-success?
          transaction-service-success-transaction
          transaction-service-success-version
+         transaction-service-success-owned-by-principal?
          transaction-service-not-found?
          transaction-service-not-found-transaction-id
          transaction-service-recovery-failed?
@@ -41,6 +46,7 @@
          transaction-service-command-resolved-receipt
          transaction-service-command-id-reused?
          transaction-service-command-id-reused-command-id
+         transaction-service-authorization-denied?
          transaction-service-command-persistence-failed?
          transaction-service-command-persistence-failed-command-id
          transaction-service-command-persistence-failed-code
@@ -52,6 +58,8 @@
    catalog-lookup
    load-events
    load-receipt
+   load-attribution
+   legacy-unattributed?
    commit-command!
    current-epoch-ms))
 
@@ -87,6 +95,9 @@
 (struct transaction-service-command-id-reused (command-id)
   #:transparent)
 
+(struct transaction-service-authorization-denied ()
+  #:transparent)
+
 (struct transaction-service-command-persistence-failed
   (command-id code detail message)
   #:transparent)
@@ -105,6 +116,11 @@
          #:load-events [load-events load-transaction-events]
          #:load-receipt
          [load-receipt load-transaction-command-receipt]
+         #:load-attribution
+         [load-attribution load-transaction-command-actor-attribution]
+         #:legacy-unattributed?
+         [legacy-unattributed?
+          transaction-command-receipt-legacy-unattributed?]
          #:commit-command!
          [commit-command! commit-transaction-command-outcome!]
          #:current-epoch-ms [current-epoch-ms #f])
@@ -114,6 +130,8 @@
   (check-procedure who catalog-lookup "catalog-lookup")
   (check-procedure who load-events "load-events")
   (check-procedure who load-receipt "load-receipt")
+  (check-procedure who load-attribution "load-attribution")
+  (check-procedure who legacy-unattributed? "legacy-unattributed?")
   (check-procedure who commit-command! "commit-command!")
   (when current-epoch-ms
     (check-procedure who current-epoch-ms "current-epoch-ms"))
@@ -122,6 +140,8 @@
    catalog-lookup
    load-events
    load-receipt
+   load-attribution
+   legacy-unattributed?
    commit-command!
    current-epoch-ms))
 
@@ -133,8 +153,8 @@
   (unless (string? transaction-id)
     (raise-argument-error who "string?" transaction-id)))
 
-(define (transaction-service-load-transaction service transaction-id)
-  (define who 'transaction-service-load-transaction)
+(define (load-transaction-unrestricted service transaction-id)
+  (define who 'load-transaction-unrestricted)
   (check-service who service)
   (check-transaction-id who transaction-id)
 
@@ -185,9 +205,9 @@
      (error who "event store returned an unsupported load result: ~e"
             journal-result)]))
 
-(define (transaction-service-load-canonical-receipt service transaction-id)
+(define (load-canonical-receipt-unrestricted service transaction-id)
   (define current
-    (transaction-service-load-transaction service transaction-id))
+    (load-transaction-unrestricted service transaction-id))
   (cond
     [(transaction-service-success? current)
      (define derived
@@ -215,6 +235,68 @@
       'transaction-service-load-canonical-receipt
       "transaction query returned an unsupported result: ~e"
       current)]))
+
+(define (check-principal who principal)
+  (unless (authenticated-operator? principal)
+    (raise-argument-error who "authenticated-operator?" principal)))
+
+(define (principal-owns-transaction? principal transaction)
+  (define context (transaction-operational-context transaction))
+  (and context
+       (operator-owns-resource?
+        (authenticated-operator-operator-id principal)
+        (op:transaction-operational-context-cashier-id context))))
+
+(define (transaction-service-success-owned-by-principal? result principal)
+  (define who 'transaction-service-success-owned-by-principal?)
+  (unless (transaction-service-success? result)
+    (raise-argument-error who "transaction-service-success?" result))
+  (check-principal who principal)
+  (principal-owns-transaction?
+   principal
+   (transaction-service-success-transaction result)))
+
+(define (principal-can-read-transaction? principal transaction own-permission any-permission)
+  (define role (authenticated-operator-role principal))
+  (or (operator-role-authorized? role any-permission)
+      (and (operator-role-authorized? role own-permission)
+           (principal-owns-transaction? principal transaction))))
+
+(define (transaction-service-load-transaction service principal transaction-id)
+  (define who 'transaction-service-load-transaction)
+  (check-service who service)
+  (check-principal who principal)
+  (define result (load-transaction-unrestricted service transaction-id))
+  (cond
+    [(transaction-service-success? result)
+     (if (principal-can-read-transaction?
+          principal
+          (transaction-service-success-transaction result)
+          'transaction.read.own
+          'transaction.read.any)
+         result
+         ;; Cashier reads deliberately collapse non-ownership into not-found.
+         (transaction-service-not-found transaction-id))]
+    [else result]))
+
+(define (transaction-service-load-canonical-receipt
+         service principal transaction-id)
+  (define who 'transaction-service-load-canonical-receipt)
+  (check-service who service)
+  (check-principal who principal)
+  (define current (load-transaction-unrestricted service transaction-id))
+  (cond
+    [(transaction-service-success? current)
+     (if (principal-can-read-transaction?
+          principal
+          (transaction-service-success-transaction current)
+          'receipt.read.own
+          'receipt.read.any)
+         (load-canonical-receipt-unrestricted service transaction-id)
+         (transaction-service-receipt-not-found transaction-id))]
+    [(transaction-service-not-found? current)
+     (transaction-service-receipt-not-found transaction-id)]
+    [else current]))
 
 (define (domain-rejection-code->outcome-code code)
   (case code
@@ -257,6 +339,8 @@
     [(transaction-command-commit-id-reused? result)
      (transaction-service-command-id-reused
       (transaction-command-commit-id-reused-command-id result))]
+    [(transaction-command-commit-authorization-denied? result)
+     (transaction-service-authorization-denied)]
     [(transaction-command-commit-failed? result)
      (transaction-service-command-persistence-failed
       (transaction-command-command-id command)
@@ -269,14 +353,15 @@
       "command unit of work returned an unsupported result: ~e"
       result)]))
 
-(define (commit-plan service plan)
+(define (commit-plan service principal plan)
   (define command
     (transaction-command-commit-plan-command plan))
   (map-commit-result
    command
    ((transaction-service-commit-command! service)
     (transaction-service-connection service)
-    plan)))
+    (transaction-command-commit-plan-with-actor
+     plan (authenticated-operator-operator-id principal)))))
 
 (define (current-epoch-ms service)
   (define clock (transaction-service-current-epoch-ms service))
@@ -326,11 +411,11 @@
      (release-shift-transaction-slot/in-transaction!
       connection context transaction-id))))
 
-(define (dispatch-start-command service command)
+(define (dispatch-start-command service principal command)
   ;; Even a structurally valid start command with a nonzero expected version
   ;; must observe the real stream before its deterministic receipt is frozen.
   (define current
-    (transaction-service-load-transaction
+    (load-transaction-unrestricted
      service
      (transaction-command-transaction-id command)))
   (cond
@@ -341,9 +426,16 @@
            0
            (transaction-service-success-version current)))
      (cond
+       [(and (transaction-service-current-epoch-ms service)
+             (transaction-service-success? current)
+             (not
+              (principal-owns-transaction?
+               principal (transaction-service-success-transaction current))))
+        (transaction-service-authorization-denied)]
        [(not (zero? (transaction-command-expected-version command)))
         (commit-plan
          service
+         principal
          (receipt-only-plan
           command
           actual-version
@@ -352,6 +444,7 @@
        [(transaction-service-success? current)
         (commit-plan
          service
+         principal
          (receipt-only-plan
           command
           actual-version
@@ -368,6 +461,7 @@
               (transaction-command-transaction-id command)))
            (commit-plan
             service
+            principal
             (accepted-plan command 0 (start-accepted-events result)))]
           [else
            (define register-context
@@ -377,17 +471,26 @@
              [(not (register-context-configured? register-context))
               (commit-plan
                service
+               principal
                (receipt-only-plan
                 command 0 'domain-rejected "register_not_configured"))]
              [(not (register-context-active-shift register-context))
               (commit-plan
                service
+               principal
                (receipt-only-plan
                 command 0 'domain-rejected "shift_required"))]
+             [(not
+               (operator-owns-resource?
+                (authenticated-operator-operator-id principal)
+                (register-shift-cashier-id
+                 (register-context-active-shift register-context))))
+              (transaction-service-authorization-denied)]
              [(register-shift-active-transaction-id
                (register-context-active-shift register-context))
               (commit-plan
                service
+               principal
                (receipt-only-plan
                 command 0 'domain-rejected
                 "shift_has_active_transaction"))]
@@ -408,6 +511,7 @@
                  context))
               (commit-plan
                service
+               principal
                (accepted-plan-with-pre-effect
                 command
                 0
@@ -533,9 +637,9 @@
       "unsupported existing-transaction command: ~e"
       command)]))
 
-(define (dispatch-existing-transaction-command service command)
+(define (dispatch-existing-transaction-command service principal command)
   (define current
-    (transaction-service-load-transaction
+    (load-transaction-unrestricted
      service
      (transaction-command-transaction-id command)))
   (cond
@@ -543,16 +647,23 @@
     [(transaction-service-not-found? current)
      (commit-plan
       service
+      principal
       (receipt-only-plan
        command 0 'not-found "transaction_not_found"))]
     [(transaction-service-success? current)
      (define actual-version
        (transaction-service-success-version current))
      (cond
+       [(and (transaction-service-current-epoch-ms service)
+             (not
+              (principal-owns-transaction?
+               principal (transaction-service-success-transaction current))))
+        (transaction-service-authorization-denied)]
        [(not (= actual-version
                 (transaction-command-expected-version command)))
         (commit-plan
          service
+         principal
          (receipt-only-plan
           command
           actual-version
@@ -561,6 +672,7 @@
        [else
         (commit-plan
          service
+         principal
          (fresh-existing-command-plan
           service
           command
@@ -572,10 +684,10 @@
       "transaction query returned an unsupported result: ~e"
       current)]))
 
-(define (dispatch-new-command service command)
+(define (dispatch-new-command service principal command)
   (if (start-transaction-command? command)
-      (dispatch-start-command service command)
-      (dispatch-existing-transaction-command service command)))
+      (dispatch-start-command service principal command)
+      (dispatch-existing-transaction-command service principal command)))
 
 (define (receipt-recovery-failure command result)
   (transaction-service-recovery-failed
@@ -586,9 +698,10 @@
    (receipt-load-failed-detail result)
    (receipt-load-failed-message result)))
 
-(define (transaction-service-execute-command service command)
+(define (transaction-service-execute-command service principal command)
   (define who 'transaction-service-execute-command)
   (check-service who service)
+  (check-principal who principal)
   (unless (transaction-command? command)
     (raise-argument-error who "transaction-command?" command))
 
@@ -603,15 +716,41 @@
     [(receipt-load-found? receipt-result)
      (define existing
        (receipt-load-found-receipt receipt-result))
-     (if (equal? (transaction-command-receipt-command existing)
-                 command)
-         (transaction-service-command-resolved existing)
-         (transaction-service-command-id-reused
-          (transaction-command-command-id command)))]
+     (define attribution
+       ((transaction-service-load-attribution service)
+        (transaction-service-connection service)
+        (transaction-command-command-id command)))
+     (define legacy-unattributed?
+       ((transaction-service-legacy-unattributed? service)
+        (transaction-service-connection service)
+        (transaction-command-command-id command)))
+     (cond
+       [(or (and attribution legacy-unattributed?)
+            (and (not attribution) (not legacy-unattributed?)))
+        ;; A receipt must carry exactly one immutable provenance category.
+        ;; Missing modern attribution and contradictory classification both
+        ;; fail closed without exposing the stored payload or outcome.
+        (transaction-service-authorization-denied)]
+       [(and attribution
+             (not
+              (operator-owns-resource?
+               (authenticated-operator-operator-id principal)
+               (transaction-command-actor-attribution-operator-id
+                attribution))))
+        (transaction-service-authorization-denied)]
+       [(equal? (transaction-command-receipt-command existing) command)
+        (transaction-service-command-resolved existing)]
+       [else
+        (transaction-service-command-id-reused
+         (transaction-command-command-id command))])]
     [(receipt-load-failed? receipt-result)
      (receipt-recovery-failure command receipt-result)]
     [(receipt-load-not-found? receipt-result)
-     (dispatch-new-command service command)]
+     (if (operator-role-authorized?
+          (authenticated-operator-role principal)
+          'transaction.operate.own)
+         (dispatch-new-command service principal command)
+         (transaction-service-authorization-denied))]
     [else
      (error
       who

@@ -425,6 +425,16 @@ final class _CashierScreenState extends State<CashierScreen> {
                     message: localRecoveryFailure!.message,
                   );
                 }
+                if (widget.controller.recoveryBlockedForCurrentOperator) {
+                  return const _RecoveryView(
+                    icon: Icons.person_off_outlined,
+                    title: 'Another operator must recover this sale',
+                    message:
+                        'Saved transaction recovery is bound to a different '
+                        'operator, or its legacy ownership has not yet been '
+                        'verified by POS Core. Sign in as the original operator.',
+                  );
+                }
                 if (state.pendingCommand != null) {
                   return _RecoveryView(
                     icon: Icons.help_outline,

@@ -19,6 +19,7 @@
 (define migration-6-name "create_shift_cash_accountability")
 (define migration-7-name "create_operator_identity_credentials")
 (define migration-8-name "create_operator_login_throttle")
+(define migration-9-name "create_transaction_command_actor_attributions")
 (define stream-sequence-index-name
   "transaction_events_stream_sequence_unique")
 
@@ -521,6 +522,41 @@ CREATE TABLE operator_login_throttle (
 SQL
   )
 
+(define create-transaction-command-actor-attributions-table-sql
+  #<<SQL
+CREATE TABLE transaction_command_actor_attributions (
+  command_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(command_id) = 'text'
+      AND length(command_id) > 0
+    ),
+  operator_id TEXT NOT NULL
+    CHECK (
+      typeof(operator_id) = 'text'
+      AND length(operator_id) > 0
+    ),
+  FOREIGN KEY (command_id)
+    REFERENCES transaction_command_receipts(command_id)
+    ON DELETE CASCADE
+)
+SQL
+  )
+
+(define create-transaction-command-legacy-unattributed-receipts-table-sql
+  #<<SQL
+CREATE TABLE transaction_command_legacy_unattributed_receipts (
+  command_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(command_id) = 'text'
+      AND length(command_id) > 0
+    ),
+  FOREIGN KEY (command_id)
+    REFERENCES transaction_command_receipts(command_id)
+    ON DELETE CASCADE
+)
+SQL
+  )
+
 (define (schema-object-exists? connection type name)
   (= 1
      (db:query-value
@@ -690,6 +726,13 @@ SQL
         (vector "consecutive_failures" "INTEGER" 1 0)
         (vector "last_failed_at_epoch_ms" "INTEGER" 1 0)
         (vector "blocked_until_epoch_ms" "INTEGER" 1 0)))
+
+(define expected-transaction-command-actor-attribution-columns
+  (list (vector "command_id" "TEXT" 1 1)
+        (vector "operator_id" "TEXT" 1 0)))
+
+(define expected-transaction-command-legacy-unattributed-receipt-columns
+  (list (vector "command_id" "TEXT" 1 1)))
 
 (define (validate-owned-table-schema connection
                                      migration-version
@@ -1078,6 +1121,74 @@ SQL
     (error 'migrate-pos-database!
            "operator login throttle state references missing operators")))
 
+(define (validate-transaction-command-actor-attributions-schema connection)
+  (validate-owned-table-schema
+   connection 9 "transaction_command_legacy_unattributed_receipts"
+   expected-transaction-command-legacy-unattributed-receipt-columns
+   create-transaction-command-legacy-unattributed-receipts-table-sql)
+  (validate-owned-table-schema
+   connection 9 "transaction_command_actor_attributions"
+   expected-transaction-command-actor-attribution-columns
+   create-transaction-command-actor-attributions-table-sql)
+  (define orphan-attribution-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM transaction_command_actor_attributions AS attribution
+LEFT JOIN transaction_command_receipts AS receipt
+  ON receipt.command_id = attribution.command_id
+WHERE receipt.command_id IS NULL
+SQL
+     ))
+  (unless (zero? orphan-attribution-count)
+    (error 'migrate-pos-database!
+           "transaction command actor attribution references a missing receipt"))
+  (define orphan-legacy-classification-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM transaction_command_legacy_unattributed_receipts AS legacy
+LEFT JOIN transaction_command_receipts AS receipt
+  ON receipt.command_id = legacy.command_id
+WHERE receipt.command_id IS NULL
+SQL
+     ))
+  (unless (zero? orphan-legacy-classification-count)
+    (error 'migrate-pos-database!
+           "legacy command classification references a missing receipt"))
+  (define conflicting-classification-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM transaction_command_legacy_unattributed_receipts AS legacy
+JOIN transaction_command_actor_attributions AS attribution
+  ON attribution.command_id = legacy.command_id
+SQL
+     ))
+  (unless (zero? conflicting-classification-count)
+    (error 'migrate-pos-database!
+           "a command receipt cannot be both legacy-unattributed and attributed"))
+  (define unclassified-receipt-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM transaction_command_receipts AS receipt
+LEFT JOIN transaction_command_legacy_unattributed_receipts AS legacy
+  ON legacy.command_id = receipt.command_id
+LEFT JOIN transaction_command_actor_attributions AS attribution
+  ON attribution.command_id = receipt.command_id
+WHERE legacy.command_id IS NULL
+  AND attribution.command_id IS NULL
+SQL
+     ))
+  (unless (zero? unclassified-receipt-count)
+    (error 'migrate-pos-database!
+           "every command receipt must be attributed or explicitly classified as pre-v9")))
+
 (define (apply-migration-1! connection)
   (db:query-exec connection create-events-table-sql)
   (db:query-exec connection create-stream-sequence-index-sql))
@@ -1154,6 +1265,25 @@ SQL
 (define (apply-migration-8! connection)
   (db:query-exec connection create-operator-login-throttle-table-sql))
 
+(define (apply-migration-9! connection)
+  ;; Historical receipts deliberately remain unattributed because their
+  ;; transaction context cannot prove which authenticated operator submitted
+  ;; the command. Classify exactly the receipts present at the v9 boundary so
+  ;; a missing actor on a later receipt can never inherit legacy compatibility.
+  (db:query-exec
+   connection
+   create-transaction-command-legacy-unattributed-receipts-table-sql)
+  (db:query-exec
+   connection
+   #<<SQL
+INSERT INTO transaction_command_legacy_unattributed_receipts (command_id)
+SELECT command_id
+FROM transaction_command_receipts
+SQL
+   )
+  (db:query-exec
+   connection create-transaction-command-actor-attributions-table-sql))
+
 (define migrations
   (list
    (pos-database-migration 1
@@ -1187,7 +1317,11 @@ SQL
    (pos-database-migration 8
                            migration-8-name
                            apply-migration-8!
-                           validate-operator-login-throttle-schema)))
+                           validate-operator-login-throttle-schema)
+   (pos-database-migration 9
+                           migration-9-name
+                           apply-migration-9!
+                           validate-transaction-command-actor-attributions-schema)))
 
 (define current-pos-database-schema-version (length migrations))
 

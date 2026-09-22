@@ -116,7 +116,7 @@ start_core() {
       fail "packaged POS Core exited before readiness"
     fi
     if readiness="$(curl --silent --show-error --max-time 1 "$base_url/ready" 2>/dev/null)" &&
-      jq -e '.ok == true and .status == "ready" and .database_schema_version == 8' \
+      jq -e '.ok == true and .status == "ready" and .database_schema_version == 9' \
         <<<"$readiness" >/dev/null; then
       return
     fi
@@ -185,7 +185,7 @@ anonymous_status="$(curl --silent --output /dev/null --write-out '%{http_code}' 
   fail "packaged business API accepted an anonymous request"
 login_core
 
-shift="$(post_json '/shifts/open' '{"cashier_id":"cashier-development-01","opening_cash_minor_units":10000}')"
+shift="$(post_json '/shifts/open' '{"opening_cash_minor_units":10000}')"
 jq -e '.ok == true and (.shift.shift_id | type == "string")' <<<"$shift" >/dev/null ||
   fail "packaged shift-open API failed"
 
@@ -244,7 +244,7 @@ run_packaged_script catalog.rkt activate \
   "$restore_target_path" >/dev/null
 restore_result="$(run_packaged_script database-recovery.rkt restore-offline \
   "$backup_path" "$restore_target_path")"
-jq -e '.ok == true and .operation == "restore_offline" and .restored_schema_version == 8' \
+jq -e '.ok == true and .operation == "restore_offline" and .restored_schema_version == 9' \
   <<<"$restore_result" >/dev/null ||
   fail "packaged offline restore failed"
 recovery_directory="$(jq -r '.recovery_evidence_directory' <<<"$restore_result")"

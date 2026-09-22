@@ -12,6 +12,7 @@
          "../application/transaction-service.rkt"
          "../application/authentication-service.rkt"
          "../application/register-operations-service.rkt"
+         "../security/authorization-policy.rkt"
          "../support/health.rkt"
          "../support/readiness.rkt")
 
@@ -101,6 +102,16 @@
        (positive? (string-length (second path)))
        (equal? (third path) "cash-summary")))
 
+(define (authenticated-principal authenticated)
+  (authentication-session-authenticated-principal authenticated))
+
+(define (with-route-permission authenticated permission handler)
+  (define principal (authenticated-principal authenticated))
+  (if (operator-role-authorized?
+       (authenticated-operator-role principal) permission)
+      (handler principal)
+      (authorization-denied-response)))
+
 (define (make-app transaction-service
                   [register-service #f]
                   #:authentication-service authentication-service
@@ -156,59 +167,83 @@
          (if (equal? method #"POST")
              (authenticate-protected-request
               authentication-service req
-              (lambda (_token _authenticated)
-                (handle-transaction-command-request transaction-service req)))
+              (lambda (_token authenticated)
+                (with-route-permission
+                 authenticated
+                 'transaction.operate.own
+                 (lambda (principal)
+                   (handle-transaction-command-request
+                    transaction-service principal req)))))
              (method-not-allowed-response #"POST"))]
 
         [(and register-service (equal? path '("register-context")))
          (if (equal? method #"GET")
              (authenticate-protected-request
               authentication-service req
-              (lambda (_token _authenticated)
-                (handle-register-context-request register-service)))
+              (lambda (_token authenticated)
+                (with-route-permission
+                 authenticated
+                 'register.read
+                 (lambda (_principal)
+                   (handle-register-context-request register-service)))))
              (method-not-allowed-response #"GET"))]
 
         [(and register-service (equal? path '("cashiers")))
          (if (equal? method #"GET")
              (authenticate-protected-request
               authentication-service req
-              (lambda (_token _authenticated)
-                (handle-active-cashiers-request register-service)))
+              (lambda (_token authenticated)
+                (with-route-permission
+                 authenticated
+                 'cashier_directory.read
+                 (lambda (_principal)
+                   (handle-active-cashiers-request register-service)))))
              (method-not-allowed-response #"GET"))]
 
         [(and register-service (equal? path '("shifts" "open")))
          (if (equal? method #"POST")
              (authenticate-protected-request
               authentication-service req
-              (lambda (_token _authenticated)
-                (handle-open-shift-request register-service req)))
+              (lambda (_token authenticated)
+                (with-route-permission
+                 authenticated
+                 'shift.open.own
+                 (lambda (principal)
+                   (handle-open-shift-request
+                    register-service principal req)))))
              (method-not-allowed-response #"POST"))]
 
         [(and register-service (shift-close-path? path))
          (if (equal? method #"POST")
              (authenticate-protected-request
               authentication-service req
-              (lambda (_token _authenticated)
+              (lambda (_token authenticated)
                 (handle-close-shift-request
-                 register-service (second path) req)))
+                 register-service
+                 (authenticated-principal authenticated)
+                 (second path)
+                 req)))
              (method-not-allowed-response #"POST"))]
 
         [(and register-service (shift-cash-summary-path? path))
          (if (equal? method #"GET")
              (authenticate-protected-request
               authentication-service req
-              (lambda (_token _authenticated)
+              (lambda (_token authenticated)
                 (handle-shift-cash-summary-request
-                 register-service (second path))))
+                 register-service
+                 (authenticated-principal authenticated)
+                 (second path))))
              (method-not-allowed-response #"GET"))]
 
         [(transaction-query-path? path)
          (if (equal? method #"GET")
              (authenticate-protected-request
               authentication-service req
-              (lambda (_token _authenticated)
+              (lambda (_token authenticated)
                 (handle-transaction-query-request
                  transaction-service
+                 (authenticated-principal authenticated)
                  (second path))))
              (method-not-allowed-response #"GET"))]
 
@@ -216,9 +251,10 @@
          (if (equal? method #"GET")
              (authenticate-protected-request
               authentication-service req
-              (lambda (_token _authenticated)
+              (lambda (_token authenticated)
                 (handle-receipt-query-request
                  transaction-service
+                 (authenticated-principal authenticated)
                  (second path))))
              (method-not-allowed-response #"GET"))]
 

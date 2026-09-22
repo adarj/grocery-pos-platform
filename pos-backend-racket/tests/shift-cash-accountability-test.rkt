@@ -2,13 +2,26 @@
 
 (require (prefix-in db: db)
          rackunit
-         "../pos/application/register-operations-service.rkt"
+         "../pos/application/authentication-service.rkt"
+         (rename-in "../pos/application/register-operations-service.rkt"
+                    [register-operations-open-shift open-shift/authorized]
+                    [register-operations-close-shift close-shift/authorized])
          "../pos/domain/money.rkt"
          "../pos/domain/register-operations.rkt"
          "../pos/domain/shift-cash-accountability.rkt"
          "../pos/persistence/operational-configuration-snapshot-codec.rkt"
          "../pos/persistence/pos-database-migrations.rkt"
          "../pos/persistence/sqlite-register-operations.rkt")
+
+(define cashier-one-principal
+  (authenticated-operator "cashier-one" "Alice" 'cashier))
+
+(define (register-operations-open-shift service _cashier-id opening-cash)
+  (open-shift/authorized service cashier-one-principal opening-cash))
+
+(define (register-operations-close-shift service shift-id counted-cash)
+  (close-shift/authorized
+   service cashier-one-principal shift-id counted-cash))
 
 (define configuration-json
   "{\"schema_version\":1,\"register\":{\"register_id\":\"register-one\",\"display_name\":\"Register One\"},\"cashiers\":[{\"cashier_id\":\"cashier-one\",\"display_name\":\"Alice\",\"active\":true}]}")
@@ -245,8 +258,7 @@ VALUES ('legacy-shift', 'register-one', 'Register One', 'cashier-one',
 SQL
         )
        (define result
-         (register-operations-load-cash-summary
-          (make-service connection '()) "legacy-shift"))
+         (load-shift-cash-summary connection "legacy-shift"))
        (check-pred shift-cash-summary-unavailable? result))))
 
   (test-case "missing opening and noncontiguous sequence fail closed"
@@ -259,7 +271,7 @@ SQL
        (check-exn
         exn:fail?
         (lambda ()
-          (register-operations-load-cash-summary service "shift-one")))))
+          (load-shift-cash-summary connection "shift-one")))))
     (call-with-database
      (lambda (connection)
        (define service (make-service connection '(1000)))
@@ -273,4 +285,4 @@ SQL
        (check-exn
         exn:fail?
         (lambda ()
-          (register-operations-load-cash-summary service "shift-one")))))))
+          (load-shift-cash-summary connection "shift-one")))))))

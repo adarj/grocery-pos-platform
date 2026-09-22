@@ -2,7 +2,8 @@
 
 (require (prefix-in db: db)
          web-server/http
-         "../../pos/application/authentication-service.rkt")
+         "../../pos/application/authentication-service.rkt"
+         "../../pos/domain/operator-identity.rkt")
 
 (provide test-operator-id
          test-operator-pin
@@ -17,7 +18,7 @@
 (define test-dummy-password-hash
   "$argon2id$v=19$m=19456,t=2,p=1$ZHVtbXlzYWx0ZHVtbXlzYWx0$ZHVtbXloYXNoZHVtbXloYXNoZHVtbXloYXNoZHVtbXloYXNo")
 
-(define (make-test-authentication-service connection)
+(define (make-test-authentication-service connection #:role [role 'manager])
   (unless (db:connection? connection)
     (raise-argument-error
      'make-test-authentication-service "connection?" connection))
@@ -30,11 +31,9 @@ SQL
    test-operator-id)
   (db:query-exec
    connection
-   #<<SQL
-INSERT OR IGNORE INTO operator_roles (operator_id, role)
-VALUES (?, 'cashier')
-SQL
-   test-operator-id)
+   "INSERT OR IGNORE INTO operator_roles (operator_id, role) VALUES (?, ?)"
+   test-operator-id
+   (operator-role->string role))
   (db:query-exec
    connection
    #<<SQL
@@ -62,4 +61,3 @@ SQL
   (header
    #"Authorization"
    (string->bytes/utf-8 (string-append "Bearer " token))))
-

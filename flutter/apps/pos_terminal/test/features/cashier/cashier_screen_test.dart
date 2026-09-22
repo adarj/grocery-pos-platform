@@ -238,6 +238,7 @@ fixture({
     client: client,
     idGenerator: ids,
     sessionStore: sessionStore ?? MemoryCashierSessionStore(),
+    currentOperatorId: () => 'operator-test',
   );
   return (client: client, controller: controller, ids: ids);
 }
@@ -1289,6 +1290,7 @@ void main() {
   ) async {
     final store = MemoryCashierSessionStore(
       persisted: PersistedCashierSession(
+        operatorId: 'operator-test',
         activeTransactionId: 'txn-1',
         pendingCommand: ScanBarcodeCommand(
           commandId: 'cmd-restored',
@@ -1320,7 +1322,7 @@ void main() {
     tester,
   ) async {
     final store = MemoryCashierSessionStore(
-      persisted: PersistedCashierSession(activeTransactionId: 'txn-1'),
+      persisted: PersistedCashierSession(operatorId: 'operator-test', activeTransactionId: 'txn-1'),
     );
     final testFixture = fixture(
       commandIds: const [],
@@ -1625,6 +1627,7 @@ void main() {
       );
       final store = MemoryCashierSessionStore(
         persisted: PersistedCashierSession(
+          operatorId: 'operator-test',
           activeTransactionId: 'txn-1',
           pendingCommand: restored,
         ),
@@ -1673,6 +1676,7 @@ void main() {
     );
     final store = MemoryCashierSessionStore(
       persisted: PersistedCashierSession(
+        operatorId: 'operator-test',
         activeTransactionId: 'txn-1',
         pendingCommand: restored,
       ),
@@ -1711,6 +1715,7 @@ void main() {
     );
     final store = MemoryCashierSessionStore(
       persisted: PersistedCashierSession(
+        operatorId: 'operator-test',
         activeTransactionId: 'txn-1',
         pendingCommand: restored,
       ),
@@ -1811,6 +1816,7 @@ void main() {
 
     final pendingStore = MemoryCashierSessionStore(
       persisted: PersistedCashierSession(
+        operatorId: 'operator-test',
         activeTransactionId: 'txn-1',
         pendingCommand: CompleteTransactionCommand(
           commandId: 'cmd-pending',
@@ -1829,7 +1835,7 @@ void main() {
     expectPrimaryAction('Retry Command');
 
     final refreshStore = MemoryCashierSessionStore(
-      persisted: PersistedCashierSession(activeTransactionId: 'txn-1'),
+      persisted: PersistedCashierSession(operatorId: 'operator-test', activeTransactionId: 'txn-1'),
     );
     final refreshFixture = fixture(
       commandIds: const [],
@@ -1865,6 +1871,7 @@ void main() {
 
     final recoveryStore = MemoryCashierSessionStore(
       persisted: PersistedCashierSession(
+        operatorId: 'operator-test',
         activeTransactionId: 'txn-1',
         pendingCommand: CompleteTransactionCommand(
           commandId: 'cmd-pending',
@@ -2328,6 +2335,7 @@ void main() {
       for (final command in commands) {
         final store = MemoryCashierSessionStore(
           persisted: PersistedCashierSession(
+            operatorId: 'operator-test',
             activeTransactionId: 'txn-1',
             pendingCommand: command,
           ),

@@ -35,10 +35,34 @@ abstract interface class CashierSessionStore {
 }
 
 final class PersistedCashierSession {
-  PersistedCashierSession({
+  factory PersistedCashierSession({
+    required String operatorId,
+    required String activeTransactionId,
+    TransactionCommand? pendingCommand,
+  }) => PersistedCashierSession._(
+    operatorId: operatorId,
+    activeTransactionId: activeTransactionId,
+    pendingCommand: pendingCommand,
+  );
+
+  PersistedCashierSession._({
+    required this.operatorId,
     required this.activeTransactionId,
     this.pendingCommand,
   }) {
+    if (operatorId == null ||
+        operatorId!.isEmpty ||
+        activeTransactionId.isEmpty ||
+        (pendingCommand != null &&
+            pendingCommand!.transactionId != activeTransactionId)) {
+      throw const CashierSessionStoreFailure.corruptData();
+    }
+  }
+
+  PersistedCashierSession._legacy({
+    required this.activeTransactionId,
+    this.pendingCommand,
+  }) : operatorId = null {
     if (activeTransactionId.isEmpty ||
         (pendingCommand != null &&
             pendingCommand!.transactionId != activeTransactionId)) {
@@ -46,26 +70,43 @@ final class PersistedCashierSession {
     }
   }
 
-  static const schemaVersion = 1;
+  static const schemaVersion = 2;
 
+  final String? operatorId;
   final String activeTransactionId;
   final TransactionCommand? pendingCommand;
 
-  Map<String, Object?> toJson() => {
-    'schema_version': schemaVersion,
-    'active_transaction_id': activeTransactionId,
-    'pending_command': pendingCommand?.toJson(),
-  };
+  bool get isLegacyUnbound => operatorId == null;
 
-  factory PersistedCashierSession.fromJson(Object? value) {
-    final record = _requireExactObject(value, const {
-      'schema_version',
-      'active_transaction_id',
-      'pending_command',
-    });
-    if (_requireInt(record['schema_version']) != schemaVersion) {
+  Map<String, Object?> toJson() {
+    final owner = operatorId;
+    if (owner == null) {
       throw const CashierSessionStoreFailure.corruptData();
     }
+    return {
+      'schema_version': schemaVersion,
+      'operator_id': owner,
+      'active_transaction_id': activeTransactionId,
+      'pending_command': pendingCommand?.toJson(),
+    };
+  }
+
+  factory PersistedCashierSession.fromJson(Object? value) {
+    if (value is! Map || value['schema_version'] is! int) {
+      throw const CashierSessionStoreFailure.corruptData();
+    }
+    final version = value['schema_version'] as int;
+    final expectedFields = switch (version) {
+      1 => const {'schema_version', 'active_transaction_id', 'pending_command'},
+      schemaVersion => const {
+        'schema_version',
+        'operator_id',
+        'active_transaction_id',
+        'pending_command',
+      },
+      _ => throw const CashierSessionStoreFailure.corruptData(),
+    };
+    final record = _requireExactObject(value, expectedFields);
 
     final activeTransactionId = _requireNonemptyString(
       record['active_transaction_id'],
@@ -75,7 +116,14 @@ final class PersistedCashierSession {
         ? null
         : _decodeCommand(pendingValue);
 
+    if (version == 1) {
+      return PersistedCashierSession._legacy(
+        activeTransactionId: activeTransactionId,
+        pendingCommand: pendingCommand,
+      );
+    }
     return PersistedCashierSession(
+      operatorId: _requireNonemptyString(record['operator_id']),
       activeTransactionId: activeTransactionId,
       pendingCommand: pendingCommand,
     );

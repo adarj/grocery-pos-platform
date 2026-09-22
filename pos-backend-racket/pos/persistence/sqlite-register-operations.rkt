@@ -5,6 +5,7 @@
          "../domain/register-operations.rkt"
          "../domain/shift-cash-accountability.rkt"
          "../domain/transaction-operational-context.rkt"
+         "../security/authorization-policy.rkt"
          "operational-configuration-snapshot-codec.rkt"
          "sqlite-shift-cash-accountability.rkt")
 
@@ -12,6 +13,7 @@
          (struct-out operational-configuration-activation-rejected)
          activate-operational-configuration!
          load-register-context
+         load-shift-by-id
          load-active-cashiers
          open-register-shift!
          close-register-shift!
@@ -289,13 +291,17 @@ SQL
    #:option 'immediate))
 
 (define (close-register-shift!
-         connection shift-id counted-cash current-epoch-ms)
+         connection shift-id counted-cash current-epoch-ms
+         actor-operator-id actor-role)
   (define who 'close-register-shift!)
   (check-connection who connection)
   (unless (and (string? shift-id) (positive? (string-length shift-id)))
     (raise-argument-error who "non-empty-string?" shift-id))
   (unless (money? counted-cash)
     (raise-argument-error who "money?" counted-cash))
+  (unless (and (string? actor-operator-id)
+               (positive? (string-length actor-operator-id)))
+    (raise-argument-error who "non-empty-string?" actor-operator-id))
   (check-procedure who current-epoch-ms "current-epoch-ms")
 
   (db:call-with-transaction
@@ -304,6 +310,26 @@ SQL
      (define shift (load-shift-by-id connection shift-id))
      (cond
        [(not shift) (register-shift-close-rejected 'shift-not-found)]
+       [(not
+         (if (operator-owns-resource?
+              actor-operator-id (register-shift-cashier-id shift))
+             (operator-role-authorized? actor-role 'shift.close.own)
+             (and
+              (operator-role-authorized? actor-role 'shift.close.any)
+              (= 1
+                 (db:query-value
+                  connection
+                  #<<SQL
+SELECT COUNT(*)
+FROM operators AS operator
+JOIN operator_roles AS assignment
+  ON assignment.operator_id = operator.operator_id
+WHERE operator.operator_id = ?
+  AND operator.active = 1
+  AND assignment.role = 'manager'
+SQL
+                  actor-operator-id)))))
+        (register-shift-close-rejected 'authorization-denied)]
        [(register-shift-closed-at-epoch-ms shift)
         (define summary (load-shift-cash-summary connection shift-id))
         (cond

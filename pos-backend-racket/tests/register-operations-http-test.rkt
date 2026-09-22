@@ -16,7 +16,7 @@
          "support/authentication.rkt")
 
 (define config-json
-  "{\"schema_version\":1,\"register\":{\"register_id\":\"register-one\",\"display_name\":\"Register One\"},\"cashiers\":[{\"cashier_id\":\"active\",\"display_name\":\"Alice\",\"active\":true},{\"cashier_id\":\"inactive\",\"display_name\":\"Inactive\",\"active\":false}]}")
+  "{\"schema_version\":1,\"register\":{\"register_id\":\"register-one\",\"display_name\":\"Register One\"},\"cashiers\":[{\"cashier_id\":\"__http_test_operator__\",\"display_name\":\"HTTP Test Operator\",\"active\":true},{\"cashier_id\":\"inactive\",\"display_name\":\"Inactive\",\"active\":false}]}")
 (define test-access-token (box #f))
 
 (define (request* method path [body #f])
@@ -55,7 +55,8 @@
        (set-box! clock-values (rest (unbox clock-values)))
        value)
      #:generate-shift-id (lambda () "shift-one")))
-  (define auth-service (make-test-authentication-service connection))
+  (define auth-service
+    (make-test-authentication-service connection #:role 'cashier))
   (set-box! test-access-token (issue-test-access-token auth-service))
   (define app
     (make-app
@@ -119,49 +120,99 @@
     (check-equal? (hash-ref result 'outcome_kind) "domain_rejected")
     (check-equal? (hash-ref result 'outcome_code) "shift_required"))
 
-  (test-case "cashier listing excludes inactive references"
+  (test-case "cashier role cannot list the configured cashier directory"
     (define response (app (request* #"GET" "/cashiers")))
-    (check-equal? (response-code response) 200)
+    (check-equal? (response-code response) 403)
+    (check-equal? (error-code response) "authorization_denied")
+    ;; Authorization denial does not revoke a valid bearer session.
     (check-equal?
-     (hash-ref (body response) 'cashiers)
-     (list (hasheq 'cashier_id "active" 'display_name "Alice"))))
+     (response-code (app (request* #"GET" "/register-context")))
+     200))
 
   (test-case "open validates strictly and safely repeats same cashier"
     (define malformed
       (post app "/shifts/open"
-            (hasheq 'cashier_id "active"
-                    'opening_cash_minor_units 10000
+            (hasheq 'opening_cash_minor_units 10000
                     'extra #t)))
     (check-equal? (response-code malformed) 400)
     (for ([invalid (in-list (list -1 1.5 "10000"))])
       (check-equal?
        (response-code
         (post app "/shifts/open"
-              (hasheq 'cashier_id "active"
-                      'opening_cash_minor_units invalid)))
+              (hasheq 'opening_cash_minor_units invalid)))
        400))
-    (define inactive
+    (define identity-claim
       (post app "/shifts/open"
             (hasheq 'cashier_id "inactive"
                     'opening_cash_minor_units 10000)))
-    (check-equal? (response-code inactive) 409)
-    (check-equal? (error-code inactive) "cashier_inactive")
+    (check-equal? (response-code identity-claim) 400)
     (define opened
       (post app "/shifts/open"
-            (hasheq 'cashier_id "active"
-                    'opening_cash_minor_units 10000)))
+            (hasheq 'opening_cash_minor_units 10000)))
     (check-equal? (response-code opened) 200)
     (check-equal? (hash-ref (hash-ref (body opened) 'shift) 'shift_id)
                   "shift-one")
     (check-equal?
-     (hash-ref (hash-ref (body opened) 'cash_summary)
-               'opening_cash_minor_units)
-     10000)
+     (hash-ref (hash-ref (body opened) 'cash_summary) 'view)
+     "limited")
+    (check-false
+     (hash-has-key? (hash-ref (body opened) 'cash_summary)
+                    'opening_cash_minor_units))
+    (for ([command
+           (in-list
+            (list
+             (hasheq 'schema_version 1
+                     'command_id "cmd-summary-start"
+                     'transaction_id "txn-cash-summary-sentinel"
+                     'expected_version 0
+                     'command_type "start_transaction"
+                     'payload (hasheq))
+             (hasheq 'schema_version 1
+                     'command_id "cmd-summary-scan"
+                     'transaction_id "txn-cash-summary-sentinel"
+                     'expected_version 1
+                     'command_type "scan_barcode"
+                     'payload (hasheq 'barcode "049000001234"))
+             (hasheq 'schema_version 1
+                     'command_id "cmd-summary-tender"
+                     'transaction_id "txn-cash-summary-sentinel"
+                     'expected_version 2
+                     'command_type "tender_cash"
+                     'payload (hasheq 'amount_minor_units 8765432))
+             (hasheq 'schema_version 1
+                     'command_id "cmd-summary-complete"
+                     'transaction_id "txn-cash-summary-sentinel"
+                     'expected_version 3
+                     'command_type "complete_transaction"
+                     'payload (hasheq))))])
+      (check-equal?
+       (response-code (post app "/transaction-commands" command))
+       200))
     (define repeated
       (post app "/shifts/open"
-            (hasheq 'cashier_id "active"
-                    'opening_cash_minor_units 999)))
+            (hasheq 'opening_cash_minor_units 999)))
     (check-equal? (response-code repeated) 200)
+    (define repeated-summary
+      (hash-ref (body repeated) 'cash_summary))
+    (check-equal? repeated-summary
+                  (hasheq 'shift_id "shift-one"
+                          'status "open"
+                          'view "limited"))
+    (define serialized-repeated (jsexpr->string (body repeated)))
+    (for ([forbidden
+           (in-list
+            '("opening_cash_minor_units"
+              "completed_cash_sale_count"
+              "cash_sales_minor_units"
+              "expected_cash_minor_units"
+              "counted_cash_minor_units"
+              "over_short_minor_units"
+              "199"
+              "10199"))])
+      (check-false (string-contains? serialized-repeated forbidden)))
+    (db:query-exec
+     connection
+     "DELETE FROM shift_cash_movements WHERE transaction_id = 'txn-cash-summary-sentinel'")
     (check-equal? (body repeated) (body opened)))
 
   (test-case "transaction start under the open shift claims and releases its slot"
@@ -219,9 +270,16 @@
      (hash-ref (hash-ref (body before-close) 'cash_summary) 'status)
      "open")
     (check-equal?
-     (hash-ref (hash-ref (body before-close) 'cash_summary)
-               'expected_cash_minor_units)
-     10000)
+     (hash-ref (hash-ref (body before-close) 'cash_summary) 'view)
+     "limited")
+    (for ([field (in-list '(opening_cash_minor_units
+                            completed_cash_sale_count
+                            cash_sales_minor_units
+                            expected_cash_minor_units
+                            counted_cash_minor_units
+                            over_short_minor_units))])
+      (check-false
+       (hash-has-key? (hash-ref (body before-close) 'cash_summary) field)))
     (for ([invalid (in-list (list -1 1.5 "10000"))])
       (check-equal?
        (response-code
@@ -237,6 +295,7 @@
                   2000)
     (define closed-summary (hash-ref (body closed) 'cash_summary))
     (check-equal? (hash-ref closed-summary 'status) "closed")
+    (check-equal? (hash-ref closed-summary 'view) "full")
     (check-equal? (hash-ref closed-summary 'counted_cash_minor_units) 9975)
     (check-equal? (hash-ref closed-summary 'over_short_minor_units) -25)
     (define repeated

@@ -160,8 +160,10 @@ uses a no-echo repeated prompt and no PIN argv. See
 [Operator Identity and PIN Credentials](../security/operator-identity-and-pin-credentials.md).
 The runtime HTTP authentication and register-lock contract is documented in
 [Authenticated Sessions and Register Lock](../security/authenticated-sessions-and-register-lock.md).
-Role-based authorization, scheduled backup, retention, encryption, and
-replication remain unimplemented.
+Fixed role/resource authorization is documented in
+[Authorization and Ownership](../security/authorization-and-ownership.md).
+Manager approval, scheduled backup, retention, encryption, and replication
+remain unimplemented.
 
 Before activating an upgraded Checkpoint 2 terminal, confirm that at least one
 active operator has an enrolled credential:
