@@ -343,7 +343,7 @@ The current presentation supports:
 - sale completion followed by an authoritative completed-state read;
 - confirmed removal of one selected open-sale line, followed by an
   authoritative read;
-- confirmed pre-payment void, followed by an authoritative `voided` read;
+- separately approved pre-payment void, followed by an authoritative `voided` read;
 - an explicit `Next Sale` action after an authoritative completed or voided
   snapshot;
 - concise feedback for unknown barcodes and version conflicts;
@@ -396,6 +396,19 @@ resend a command whose durable result is already known. These same recovery
 paths apply to scan, tender, completion, removal, and void commands. A retry
 uses the exact persisted correction command; it never reconstructs one from
 currently visible line or dialog state.
+
+Whole-sale void now opens a distinct **Supervisor / Manager Approval** dialog
+that identifies the requester and exact sale, item count and total. A
+different supervisor/manager enters an ID and masked PIN. Cancellation before
+approval does not save or send the generated void command. Once approved,
+Flutter saves the exact command before POST and sends the 90-second capability
+only in `X-Grocery-POS-Approval`. The PIN and capability are never saved in
+cashier recovery state. On transport uncertainty the exact pending command
+survives but the token is discarded. Retrying it without a token either
+recovers the committed durable result or receives `approval_required`; in the
+latter case the same command ID is reapproved and resent. The cashier's
+register bearer session is never replaced by approver authentication. See
+[Supervisor / Manager Approval](../security/scoped-manager-approval.md).
 
 `Next Sale` is a client-session safety operation, not a Racket lifecycle rule.
 It is available only from an authoritative completed or voided snapshot. One
@@ -570,8 +583,9 @@ tender, card/external payment behavior, receipt printing, receipt numbering or
 date/recent-sale search, drawer hardware, cash drops, paid-outs, refunds, or
 general accounting reports. Fixed endpoint/resource authorization and command
 actor attribution are implemented in Racket; Flutter only consumes the
-server-computed permission list. Manager approval, credential reset, the
-general security audit ledger, and variance approval remain deferred.
+server-computed permission list. Scoped whole-sale void approval is implemented;
+approval for other actions, credential reset, the general security audit
+ledger, and variance approval remain deferred.
 Current recovery payloads may contain an opaque barcode, integer cash amount,
 or nonnegative removal line index; void and lifecycle commands have empty
 payloads. The recovery record is never logged.

@@ -288,6 +288,9 @@ Cashier selection and shift attribution remain distinct from authentication;
 the authenticated operator now supplies shift identity, while Racket enforces
 the fixed role and resource-ownership policy documented in
 [Authorization and Ownership](docs/security/authorization-and-ownership.md).
+Fresh whole-sale voids now require a different supervisor/manager's local PIN
+approval, scoped to the exact command without replacing the cashier's register
+session. See [Supervisor / Manager Approval](docs/security/scoped-manager-approval.md).
 
 ### Terminal 1 — POS Core
 

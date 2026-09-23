@@ -17,6 +17,11 @@
 (define operator-id-sentinel "OPERATOR_ID_MUST_NOT_BE_EXPORTED")
 (define operator-name-sentinel "OPERATOR_NAME_MUST_NOT_BE_EXPORTED")
 (define command-actor-sentinel "COMMAND_ACTOR_MUST_NOT_BE_EXPORTED")
+(define approval-id-sentinel "APPROVAL_ID_MUST_NOT_BE_EXPORTED")
+(define approver-id-sentinel "APPROVER_ID_MUST_NOT_BE_EXPORTED")
+(define approval-token-sentinel
+  "gpos_a1_APPROVAL_TOKEN_MUST_NOT_BE_EXPORTED")
+(define approval-digest-sentinel "APPROVAL_DIGEST_1234567890123456")
 (define pin-sentinel "80421637")
 (define credential-sentinel
   "$argon2id$v=19$m=19456,t=2,p=1$CREDENTIAL_HASH_MUST_NOT_BE_EXPORTED$hash")
@@ -27,6 +32,10 @@
         operator-id-sentinel
         operator-name-sentinel
         command-actor-sentinel
+        approval-id-sentinel
+        approver-id-sentinel
+        approval-token-sentinel
+        approval-digest-sentinel
         pin-sentinel
         credential-sentinel
         bearer-token-sentinel))
@@ -87,7 +96,43 @@ SQL
       (db:query-exec
        connection
        "INSERT INTO transaction_command_actor_attributions (command_id, operator_id) VALUES ('support-actor-command', ?)"
-       command-actor-sentinel))
+       command-actor-sentinel)
+      (db:query-exec
+       connection
+       #<<SQL
+INSERT INTO transaction_void_approval_grants
+  (approval_id, token_digest, issuer_instance_id, requester_operator_id,
+   approver_operator_id, approver_credential_revision, command_id,
+   transaction_id, command_schema_version, expected_version,
+   granted_at_monotonic_ms, expires_at_monotonic_ms, expires_at_epoch_ms)
+VALUES (?, ?, 'support-instance', 'support-requester', ?, 1,
+        'support-pending-void', ?, 1, 1, 1000, 91000, 91000)
+SQL
+       approval-id-sentinel
+       (string->bytes/utf-8 approval-digest-sentinel)
+       approver-id-sentinel privacy-sentinel)
+      (db:query-exec
+       connection
+       #<<SQL
+INSERT INTO transaction_command_receipts
+  (command_id, transaction_id, command_schema_version, command_type,
+   expected_version, command_json, outcome_kind, outcome_code,
+   outcome_stream_version)
+VALUES ('support-void-command', ?, 1, 'void_transaction', 1,
+        ?, 'domain_rejected', 'invalid_transaction_state', 1)
+SQL
+       privacy-sentinel
+       (format
+        "{\"schema_version\":1,\"command_id\":\"support-void-command\",\"transaction_id\":\"~a\",\"expected_version\":1,\"command_type\":\"void_transaction\",\"payload\":{}}"
+        privacy-sentinel))
+      (db:query-exec
+       connection
+       "INSERT INTO transaction_command_actor_attributions VALUES ('support-void-command', ?)"
+       command-actor-sentinel)
+      (db:query-exec
+       connection
+       "INSERT INTO transaction_command_approver_attributions VALUES ('support-void-command', ?, ?, 1, 1000)"
+       approval-id-sentinel approver-id-sentinel))
     (lambda () (db:disconnect connection))))
 
 (define (fake-platform-provider)
@@ -116,6 +161,7 @@ SQL
           'ExecMainStatus 0
           'NRestarts 0
           'Environment bearer-token-sentinel
+          'ApprovalToken approval-token-sentinel
           'ExecStart privacy-sentinel))
 
 (define (fake-api-provider)
@@ -128,7 +174,7 @@ SQL
                   'ok #t
                   'service "grocery-pos-core"
                   'status "ready"
-                  'database_schema_version 9
+                  'database_schema_version 10
                   'exception privacy-sentinel)))
 
 (define (fake-storage-provider _state-path)
@@ -205,7 +251,7 @@ SQL
          (call-with-input-file
           (build-path extraction-path "database.json") read-json))
        (check-equal? (hash-ref database 'migration_status) "current")
-       (check-equal? (hash-ref database 'current_supported_migration_version) 9)
+       (check-equal? (hash-ref database 'current_supported_migration_version) 10)
        (check-false (hash-has-key? database 'path))
        (check-false (hash-has-key? database 'diagnostic))
 

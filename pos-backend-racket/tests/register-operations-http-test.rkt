@@ -8,16 +8,21 @@
          "../pos/api/server.rkt"
          "../pos/application/register-operations-service.rkt"
          "../pos/application/transaction-service.rkt"
+         "../pos/application/transaction-command.rkt"
          "../pos/domain/fake-catalog.rkt"
+         "../pos/domain/transaction-void-approval.rkt"
          "../pos/persistence/operational-configuration-snapshot-codec.rkt"
          "../pos/persistence/pos-database-migrations.rkt"
          "../pos/persistence/sqlite-register-operations.rkt"
+         "../pos/persistence/transaction-void-approval-store.rkt"
+         "../pos/security/transaction-void-approval.rkt"
          "../pos/support/readiness.rkt"
          "support/authentication.rkt")
 
 (define config-json
   "{\"schema_version\":1,\"register\":{\"register_id\":\"register-one\",\"display_name\":\"Register One\"},\"cashiers\":[{\"cashier_id\":\"__http_test_operator__\",\"display_name\":\"HTTP Test Operator\",\"active\":true},{\"cashier_id\":\"inactive\",\"display_name\":\"Inactive\",\"active\":false}]}")
 (define test-access-token (box #f))
+(define test-approval-token (box #f))
 
 (define (request* method path [body #f])
   (request method
@@ -26,6 +31,10 @@
             (if body (list (header #"Content-Type" #"application/json")) '())
             (if (unbox test-access-token)
                 (list (test-authorization-header (unbox test-access-token)))
+                '())
+            (if (unbox test-approval-token)
+                (list (header #"X-Grocery-POS-Approval"
+                              (string->bytes/utf-8 (unbox test-approval-token))))
                 '()))
            (delay '())
            body
@@ -63,7 +72,12 @@
      (make-transaction-service
      connection
       #:catalog-lookup fake-catalog-lookup
-      #:current-epoch-ms (lambda () 1500))
+      #:current-epoch-ms (lambda () 1500)
+      #:approval-consumer
+      (lambda (approval-connection capability requester command)
+        (consume-transaction-void-approval!/in-transaction!
+         approval-connection capability "http-test-instance" requester
+         command 2000)))
      register-service
      #:authentication-service auth-service
      #:readiness-probe
@@ -233,6 +247,38 @@
       connection
       "SELECT active_transaction_id FROM register_shifts WHERE shift_id = 'shift-one'")
      "txn-under-shift")
+    ;; This older slot-release fixture now uses an explicit scoped approval.
+    (db:query-exec
+     connection
+     "INSERT INTO operators VALUES ('http-supervisor', 'HTTP Supervisor', 1)")
+    (db:query-exec
+     connection
+     "INSERT INTO operator_roles VALUES ('http-supervisor', 'supervisor')")
+    (db:query-exec
+     connection
+     "INSERT INTO operator_pin_credentials VALUES ('http-supervisor', '$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA', 1)")
+    (define approval-token
+      (string-append "gpos_a1_" (make-string 64 #\c)))
+    (define approval-capability
+      (transaction-void-approval-token->capability approval-token))
+    (define void-command
+      (void-transaction-command "cmd-under-shift-void" "txn-under-shift" 1))
+    (db:call-with-transaction
+     connection
+     (lambda ()
+       (replace-transaction-void-approval-grant!/in-transaction!
+        connection
+        (transaction-void-approval-grant
+         "http-test-approval"
+         (transaction-void-approval-capability-token-digest approval-capability)
+         "http-test-instance"
+         test-operator-id
+         "http-supervisor"
+         1 "cmd-under-shift-void" "txn-under-shift" 1 1
+         1000 91000 91000)
+        "http-test-instance" 1000))
+     #:option 'immediate)
+    (set-box! test-approval-token approval-token)
     (define void-response
       (post
        app
@@ -244,6 +290,7 @@
         'expected_version 1
         'command_type "void_transaction"
         'payload (hasheq))))
+    (set-box! test-approval-token #f)
     (check-equal? (response-code void-response) 200)
     (check-true
      (db:sql-null?

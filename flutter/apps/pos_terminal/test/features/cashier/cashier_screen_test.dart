@@ -12,6 +12,7 @@ import 'package:pos_terminal/core/pos_core/models/pos_core_readiness.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_command.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_snapshot.dart';
 import 'package:pos_terminal/core/pos_core/pos_core_client.dart';
+import 'package:pos_terminal/core/pos_core/transaction_void_approval_client.dart';
 import 'package:pos_terminal/features/cashier/cashier_id_generator.dart';
 import 'package:pos_terminal/features/cashier/cashier_screen.dart';
 import 'package:pos_terminal/features/cashier/cashier_session_controller.dart';
@@ -28,7 +29,42 @@ typedef ReceiptHandler =
 
 final class FakeCashierClient
     with UnimplementedRegisterOperationsClient
-    implements PosCoreClient {
+    implements PosCoreClient, TransactionVoidApprovalClient {
+  final List<VoidTransactionCommand> approvalRequests = [];
+  final List<String> approvalSubmissionTokens = [];
+
+  @override
+  Future<TransactionVoidApproval> requestTransactionVoidApproval(
+    VoidTransactionCommand command,
+    String approverOperatorId,
+    String approverPin,
+  ) async {
+    approvalRequests.add(command);
+    if (approverOperatorId != 'Morgan' || approverPin != '80421637') {
+      throw const PosCoreServerFailure(
+        code: 'approval_not_granted',
+        message: 'Approval was not granted.',
+        statusCode: 403,
+      );
+    }
+    return const TransactionVoidApproval(
+      approvalToken:
+          'gpos_a1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      expiresAtEpochMs: 123456,
+      approverOperatorId: 'Morgan',
+      approverDisplayName: 'Morgan',
+    );
+  }
+
+  @override
+  Future<PosCommandResult> executeApprovedVoid(
+    VoidTransactionCommand command,
+    String approvalToken,
+  ) {
+    approvalSubmissionTokens.add(approvalToken);
+    return executeCommand(command);
+  }
+
   final Queue<CommandHandler> commandHandlers = Queue();
   final Queue<TransactionHandler> transactionHandlers = Queue();
   final Queue<ReceiptHandler> receiptHandlers = Queue();
@@ -1322,7 +1358,10 @@ void main() {
     tester,
   ) async {
     final store = MemoryCashierSessionStore(
-      persisted: PersistedCashierSession(operatorId: 'operator-test', activeTransactionId: 'txn-1'),
+      persisted: PersistedCashierSession(
+        operatorId: 'operator-test',
+        activeTransactionId: 'txn-1',
+      ),
     );
     final testFixture = fixture(
       commandIds: const [],
@@ -1835,7 +1874,10 @@ void main() {
     expectPrimaryAction('Retry Command');
 
     final refreshStore = MemoryCashierSessionStore(
-      persisted: PersistedCashierSession(operatorId: 'operator-test', activeTransactionId: 'txn-1'),
+      persisted: PersistedCashierSession(
+        operatorId: 'operator-test',
+        activeTransactionId: 'txn-1',
+      ),
     );
     final refreshFixture = fixture(
       commandIds: const [],
@@ -2233,7 +2275,12 @@ void main() {
     tester,
   ) async {
     final testFixture = fixture(
-      commandIds: const ['cmd-start', 'cmd-void', 'cmd-next'],
+      commandIds: const [
+        'cmd-start',
+        'cmd-canceled-void',
+        'cmd-void',
+        'cmd-next',
+      ],
       transactionIds: const ['txn-1', 'txn-2'],
     );
     const line = TransactionLineItem(
@@ -2255,10 +2302,14 @@ void main() {
 
     await tester.tap(find.text('Void Sale'));
     await tester.pumpAndSettle();
-    expect(find.text('Void this sale?'), findsOneWidget);
+    expect(find.text('Supervisor / Manager Approval Required'), findsOneWidget);
+    expect(find.text('Approve Entire Sale Void'), findsOneWidget);
+    expect(find.text('Items: 1'), findsOneWidget);
+    expect(find.text('Total: \$2.19'), findsOneWidget);
     await tester.tap(find.text('Keep Sale'));
     await tester.pumpAndSettle();
     expect(testFixture.client.commands, hasLength(1));
+    expect(testFixture.client.approvalRequests, isEmpty);
 
     final commandCompleter = Completer<PosCommandResult>();
     final readCompleter = Completer<TransactionSnapshot>();
@@ -2266,12 +2317,26 @@ void main() {
     testFixture.client.transactionHandlers.add((_) => readCompleter.future);
     await tester.tap(find.text('Void Sale'));
     await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(FilledButton, 'Void Sale'));
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Approver operator ID'),
+      'Morgan',
+    );
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Approver PIN'),
+      '80421637',
+    );
+    await tester.tap(find.text('Approve Void'));
     await tester.pump();
     expect(find.text('Sale Voided'), findsNothing);
     expect(find.text('Voiding sale...'), findsOneWidget);
 
     final command = testFixture.client.commands.last as VoidTransactionCommand;
+    expect(testFixture.client.approvalRequests, hasLength(1));
+    expect(
+      testFixture.client.approvalRequests.single.commandId,
+      command.commandId,
+    );
+    expect(testFixture.client.approvalSubmissionTokens, hasLength(1));
     expect(command.expectedVersion, 2);
     commandCompleter.complete(resultFor(command, version: 3));
     await tester.pump();
@@ -2314,6 +2379,45 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('No items scanned yet.'), findsOneWidget);
     expect(tester.widget<TextField>(barcodeField).focusNode!.hasFocus, isTrue);
+  });
+
+  testWidgets('failed approval clears PIN without posting or saving void', (
+    tester,
+  ) async {
+    final store = MemoryCashierSessionStore();
+    final testFixture = fixture(
+      commandIds: const ['cmd-start', 'cmd-unused-void'],
+      sessionStore: store,
+    );
+    await establishTransaction(testFixture, snapshot(version: 1));
+    await pumpCashier(tester, testFixture.controller);
+
+    await tester.tap(find.text('Void Sale'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Approver operator ID'),
+      'Morgan',
+    );
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Approver PIN'),
+      '00000000',
+    );
+    await tester.tap(find.text('Approve Void'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Approval was not granted.'), findsOneWidget);
+    expect(
+      tester
+          .widget<TextField>(find.widgetWithText(TextField, 'Approver PIN'))
+          .controller!
+          .text,
+      isEmpty,
+    );
+    expect(testFixture.client.commands, hasLength(1));
+    expect(testFixture.controller.state.pendingCommand, isNull);
+    expect((await store.load())!.pendingCommand, isNull);
+    await tester.tap(find.text('Keep Sale'));
+    await tester.pumpAndSettle();
   });
 
   testWidgets(
@@ -2413,7 +2517,15 @@ void main() {
 
     await tester.tap(find.text('Void Sale'));
     await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(FilledButton, 'Void Sale'));
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Approver operator ID'),
+      'Morgan',
+    );
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Approver PIN'),
+      '80421637',
+    );
+    await tester.tap(find.text('Approve Void'));
     await tester.pumpAndSettle();
 
     expect(find.text('Refresh Transaction'), findsOneWidget);

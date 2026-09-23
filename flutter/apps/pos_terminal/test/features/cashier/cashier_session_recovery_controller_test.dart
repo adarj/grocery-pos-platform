@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pos_terminal/core/pos_core/models/command_result.dart';
@@ -11,6 +12,7 @@ import 'package:pos_terminal/core/pos_core/models/register_operations.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_command.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_snapshot.dart';
 import 'package:pos_terminal/core/pos_core/pos_core_client.dart';
+import 'package:pos_terminal/core/pos_core/transaction_void_approval_client.dart';
 import 'package:pos_terminal/features/cashier/cashier_id_generator.dart';
 import 'package:pos_terminal/features/cashier/cashier_local_recovery_failure.dart';
 import 'package:pos_terminal/features/cashier/cashier_session_controller.dart';
@@ -25,7 +27,25 @@ typedef TransactionHandler =
 
 final class RecordingClient
     with UnimplementedRegisterOperationsClient
-    implements PosCoreClient {
+    implements PosCoreClient, TransactionVoidApprovalClient {
+  @override
+  Future<TransactionVoidApproval> requestTransactionVoidApproval(
+    VoidTransactionCommand command,
+    String approverOperatorId,
+    String approverPin,
+  ) async => const TransactionVoidApproval(
+    approvalToken:
+        'gpos_a1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    expiresAtEpochMs: 123456,
+    approverOperatorId: 'Morgan',
+    approverDisplayName: 'Morgan',
+  );
+
+  @override
+  Future<PosCommandResult> executeApprovedVoid(
+    VoidTransactionCommand command,
+    String approvalToken,
+  ) => executeCommand(command);
   RecordingClient(this.log);
 
   final List<String> log;
@@ -269,7 +289,10 @@ void main() {
       kind: PosCommandOutcomeKind.domainRejected,
     );
     testFixture.client.enqueueSnapshot(snapshot(version: 2));
-    await testFixture.controller.voidTransaction();
+    await testFixture.controller.submitApprovedVoid(
+      testFixture.controller.prepareVoidTransaction(),
+      'test-approval-token',
+    );
 
     for (final commandType in <String>[
       'start_transaction',
@@ -323,7 +346,10 @@ void main() {
         if (action == 'remove') {
           await testFixture.controller.removeLineItem(0);
         } else {
-          await testFixture.controller.voidTransaction();
+          await testFixture.controller.submitApprovedVoid(
+            testFixture.controller.prepareVoidTransaction(),
+            'test-approval-token',
+          );
         }
 
         expect(testFixture.client.commands, hasLength(1), reason: action);
@@ -331,6 +357,73 @@ void main() {
         expect(testFixture.controller.state.pendingCommand, isNull);
         expect(testFixture.controller.state.canExecuteNewMutation, isTrue);
       }
+    },
+  );
+
+  test(
+    'approval_required keeps exact void command but never saves capability',
+    () async {
+      final testFixture = fixture(commandIds: const ['cmd-start', 'cmd-void']);
+      await startOpen(testFixture, version: 1);
+      final command = testFixture.controller.prepareVoidTransaction();
+      const token =
+          'gpos_a1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+      testFixture.client.enqueueCommandFailure(
+        const PosCoreServerFailure(
+          code: 'approval_required',
+          message: 'Approval is required.',
+          statusCode: 403,
+          retrySameCommandId: true,
+        ),
+      );
+      await testFixture.controller.submitApprovedVoid(command, token);
+      expect(testFixture.controller.state.pendingCommand, same(command));
+      expect(testFixture.store.persisted!.pendingCommand, same(command));
+      expect(
+        jsonEncode(testFixture.store.persisted!.toJson()).contains(token),
+        isFalse,
+      );
+      expect(testFixture.ids.commandCalls, 2);
+
+      final reconstructed = CashierSessionController(
+        client: testFixture.client,
+        idGenerator: testFixture.ids,
+        sessionStore: testFixture.store,
+        currentOperatorId: () => 'operator-test',
+      );
+      await reconstructed.restoreLocalSession();
+      expect(reconstructed.state.pendingCommand!.commandId, 'cmd-void');
+      testFixture.client.enqueueCommandFailure(
+        const PosCoreServerFailure(
+          code: 'approval_required',
+          message: 'Approval is required.',
+          statusCode: 403,
+          retrySameCommandId: true,
+        ),
+      );
+      await reconstructed.retryPendingCommand();
+      final pending =
+          reconstructed.state.pendingCommand! as VoidTransactionCommand;
+      expect(pending.commandId, command.commandId);
+      await reconstructed.requestVoidApproval(pending, 'Morgan', '80421637');
+      testFixture.client.enqueueResult();
+      testFixture.client.enqueueSnapshot(
+        snapshot(version: 2, status: TransactionStatus.voided),
+      );
+      await reconstructed.submitApprovedVoid(pending, token);
+      expect(reconstructed.state.pendingCommand, isNull);
+      expect(reconstructed.state.snapshot!.status, TransactionStatus.voided);
+      expect(testFixture.ids.commandCalls, 2);
+      final voidPosts = testFixture.client.commands
+          .whereType<VoidTransactionCommand>()
+          .toList();
+      expect(voidPosts, hasLength(3));
+      expect(voidPosts.map((post) => post.commandId).toSet(), {'cmd-void'});
+      expect(
+        jsonEncode(testFixture.store.persisted!.toJson()).contains(token),
+        isFalse,
+      );
+      reconstructed.dispose();
     },
   );
 
@@ -348,7 +441,10 @@ void main() {
       if (action == 'remove') {
         await testFixture.controller.removeLineItem(0);
       } else {
-        await testFixture.controller.voidTransaction();
+        await testFixture.controller.submitApprovedVoid(
+          testFixture.controller.prepareVoidTransaction(),
+          'test-approval-token',
+        );
       }
 
       expect(testFixture.controller.state.pendingCommand, isNull);
@@ -1033,7 +1129,10 @@ void main() {
 
       expect(testFixture.controller.legacyRecoveryUnbound, isTrue);
       expect(testFixture.store.persisted!.operatorId, isNull);
-      expect(testFixture.store.persisted!.pendingCommand!.toJson(), pending.toJson());
+      expect(
+        testFixture.store.persisted!.pendingCommand!.toJson(),
+        pending.toJson(),
+      );
       expect(testFixture.client.commands, isEmpty);
     },
   );

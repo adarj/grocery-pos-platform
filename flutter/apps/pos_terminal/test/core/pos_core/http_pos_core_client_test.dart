@@ -865,4 +865,127 @@ void main() {
       );
     },
   );
+
+  test('void approval uses a separate one-shot header and no body token', () async {
+    const bearer =
+        'gpos_s1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const approvalToken =
+        'gpos_a1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    final memory = MemoryAuthenticationSession();
+    memory.establish(
+      const AuthenticationLogin(
+        accessToken: bearer,
+        session: AuthenticatedOperatorSession(
+          operatorId: 'Alice',
+          displayName: 'Alice',
+          role: 'cashier',
+          idleTimeoutSeconds: 300,
+          absoluteExpiresAtEpochMs: 999999,
+        ),
+      ),
+    );
+    final command = VoidTransactionCommand(
+      commandId: 'cmd-void',
+      transactionId: 'txn-1',
+      expectedVersion: 2,
+    );
+    var calls = 0;
+    final client = HttpPosCoreClient(
+      baseUri: baseUri,
+      authenticationSession: memory,
+      httpClient: MockClient((request) async {
+        calls++;
+        expect(request.headers['authorization'], 'Bearer $bearer');
+        if (calls == 1) {
+          expect(request.url.path, '/approvals/transaction-void');
+          expect(request.headers['x-grocery-pos-approval'], isNull);
+          expect(jsonDecode(request.body), {
+            'command': command.toJson(),
+            'approver_operator_id': 'Morgan',
+            'approver_pin': '80421637',
+          });
+          return http.Response(
+            jsonBody({
+              'ok': true,
+              'approval': {
+                'approval_token': approvalToken,
+                'expires_at_epoch_ms': 123456,
+                'approver_operator_id': 'Morgan',
+                'approver_display_name': 'Morgan',
+              },
+            }),
+            200,
+          );
+        }
+        expect(request.url.path, '/transaction-commands');
+        expect(request.headers['x-grocery-pos-approval'], approvalToken);
+        expect(jsonDecode(request.body), command.toJson());
+        expect(request.body.contains(approvalToken), isFalse);
+        return http.Response(
+          jsonBody({
+            'ok': true,
+            'command_result': {
+              'command_id': 'cmd-void',
+              'transaction_id': 'txn-1',
+              'outcome_kind': 'accepted',
+              'outcome_code': 'accepted',
+              'outcome_stream_version': 3,
+            },
+          }),
+          200,
+        );
+      }),
+    );
+    final approval = await client.requestTransactionVoidApproval(
+      command,
+      'Morgan',
+      '80421637',
+    );
+    expect(approval.approvalToken, approvalToken);
+    expect(approval.toString(), isNot(contains(approvalToken)));
+    await client.executeApprovedVoid(command, approval.approvalToken);
+    expect(calls, 2);
+    expect(memory.accessToken, bearer);
+  });
+
+  test(
+    'approval_required preserves exact command retry without token persistence',
+    () async {
+      final command = VoidTransactionCommand(
+        commandId: 'cmd-pending-void',
+        transactionId: 'txn-1',
+        expectedVersion: 1,
+      );
+      final client = HttpPosCoreClient(
+        baseUri: baseUri,
+        httpClient: MockClient((request) async {
+          expect(request.headers['x-grocery-pos-approval'], isNull);
+          expect(jsonDecode(request.body), command.toJson());
+          return http.Response(
+            jsonBody({
+              'ok': false,
+              'error': {
+                'code': 'approval_required',
+                'message': 'Approval is required.',
+                'retry_same_command_id': true,
+              },
+            }),
+            403,
+          );
+        }),
+      );
+      await expectLater(
+        client.executeCommand(command),
+        throwsA(
+          isA<PosCoreServerFailure>()
+              .having((failure) => failure.code, 'code', 'approval_required')
+              .having(
+                (failure) => failure.retrySameCommandId,
+                'retrySameCommandId',
+                true,
+              ),
+        ),
+      );
+    },
+  );
 }

@@ -32,7 +32,7 @@ fi
   fail "unexpected RPM package name"
 [[ "$(rpm -qp --queryformat '%{VERSION}' "$rpm_path")" == "0.0.0" ]] ||
   fail "unexpected internal RPM version"
-[[ "$(rpm -qp --queryformat '%{RELEASE}' "$rpm_path")" == "0.6.dev" ]] ||
+[[ "$(rpm -qp --queryformat '%{RELEASE}' "$rpm_path")" == "0.7.dev" ]] ||
   fail "unexpected internal RPM release"
 [[ "$(rpm -qp --queryformat '%{ARCH}' "$rpm_path")" == "noarch" ]] ||
   fail "RPM architecture is not noarch"
@@ -81,7 +81,9 @@ required_files=(
   "$payload_root/pos/runtime.rkt"
   "$payload_root/pos/api/server.rkt"
   "$payload_root/pos/api/auth-http.rkt"
+  "$payload_root/pos/api/approval-http.rkt"
   "$payload_root/pos/application/authentication-service.rkt"
+  "$payload_root/pos/application/transaction-void-approval-service.rkt"
   "$payload_root/pos/persistence/sqlite-connection.rkt"
   "$payload_root/pos/persistence/sqlite-maintenance.rkt"
   "$payload_root/pos/persistence/atomic-file.rkt"
@@ -93,8 +95,11 @@ required_files=(
   "$payload_root/pos/security/operator-pin.rkt"
   "$payload_root/pos/security/operator-session.rkt"
   "$payload_root/pos/security/authorization-policy.rkt"
+  "$payload_root/pos/security/transaction-void-approval.rkt"
   "$payload_root/pos/domain/transaction-command-actor-attribution.rkt"
+  "$payload_root/pos/domain/transaction-void-approval.rkt"
   "$payload_root/pos/persistence/transaction-command-actor-attribution-store.rkt"
+  "$payload_root/pos/persistence/transaction-void-approval-store.rkt"
   "$payload_root/pos/application/operator-service.rkt"
   "$payload_root/pos/support/appliance-recovery.rkt"
   "$payload_root/pos/support/support-bundle.rkt"

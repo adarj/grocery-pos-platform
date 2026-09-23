@@ -66,9 +66,10 @@ Authentication responses include the server-computed effective permission
 list in deterministic order. Flutter may use it only to shape presentation.
 Every request is independently authorized in Racket.
 
-The existing whole-sale void remains `transaction.operate.own` in Checkpoint
-3. Scoped manager approval and approver attribution are deferred to
-Checkpoint 4.
+The existing whole-sale void remained `transaction.operate.own` in Checkpoint
+3. Checkpoint 4 changed fresh void policy through
+[ADR-0030](0030-require-separate-scoped-approval-for-whole-sale-voids.md);
+this historical CP3 decision is not approval evidence for old voids.
 
 ## Consequences
 

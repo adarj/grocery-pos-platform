@@ -120,6 +120,64 @@ Future<RealPosCoreFixture> _startFixture({bool openShift = true}) async {
   return fixture;
 }
 
+const _approvalSupervisorId = 'approval-supervisor';
+
+Future<RealPosCoreFixture> _startFixtureWithApprover() async {
+  final fixture = await RealPosCoreFixture.create();
+  addTearDown(fixture.dispose);
+  await fixture.prepareReferenceData();
+  final configurationFile = File(
+    '${fixture.temporaryDirectory.path}${Platform.pathSeparator}'
+    'approval-register-configuration-v1.json',
+  );
+  await configurationFile.writeAsString(
+    jsonEncode({
+      'schema_version': 1,
+      'register': {
+        'register_id': _developmentRegisterId,
+        'display_name': _developmentRegisterName,
+      },
+      'cashiers': [
+        {
+          'cashier_id': _developmentCashierId,
+          'display_name': _developmentCashierName,
+          'active': true,
+        },
+        {
+          'cashier_id': _approvalSupervisorId,
+          'display_name': 'Approval Supervisor',
+          'active': true,
+        },
+      ],
+    }),
+    flush: true,
+  );
+  await fixture.activateOperationalConfigurationSnapshot(
+    configurationFile.path,
+  );
+  await fixture.enrollIntegrationOperator(
+    operatorId: _approvalSupervisorId,
+    pin: _authorizationTestPin,
+    role: 'supervisor',
+  );
+  await fixture.start();
+  await _openDevelopmentShift(fixture);
+  return fixture;
+}
+
+Future<VoidTransactionCommand> _approveAndVoid(
+  _IntegrationCashier cashier,
+) async {
+  final command = cashier.controller.prepareVoidTransaction();
+  final approval = await cashier.controller.requestVoidApproval(
+    command,
+    _approvalSupervisorId,
+    _authorizationTestPin,
+  );
+  await cashier.controller.submitApprovedVoid(command, approval.approvalToken);
+  return command;
+}
+
 Future<RegisterShift> _openDevelopmentShift(RealPosCoreFixture fixture) async {
   final client = await _authenticatedClient(fixture);
   try {
@@ -269,7 +327,7 @@ void main() {
 
       final initiallyReady = await client.fetchReadiness();
       expect(initiallyReady.ready, isTrue);
-      expect(initiallyReady.databaseSchemaVersion, 9);
+      expect(initiallyReady.databaseSchemaVersion, 10);
 
       await File(
         fixture.databasePath,
@@ -587,6 +645,231 @@ void main() {
       );
       expect(managerClose.shift.cashierId, 'cashier-bob');
       expect(managerClose.cashSummary.view, ShiftCashSummaryView.full);
+
+      // CP4: approval never switches the register operator. An exact void
+      // must be independently approved, while the durable retry needs no
+      // second approval after the result is committed.
+      await _authenticateAs(
+        aliceAfterRestart,
+        'cashier-alice',
+        _authorizationTestPin,
+      );
+      final approvalShift = await aliceAfterRestart.openShift(10000);
+      final approvalStart = StartTransactionCommand(
+        commandId: 'cmd_cp4_start',
+        transactionId: 'txn_cp4_void',
+        expectedVersion: 0,
+      );
+      expect(
+        (await aliceAfterRestart.executeCommand(approvalStart)).accepted,
+        isTrue,
+      );
+      final approvalVoid = VoidTransactionCommand(
+        commandId: 'cmd_cp4_void',
+        transactionId: 'txn_cp4_void',
+        expectedVersion: 1,
+      );
+      await expectLater(
+        aliceAfterRestart.executeCommand(approvalVoid),
+        throwsA(
+          isA<PosCoreServerFailure>()
+              .having((failure) => failure.code, 'code', 'approval_required')
+              .having(
+                (failure) => failure.retrySameCommandId,
+                'retrySameCommandId',
+                true,
+              ),
+        ),
+      );
+      await expectLater(
+        aliceAfterRestart.requestTransactionVoidApproval(
+          approvalVoid,
+          'cashier-alice',
+          _authorizationTestPin,
+        ),
+        throwsA(
+          isA<PosCoreServerFailure>().having(
+            (failure) => failure.code,
+            'code',
+            'approval_not_granted',
+          ),
+        ),
+      );
+      await expectLater(
+        aliceAfterRestart.requestTransactionVoidApproval(
+          approvalVoid,
+          'cashier-bob',
+          _authorizationTestPin,
+        ),
+        throwsA(
+          isA<PosCoreServerFailure>().having(
+            (failure) => failure.code,
+            'code',
+            'approval_not_granted',
+          ),
+        ),
+      );
+      final samApproval = await aliceAfterRestart
+          .requestTransactionVoidApproval(
+            approvalVoid,
+            'supervisor-sam',
+            _authorizationTestPin,
+          );
+      expect(samApproval.approverOperatorId, 'supervisor-sam');
+      expect(
+        (await aliceAfterRestart.fetchAuthenticatedSession()).operatorId,
+        'cashier-alice',
+      );
+
+      await expectLater(
+        aliceAfterRestart.executeApprovedVoid(
+          VoidTransactionCommand(
+            commandId: 'cmd_cp4_wrong',
+            transactionId: 'txn_cp4_void',
+            expectedVersion: 1,
+          ),
+          samApproval.approvalToken,
+        ),
+        throwsA(
+          isA<PosCoreServerFailure>().having(
+            (failure) => failure.code,
+            'code',
+            'approval_required',
+          ),
+        ),
+      );
+      expect(
+        (await aliceAfterRestart.executeApprovedVoid(
+          approvalVoid,
+          samApproval.approvalToken,
+        )).accepted,
+        isTrue,
+      );
+      expect(
+        (await aliceAfterRestart.fetchAuthenticatedSession()).operatorId,
+        'cashier-alice',
+      );
+      await _authenticateAs(
+        aliceAfterRestart,
+        'cashier-bob',
+        _authorizationTestPin,
+      );
+      await expectLater(
+        aliceAfterRestart.executeCommand(approvalVoid),
+        throwsA(
+          isA<PosCoreServerFailure>().having(
+            (failure) => failure.code,
+            'code',
+            'authorization_denied',
+          ),
+        ),
+      );
+      await _authenticateAs(
+        aliceAfterRestart,
+        'cashier-alice',
+        _authorizationTestPin,
+      );
+      expect(
+        (await aliceAfterRestart.executeCommand(approvalVoid)).accepted,
+        isTrue,
+      );
+      final managerStart = StartTransactionCommand(
+        commandId: 'cmd_cp4_manager_start',
+        transactionId: 'txn_cp4_manager_void',
+        expectedVersion: 0,
+      );
+      expect(
+        (await aliceAfterRestart.executeCommand(managerStart)).accepted,
+        isTrue,
+      );
+      final managerVoid = VoidTransactionCommand(
+        commandId: 'cmd_cp4_manager_void',
+        transactionId: 'txn_cp4_manager_void',
+        expectedVersion: 1,
+      );
+      final managerApproval = await aliceAfterRestart
+          .requestTransactionVoidApproval(
+            managerVoid,
+            _developmentCashierId,
+            _developmentOperatorPin,
+          );
+      expect(managerApproval.approverOperatorId, _developmentCashierId);
+      expect(
+        (await aliceAfterRestart.executeApprovedVoid(
+          managerVoid,
+          managerApproval.approvalToken,
+        )).accepted,
+        isTrue,
+      );
+      expect(
+        (await aliceAfterRestart.fetchAuthenticatedSession()).operatorId,
+        'cashier-alice',
+      );
+      // A manager operating their own configured cashier shift is still the
+      // requester, not their own independent approver.
+      await aliceAfterRestart.closeShift(approvalShift.shift.shiftId, 10000);
+      await _authenticateAs(
+        aliceAfterRestart,
+        _developmentCashierId,
+        _developmentOperatorPin,
+      );
+      final managerOwnedShift = await aliceAfterRestart.openShift(10000);
+      expect(managerOwnedShift.shift.cashierId, _developmentCashierId);
+      final managerOwnedStart = StartTransactionCommand(
+        commandId: 'cmd_cp4_manager_request_start',
+        transactionId: 'txn_cp4_manager_request',
+        expectedVersion: 0,
+      );
+      expect(
+        (await aliceAfterRestart.executeCommand(managerOwnedStart)).accepted,
+        isTrue,
+      );
+      final managerOwnedVoid = VoidTransactionCommand(
+        commandId: 'cmd_cp4_manager_request_void',
+        transactionId: managerOwnedStart.transactionId,
+        expectedVersion: 1,
+      );
+      await expectLater(
+        aliceAfterRestart.executeCommand(managerOwnedVoid),
+        throwsA(
+          isA<PosCoreServerFailure>().having(
+            (failure) => failure.code,
+            'code',
+            'approval_required',
+          ),
+        ),
+      );
+      await expectLater(
+        aliceAfterRestart.requestTransactionVoidApproval(
+          managerOwnedVoid,
+          _developmentCashierId,
+          _developmentOperatorPin,
+        ),
+        throwsA(
+          isA<PosCoreServerFailure>().having(
+            (failure) => failure.code,
+            'code',
+            'approval_not_granted',
+          ),
+        ),
+      );
+      final independentApproval = await aliceAfterRestart
+          .requestTransactionVoidApproval(
+            managerOwnedVoid,
+            'supervisor-sam',
+            _authorizationTestPin,
+          );
+      expect(
+        (await aliceAfterRestart.executeApprovedVoid(
+          managerOwnedVoid,
+          independentApproval.approvalToken,
+        )).accepted,
+        isTrue,
+      );
+      expect(
+        (await aliceAfterRestart.fetchAuthenticatedSession()).operatorId,
+        _developmentCashierId,
+      );
     },
   );
 
@@ -1015,12 +1298,12 @@ void main() {
   );
 
   test('real void survives restart and can begin a clean next sale', () async {
-    final fixture = await _startFixture();
+    final fixture = await _startFixtureWithApprover();
     final firstCashier = await _createCashier(fixture, 'void_before');
 
     await firstCashier.controller.startTransaction();
     await firstCashier.controller.scanBarcode(_developmentBarcode);
-    await firstCashier.controller.voidTransaction();
+    final approvedVoid = await _approveAndVoid(firstCashier);
     final beforeRestart = _snapshot(firstCashier.controller);
     final voidedTransactionId = beforeRestart.transactionId;
     expect(beforeRestart.status, TransactionStatus.voided);
@@ -1051,6 +1334,11 @@ void main() {
     firstCashier.close();
     await fixture.restart();
     final restoredCashier = await _createCashier(fixture, 'void_after');
+    final durableRetry = await restoredCashier.client.executeCommand(
+      approvedVoid,
+    );
+    expect(durableRetry.outcomeKind, PosCommandOutcomeKind.accepted);
+    expect(durableRetry.outcomeStreamVersion, 3);
     expect(
       restoredCashier.controller.state.activeTransactionId,
       voidedTransactionId,
@@ -1074,9 +1362,61 @@ void main() {
   });
 
   test(
+    'unused approval dies on POS Core restart; same void ID can be reapproved',
+    () async {
+      final fixture = await _startFixtureWithApprover();
+      final cashier = await _createCashier(fixture, 'unused_approval_restart');
+      await cashier.controller.startTransaction();
+      final command = cashier.controller.prepareVoidTransaction();
+      final beforeRestart = await cashier.controller.requestVoidApproval(
+        command,
+        _approvalSupervisorId,
+        _authorizationTestPin,
+      );
+
+      await fixture.restart();
+      final newClient = await _authenticatedClient(fixture);
+      addTearDown(newClient.close);
+      await expectLater(
+        newClient.executeApprovedVoid(command, beforeRestart.approvalToken),
+        throwsA(
+          isA<PosCoreServerFailure>()
+              .having((failure) => failure.code, 'code', 'approval_required')
+              .having(
+                (failure) => failure.retrySameCommandId,
+                'retrySameCommandId',
+                true,
+              ),
+        ),
+      );
+      expect(
+        (await newClient.fetchTransaction(command.transactionId)).status,
+        TransactionStatus.open,
+      );
+      final afterRestart = await newClient.requestTransactionVoidApproval(
+        command,
+        _approvalSupervisorId,
+        _authorizationTestPin,
+      );
+      expect(
+        (await newClient.executeApprovedVoid(
+          command,
+          afterRestart.approvalToken,
+        )).accepted,
+        isTrue,
+      );
+      expect((await newClient.executeCommand(command)).accepted, isTrue);
+      expect(
+        (await newClient.fetchTransaction(command.transactionId)).status,
+        TransactionStatus.voided,
+      );
+    },
+  );
+
+  test(
     'real shift close is blocked by an active sale and succeeds after void',
     () async {
-      final fixture = await _startFixture();
+      final fixture = await _startFixtureWithApprover();
       final cashier = await _createCashier(fixture, 'close_protection');
       final shiftId =
           (await cashier.client.fetchRegisterContext()).activeShift!.shiftId;
@@ -1100,7 +1440,7 @@ void main() {
         ),
       );
 
-      await cashier.controller.voidTransaction();
+      await _approveAndVoid(cashier);
       expect(_snapshot(cashier.controller).status, TransactionStatus.voided);
       expect(
         (await cashier.client.fetchRegisterContext())
@@ -1197,7 +1537,7 @@ void main() {
   test(
     'ten mixed sale cycles reconcile one shift without leaking state',
     () async {
-      final fixture = await _startFixture();
+      final fixture = await _startFixtureWithApprover();
       final cashier = await _createCashier(fixture, 'endurance');
       final transactionIds = <String>{};
       var expectedCompletedSaleCount = 0;
@@ -1213,7 +1553,7 @@ void main() {
 
         if (cycle == 3) {
           await cashier.controller.scanBarcode(_developmentBarcode);
-          await cashier.controller.voidTransaction();
+          await _approveAndVoid(cashier);
           expect(
             _snapshot(cashier.controller).status,
             TransactionStatus.voided,

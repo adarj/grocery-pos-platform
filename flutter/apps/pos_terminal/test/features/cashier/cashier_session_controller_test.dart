@@ -10,6 +10,7 @@ import 'package:pos_terminal/core/pos_core/models/pos_core_readiness.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_command.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_snapshot.dart';
 import 'package:pos_terminal/core/pos_core/pos_core_client.dart';
+import 'package:pos_terminal/core/pos_core/transaction_void_approval_client.dart';
 import 'package:pos_terminal/features/cashier/cashier_id_generator.dart';
 import 'package:pos_terminal/features/cashier/cashier_session_controller.dart';
 import 'package:pos_terminal/features/cashier/cashier_session_state.dart';
@@ -24,7 +25,25 @@ typedef TransactionHandler =
 
 final class FakePosCoreClient
     with UnimplementedRegisterOperationsClient
-    implements PosCoreClient {
+    implements PosCoreClient, TransactionVoidApprovalClient {
+  @override
+  Future<TransactionVoidApproval> requestTransactionVoidApproval(
+    VoidTransactionCommand command,
+    String approverOperatorId,
+    String approverPin,
+  ) async => const TransactionVoidApproval(
+    approvalToken:
+        'gpos_a1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    expiresAtEpochMs: 123456,
+    approverOperatorId: 'Morgan',
+    approverDisplayName: 'Morgan',
+  );
+
+  @override
+  Future<PosCommandResult> executeApprovedVoid(
+    VoidTransactionCommand command,
+    String approvalToken,
+  ) => executeCommand(command);
   @override
   Future<CanonicalReceipt> fetchReceipt(String transactionId) {
     throw UnimplementedError();
@@ -254,7 +273,7 @@ void main() {
         throwsStateError,
       );
       await expectLater(
-        testFixture.controller.voidTransaction(),
+        Future.sync(() => testFixture.controller.prepareVoidTransaction()),
         throwsStateError,
       );
 
@@ -994,7 +1013,10 @@ void main() {
         ),
       );
 
-      await testFixture.controller.voidTransaction();
+      await testFixture.controller.submitApprovedVoid(
+        testFixture.controller.prepareVoidTransaction(),
+        'test-approval-token',
+      );
 
       final voidCommand =
           testFixture.client.commands[2] as VoidTransactionCommand;
@@ -1052,7 +1074,10 @@ void main() {
       final voidRead = Completer<TransactionSnapshot>();
       testFixture.client.commandHandlers.add((command) => voidResult.future);
       testFixture.client.transactionHandlers.add((_) => voidRead.future);
-      final voiding = testFixture.controller.voidTransaction();
+      final voiding = testFixture.controller.submitApprovedVoid(
+        testFixture.controller.prepareVoidTransaction(),
+        'test-approval-token',
+      );
       voidResult.complete(
         resultFor(testFixture.client.commands.last, outcomeVersion: 6),
       );

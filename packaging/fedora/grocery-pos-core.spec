@@ -1,6 +1,6 @@
 Name:           grocery-pos-core
 Version:        0.0.0
-Release:        0.6.dev%{?dist}
+Release:        0.7.dev%{?dist}
 Summary:        Local-first Grocery POS transaction core
 License:        LicenseRef-Project-Undecided
 URL:            https://github.com/adarj/grocery-pos-platform
@@ -79,6 +79,9 @@ install -D -m 0644 packaging/fedora/pos-core.env \
 %config(noreplace) /etc/grocery-pos/pos-core.env
 
 %changelog
+* Tue Sep 22 2026 Grocery POS Platform <internal@invalid> - 0.0.0-0.7.dev
+- Add scoped whole-sale void approval and durable approver evidence.
+
 * Mon Sep 21 2026 Grocery POS Platform <internal@invalid> - 0.0.0-0.6.dev
 - Add fixed authorization, resource ownership, and durable command actors.
 

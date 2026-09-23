@@ -6,6 +6,7 @@ import '../../core/pos_core/models/register_operations.dart';
 import '../../core/pos_core/models/transaction_command.dart';
 import '../../core/pos_core/models/transaction_snapshot.dart';
 import '../../core/pos_core/pos_core_client.dart';
+import '../../core/pos_core/transaction_void_approval_client.dart';
 import 'cashier_id_generator.dart';
 import 'cashier_local_recovery_failure.dart';
 import 'cashier_session_state.dart';
@@ -17,12 +18,19 @@ final class CashierSessionController extends ChangeNotifier {
     required CashierIdGenerator idGenerator,
     required CashierSessionStore sessionStore,
     required String? Function() currentOperatorId,
+    TransactionVoidApprovalClient? approvalClient,
   }) : _client = client,
+       _approvalClient =
+           approvalClient ??
+           (client is TransactionVoidApprovalClient
+               ? client as TransactionVoidApprovalClient
+               : null),
        _idGenerator = idGenerator,
        _sessionStore = sessionStore,
        _currentOperatorId = currentOperatorId;
 
   final PosCoreClient _client;
+  final TransactionVoidApprovalClient? _approvalClient;
   final CashierIdGenerator _idGenerator;
   final CashierSessionStore _sessionStore;
   final String? Function() _currentOperatorId;
@@ -190,14 +198,87 @@ final class CashierSessionController extends ChangeNotifier {
     await _persistAndExecuteNewCommand(command);
   }
 
-  Future<void> voidTransaction() async {
+  VoidTransactionCommand prepareVoidTransaction() {
     final snapshot = _requireAuthoritativeSnapshot();
-    final command = VoidTransactionCommand(
+    return VoidTransactionCommand(
       commandId: _idGenerator.nextCommandId(),
       transactionId: snapshot.transactionId,
       expectedVersion: snapshot.version,
     );
-    await _persistAndExecuteNewCommand(command);
+  }
+
+  Future<TransactionVoidApproval> requestVoidApproval(
+    VoidTransactionCommand command,
+    String approverOperatorId,
+    String approverPin,
+  ) async {
+    _requireIdle();
+    _requireRecoveryOwnership();
+    final pending = _state.pendingCommand;
+    if (pending != null) {
+      if (!_sameVoidCommand(pending, command)) {
+        throw StateError(
+          'Approval must target the exact pending void command.',
+        );
+      }
+    } else {
+      _requireMatchingVoidSnapshot(command);
+    }
+    return _requireApprovalClient().requestTransactionVoidApproval(
+      command,
+      approverOperatorId,
+      approverPin,
+    );
+  }
+
+  Future<void> submitApprovedVoid(
+    VoidTransactionCommand command,
+    String approvalToken,
+  ) async {
+    _requireIdle();
+    _requireRecoveryOwnership();
+    final pending = _state.pendingCommand;
+    if (pending != null) {
+      if (!_sameVoidCommand(pending, command)) {
+        throw StateError(
+          'Approval must target the exact pending void command.',
+        );
+      }
+      await _executePersistedCommand(
+        command,
+        pendingWhileExecuting: true,
+        approvalToken: approvalToken,
+      );
+      return;
+    }
+    _requireMatchingVoidSnapshot(command);
+    await _persistAndExecuteNewCommand(command, approvalToken: approvalToken);
+  }
+
+  TransactionVoidApprovalClient _requireApprovalClient() {
+    final client = _approvalClient;
+    if (client == null) {
+      throw StateError('Transaction void approval is unavailable.');
+    }
+    return client;
+  }
+
+  void _requireMatchingVoidSnapshot(VoidTransactionCommand command) {
+    final snapshot = _requireAuthoritativeSnapshot();
+    if (snapshot.transactionId != command.transactionId ||
+        snapshot.version != command.expectedVersion) {
+      throw StateError('Transaction changed before approval could be used.');
+    }
+  }
+
+  bool _sameVoidCommand(
+    TransactionCommand existing,
+    VoidTransactionCommand next,
+  ) {
+    return existing is VoidTransactionCommand &&
+        existing.commandId == next.commandId &&
+        existing.transactionId == next.transactionId &&
+        existing.expectedVersion == next.expectedVersion;
   }
 
   Future<void> retryPendingCommand() async {
@@ -263,7 +344,10 @@ final class CashierSessionController extends ChangeNotifier {
     await startTransaction();
   }
 
-  Future<void> _persistAndExecuteNewCommand(TransactionCommand command) async {
+  Future<void> _persistAndExecuteNewCommand(
+    TransactionCommand command, {
+    String? approvalToken,
+  }) async {
     final stateBeforeCommand = _state;
     _setState(
       CashierSessionState(
@@ -299,12 +383,13 @@ final class CashierSessionController extends ChangeNotifier {
       return;
     }
 
-    await _executePersistedCommand(command);
+    await _executePersistedCommand(command, approvalToken: approvalToken);
   }
 
   Future<void> _executePersistedCommand(
     TransactionCommand command, {
     bool pendingWhileExecuting = false,
+    String? approvalToken,
   }) async {
     _setState(
       CashierSessionState(
@@ -315,7 +400,12 @@ final class CashierSessionController extends ChangeNotifier {
     );
 
     try {
-      final result = await _client.executeCommand(command);
+      final result = approvalToken == null
+          ? await _client.executeCommand(command)
+          : await _requireApprovalClient().executeApprovedVoid(
+              command as VoidTransactionCommand,
+              approvalToken,
+            );
       final cleanupFailure = await _recordKnownCommandResult(command, result);
       await _handleResolvedCommand(
         command,

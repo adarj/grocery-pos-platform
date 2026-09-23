@@ -13,7 +13,8 @@ enum OperatorPermission {
   shiftCloseOwn('shift.close.own'),
   shiftCloseAny('shift.close.any'),
   shiftCashSummaryReadOwn('shift.cash_summary.read.own'),
-  shiftCashSummaryReadAny('shift.cash_summary.read.any');
+  shiftCashSummaryReadAny('shift.cash_summary.read.any'),
+  approvalTransactionVoid('approval.transaction_void');
 
   const OperatorPermission(this.wireName);
 
@@ -76,7 +77,8 @@ final class AuthenticatedOperatorSession {
   final int idleTimeoutSeconds;
   final int absoluteExpiresAtEpochMs;
 
-  bool permits(OperatorPermission permission) => permissions.contains(permission);
+  bool permits(OperatorPermission permission) =>
+      permissions.contains(permission);
 }
 
 Set<OperatorPermission> _parsePermissions(

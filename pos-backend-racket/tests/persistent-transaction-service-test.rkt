@@ -14,11 +14,18 @@
          "../pos/domain/money.rkt"
          "../pos/domain/tax.rkt"
          "../pos/domain/transaction-event.rkt"
+         "../pos/domain/transaction-void-approval.rkt"
          "../pos/domain/transaction.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt"
          "../pos/persistence/transaction-command-receipt-store.rkt"
          "../pos/persistence/transaction-command-unit-of-work.rkt"
-         "../pos/persistence/pos-database-migrations.rkt")
+         "../pos/persistence/pos-database-migrations.rkt"
+         "../pos/persistence/transaction-void-approval-store.rkt"
+         "../pos/security/transaction-void-approval.rkt")
+
+(define test-approval-capability
+  (transaction-void-approval-token->capability
+   (string-append "gpos_a1_" (make-string 64 #\a))))
 
 (define test-principal
   (authenticated-operator "legacy-service-test-operator"
@@ -26,7 +33,10 @@
                           'manager))
 
 (define (transaction-service-execute-command service command)
-  (execute-command/authorized service test-principal command))
+  (execute-command/authorized
+   service test-principal command
+   #:approval-capability
+   (and (void-transaction-command? command) test-approval-capability)))
 
 (define (transaction-service-load-transaction service transaction-id)
   (load-transaction/authorized service test-principal transaction-id))
@@ -65,7 +75,17 @@
    #:catalog-lookup catalog-lookup
    #:load-events load-events
    #:load-receipt load-receipt
-   #:commit-command! commit-command!))
+   #:commit-command! commit-command!
+   ;; Legacy business-state tests use synthetic approval evidence. The real
+   ;; grant lifecycle and authority checks have their own focused tests.
+   #:approval-consumer
+   (lambda (_connection _capability _requester command)
+     (transaction-void-approval-consumed
+      (transaction-command-approver-attribution
+       (transaction-command-command-id command)
+       (string-append "test-approval-"
+                      (transaction-command-command-id command))
+       "test-supervisor" 1 1000)))))
 
 (define (resolved-receipt result)
   (check-pred transaction-service-command-resolved? result)

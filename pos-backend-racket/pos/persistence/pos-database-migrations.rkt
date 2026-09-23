@@ -20,6 +20,7 @@
 (define migration-7-name "create_operator_identity_credentials")
 (define migration-8-name "create_operator_login_throttle")
 (define migration-9-name "create_transaction_command_actor_attributions")
+(define migration-10-name "create_transaction_void_approvals")
 (define stream-sequence-index-name
   "transaction_events_stream_sequence_unique")
 
@@ -557,6 +558,129 @@ CREATE TABLE transaction_command_legacy_unattributed_receipts (
 SQL
   )
 
+(define create-transaction-void-approval-grants-table-sql
+  #<<SQL
+CREATE TABLE transaction_void_approval_grants (
+  approval_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(approval_id) = 'text'
+      AND length(approval_id) > 0
+    ),
+  token_digest BLOB NOT NULL UNIQUE
+    CHECK (
+      typeof(token_digest) = 'blob'
+      AND length(token_digest) = 32
+    ),
+  issuer_instance_id TEXT NOT NULL
+    CHECK (
+      typeof(issuer_instance_id) = 'text'
+      AND length(issuer_instance_id) > 0
+    ),
+  requester_operator_id TEXT NOT NULL
+    CHECK (
+      typeof(requester_operator_id) = 'text'
+      AND length(requester_operator_id) > 0
+    ),
+  approver_operator_id TEXT NOT NULL
+    CHECK (
+      typeof(approver_operator_id) = 'text'
+      AND length(approver_operator_id) > 0
+    ),
+  approver_credential_revision INTEGER NOT NULL
+    CHECK (
+      typeof(approver_credential_revision) = 'integer'
+      AND approver_credential_revision >= 1
+    ),
+  command_id TEXT NOT NULL UNIQUE
+    CHECK (
+      typeof(command_id) = 'text'
+      AND length(command_id) > 0
+    ),
+  transaction_id TEXT NOT NULL
+    CHECK (
+      typeof(transaction_id) = 'text'
+      AND length(transaction_id) > 0
+    ),
+  command_schema_version INTEGER NOT NULL
+    CHECK (
+      typeof(command_schema_version) = 'integer'
+      AND command_schema_version = 1
+    ),
+  expected_version INTEGER NOT NULL
+    CHECK (
+      typeof(expected_version) = 'integer'
+      AND expected_version >= 0
+    ),
+  granted_at_monotonic_ms INTEGER NOT NULL
+    CHECK (
+      typeof(granted_at_monotonic_ms) = 'integer'
+      AND granted_at_monotonic_ms >= 0
+    ),
+  expires_at_monotonic_ms INTEGER NOT NULL
+    CHECK (
+      typeof(expires_at_monotonic_ms) = 'integer'
+      AND expires_at_monotonic_ms > granted_at_monotonic_ms
+    ),
+  expires_at_epoch_ms INTEGER NOT NULL
+    CHECK (
+      typeof(expires_at_epoch_ms) = 'integer'
+      AND expires_at_epoch_ms >= 0
+    ),
+  CHECK (requester_operator_id <> approver_operator_id)
+)
+SQL
+  )
+
+(define create-transaction-command-approver-attributions-table-sql
+  #<<SQL
+CREATE TABLE transaction_command_approver_attributions (
+  command_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(command_id) = 'text'
+      AND length(command_id) > 0
+    ),
+  approval_id TEXT NOT NULL UNIQUE
+    CHECK (
+      typeof(approval_id) = 'text'
+      AND length(approval_id) > 0
+    ),
+  approver_operator_id TEXT NOT NULL
+    CHECK (
+      typeof(approver_operator_id) = 'text'
+      AND length(approver_operator_id) > 0
+    ),
+  approver_credential_revision INTEGER NOT NULL
+    CHECK (
+      typeof(approver_credential_revision) = 'integer'
+      AND approver_credential_revision >= 1
+    ),
+  approved_at_epoch_ms INTEGER NOT NULL
+    CHECK (
+      typeof(approved_at_epoch_ms) = 'integer'
+      AND approved_at_epoch_ms >= 0
+    ),
+  FOREIGN KEY (command_id)
+    REFERENCES transaction_command_receipts(command_id)
+    ON DELETE CASCADE
+)
+SQL
+  )
+
+(define create-transaction-command-legacy-unapproved-void-receipts-table-sql
+  #<<SQL
+CREATE TABLE transaction_command_legacy_unapproved_void_receipts (
+  command_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(command_id) = 'text'
+      AND length(command_id) > 0
+    ),
+  FOREIGN KEY (command_id)
+    REFERENCES transaction_command_receipts(command_id)
+    ON DELETE CASCADE
+)
+SQL
+  )
+
 (define (schema-object-exists? connection type name)
   (= 1
      (db:query-value
@@ -732,6 +856,31 @@ SQL
         (vector "operator_id" "TEXT" 1 0)))
 
 (define expected-transaction-command-legacy-unattributed-receipt-columns
+  (list (vector "command_id" "TEXT" 1 1)))
+
+(define expected-transaction-void-approval-grant-columns
+  (list (vector "approval_id" "TEXT" 1 1)
+        (vector "token_digest" "BLOB" 1 0)
+        (vector "issuer_instance_id" "TEXT" 1 0)
+        (vector "requester_operator_id" "TEXT" 1 0)
+        (vector "approver_operator_id" "TEXT" 1 0)
+        (vector "approver_credential_revision" "INTEGER" 1 0)
+        (vector "command_id" "TEXT" 1 0)
+        (vector "transaction_id" "TEXT" 1 0)
+        (vector "command_schema_version" "INTEGER" 1 0)
+        (vector "expected_version" "INTEGER" 1 0)
+        (vector "granted_at_monotonic_ms" "INTEGER" 1 0)
+        (vector "expires_at_monotonic_ms" "INTEGER" 1 0)
+        (vector "expires_at_epoch_ms" "INTEGER" 1 0)))
+
+(define expected-transaction-command-approver-attribution-columns
+  (list (vector "command_id" "TEXT" 1 1)
+        (vector "approval_id" "TEXT" 1 0)
+        (vector "approver_operator_id" "TEXT" 1 0)
+        (vector "approver_credential_revision" "INTEGER" 1 0)
+        (vector "approved_at_epoch_ms" "INTEGER" 1 0)))
+
+(define expected-transaction-command-legacy-unapproved-void-receipt-columns
   (list (vector "command_id" "TEXT" 1 1)))
 
 (define (validate-owned-table-schema connection
@@ -1189,6 +1338,96 @@ SQL
     (error 'migrate-pos-database!
            "every command receipt must be attributed or explicitly classified as pre-v9")))
 
+(define (validate-transaction-void-approvals-schema connection)
+  (validate-owned-table-schema
+   connection 10 "transaction_void_approval_grants"
+   expected-transaction-void-approval-grant-columns
+   create-transaction-void-approval-grants-table-sql)
+  (validate-owned-table-schema
+   connection 10 "transaction_command_approver_attributions"
+   expected-transaction-command-approver-attribution-columns
+   create-transaction-command-approver-attributions-table-sql)
+  (validate-owned-table-schema
+   connection 10 "transaction_command_legacy_unapproved_void_receipts"
+   expected-transaction-command-legacy-unapproved-void-receipt-columns
+   create-transaction-command-legacy-unapproved-void-receipts-table-sql)
+  (define orphan-approver-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM transaction_command_approver_attributions AS attribution
+LEFT JOIN transaction_command_receipts AS receipt
+  ON receipt.command_id = attribution.command_id
+WHERE receipt.command_id IS NULL
+SQL
+     ))
+  (unless (zero? orphan-approver-count)
+    (error 'migrate-pos-database!
+           "transaction command approver attribution references a missing receipt"))
+  (define orphan-legacy-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM transaction_command_legacy_unapproved_void_receipts AS legacy
+LEFT JOIN transaction_command_receipts AS receipt
+  ON receipt.command_id = legacy.command_id
+WHERE receipt.command_id IS NULL
+SQL
+     ))
+  (unless (zero? orphan-legacy-count)
+    (error 'migrate-pos-database!
+           "legacy void approval classification references a missing receipt"))
+  (define conflicting-void-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM transaction_command_legacy_unapproved_void_receipts AS legacy
+JOIN transaction_command_approver_attributions AS attribution
+  ON attribution.command_id = legacy.command_id
+SQL
+     ))
+  (unless (zero? conflicting-void-count)
+    (error 'migrate-pos-database!
+           "a void receipt cannot be both approved and legacy-unapproved"))
+  (define unclassified-void-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM transaction_command_receipts AS receipt
+LEFT JOIN transaction_command_legacy_unapproved_void_receipts AS legacy
+  ON legacy.command_id = receipt.command_id
+LEFT JOIN transaction_command_approver_attributions AS attribution
+  ON attribution.command_id = receipt.command_id
+WHERE receipt.command_type = 'void_transaction'
+  AND legacy.command_id IS NULL
+  AND attribution.command_id IS NULL
+SQL
+     ))
+  (unless (zero? unclassified-void-count)
+    (error 'migrate-pos-database!
+           "every void receipt must be approved or explicitly classified as pre-v10"))
+  (define classified-non-void-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM transaction_command_receipts AS receipt
+LEFT JOIN transaction_command_legacy_unapproved_void_receipts AS legacy
+  ON legacy.command_id = receipt.command_id
+LEFT JOIN transaction_command_approver_attributions AS attribution
+  ON attribution.command_id = receipt.command_id
+WHERE receipt.command_type <> 'void_transaction'
+  AND (legacy.command_id IS NOT NULL OR attribution.command_id IS NOT NULL)
+SQL
+     ))
+  (unless (zero? classified-non-void-count)
+    (error 'migrate-pos-database!
+           "non-void receipts cannot carry void approval provenance")))
+
 (define (apply-migration-1! connection)
   (db:query-exec connection create-events-table-sql)
   (db:query-exec connection create-stream-sequence-index-sql))
@@ -1284,6 +1523,24 @@ SQL
   (db:query-exec
    connection create-transaction-command-actor-attributions-table-sql))
 
+(define (apply-migration-10! connection)
+  (db:query-exec connection create-transaction-void-approval-grants-table-sql)
+  (db:query-exec
+   connection create-transaction-command-approver-attributions-table-sql)
+  (db:query-exec
+   connection create-transaction-command-legacy-unapproved-void-receipts-table-sql)
+  ;; These rows are historical truth: they prove only that the void receipt
+  ;; existed before CP4, never that a particular operator approved it.
+  (db:query-exec
+   connection
+   #<<SQL
+INSERT INTO transaction_command_legacy_unapproved_void_receipts (command_id)
+SELECT command_id
+FROM transaction_command_receipts
+WHERE command_type = 'void_transaction'
+SQL
+   ))
+
 (define migrations
   (list
    (pos-database-migration 1
@@ -1321,7 +1578,11 @@ SQL
    (pos-database-migration 9
                            migration-9-name
                            apply-migration-9!
-                           validate-transaction-command-actor-attributions-schema)))
+                           validate-transaction-command-actor-attributions-schema)
+   (pos-database-migration 10
+                           migration-10-name
+                           apply-migration-10!
+                           validate-transaction-void-approvals-schema)))
 
 (define current-pos-database-schema-version (length migrations))
 

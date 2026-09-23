@@ -12,19 +12,24 @@
          "../pos/application/operator-service.rkt"
          "../pos/application/register-operations-service.rkt"
          "../pos/application/transaction-service.rkt"
+         "../pos/application/transaction-void-approval-service.rkt"
          "../pos/domain/catalog-item.rkt"
          "../pos/domain/fake-catalog.rkt"
          "../pos/domain/money.rkt"
          "../pos/domain/tax.rkt"
          "../pos/domain/transaction-event.rkt"
+         "../pos/domain/transaction-operational-context.rkt"
+         "../pos/domain/transaction-void-approval.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt"
          "../pos/persistence/operational-configuration-snapshot-codec.rkt"
          "../pos/persistence/sqlite-register-operations.rkt"
          "../pos/persistence/transaction-command-codec.rkt"
          "../pos/persistence/transaction-command-unit-of-work.rkt"
+         "../pos/persistence/transaction-void-approval-store.rkt"
          "../pos/persistence/pos-database-migrations.rkt"
          "../pos/runtime-config.rkt"
          "../pos/runtime.rkt"
+         "../pos/security/transaction-void-approval.rkt"
          "../pos/support/readiness.rkt"
          "support/authentication.rkt")
 
@@ -32,6 +37,7 @@
 (define unknown-barcode "000000000000")
 (define current-test-access-token (make-parameter #f))
 (define current-test-authentication-service (make-parameter #f))
+(define current-test-approval-service (make-parameter #f))
 
 (define (test-readiness)
   (runtime-ready current-pos-database-schema-version))
@@ -46,7 +52,8 @@
 (define (make-http-request method
                            path
                            #:body [body #f]
-                           #:content-type [content-type #f])
+                           #:content-type [content-type #f]
+                           #:headers [extra-headers '()])
   (request
    method
    (string->url path)
@@ -61,7 +68,8 @@
         '())
     (if (current-test-access-token)
         (list (test-authorization-header (current-test-access-token)))
-        '()))
+        '())
+    extra-headers)
    (delay '())
    body
    "127.0.0.1"
@@ -83,13 +91,34 @@
 
 (define (post-command app command
                       #:body [body (transaction-command->json-bytes command)]
-                      #:content-type [content-type "application/json"])
+                      #:content-type [content-type "application/json"]
+                      #:approval-token [approval-token #f])
   (app
    (make-http-request
     #"POST"
     "/transaction-commands"
     #:body body
-    #:content-type content-type)))
+    #:content-type content-type
+    #:headers
+    (if approval-token
+        (list (header #"X-Grocery-POS-Approval"
+                      (string->bytes/utf-8 approval-token)))
+        '()))))
+
+(define (request-void-approval app command approver-id pin)
+  (define response
+    (app
+     (make-http-request
+      #"POST"
+      "/approvals/transaction-void"
+      #:content-type "application/json"
+      #:body
+      (jsexpr->bytes
+       (hasheq 'command (transaction-command->jsexpr command)
+               'approver_operator_id approver-id
+               'approver_pin pin)))))
+  (check-equal? (response-code response) 200)
+  (hash-ref (hash-ref (response-json response) 'approval) 'approval_token))
 
 (define (get-transaction app transaction-id)
   (app
@@ -102,12 +131,14 @@
          #:catalog-lookup [catalog-lookup fake-catalog-lookup]
          #:load-events [load-events load-transaction-events]
          #:commit-command!
-         [commit-command! commit-transaction-command-outcome!])
+         [commit-command! commit-transaction-command-outcome!]
+         #:approval-consumer [approval-consumer #f])
   (make-transaction-service
    connection
    #:catalog-lookup catalog-lookup
    #:load-events load-events
-   #:commit-command! commit-command!))
+   #:commit-command! commit-command!
+   #:approval-consumer approval-consumer))
 
 (define (call-with-http-app proc
                             #:catalog-lookup
@@ -122,22 +153,52 @@
     (lambda ()
       (migrate-pos-database! connection))
     (lambda ()
+      (define approval-authority
+        (make-transaction-void-approval-authority
+         #:issuer-instance-id "http-test-instance"
+         #:current-monotonic-ms (lambda () 1000)
+         #:current-epoch-ms (lambda () 500000)))
       (define service
         (make-test-service
          connection
          #:catalog-lookup catalog-lookup
          #:load-events load-events
-         #:commit-command! commit-command!))
+         #:commit-command! commit-command!
+         #:approval-consumer
+         (lambda (approval-connection capability requester command)
+           (consume-transaction-void-approval!/in-transaction!
+            approval-connection capability "http-test-instance" requester
+            command 2000))))
       (define auth-service (make-test-authentication-service connection))
+      (db:query-exec
+       connection
+       "INSERT INTO operators VALUES ('http-supervisor', 'HTTP Supervisor', 1)")
+      (db:query-exec
+       connection
+       "INSERT INTO operator_roles VALUES ('http-supervisor', 'supervisor')")
+      (db:query-exec
+       connection
+       #<<SQL
+INSERT INTO operator_pin_credentials
+SELECT 'http-supervisor', password_hash, 1
+FROM operator_pin_credentials
+WHERE operator_id = ?
+SQL
+       test-operator-id)
+      (define approval-service
+        (make-transaction-void-approval-service
+         auth-service service approval-authority))
       (define access-token (issue-test-access-token auth-service))
       (parameterize
           ([current-test-access-token access-token]
-           [current-test-authentication-service auth-service])
+           [current-test-authentication-service auth-service]
+           [current-test-approval-service approval-service])
         (proc connection
               service
               (make-app
                service
                #:authentication-service auth-service
+               #:transaction-void-approval-service approval-service
                #:readiness-probe test-readiness))))
     (lambda ()
       (db:disconnect connection))))
@@ -201,6 +262,32 @@ SQL
    connection
    "SELECT COUNT(*) FROM transaction_command_receipts WHERE command_id = ?"
    command-id))
+
+(define (install-http-approval! connection command [token-character #\a])
+  (define token
+    (string-append "gpos_a1_" (make-string 64 token-character)))
+  (define capability (transaction-void-approval-token->capability token))
+  (db:call-with-transaction
+   connection
+   (lambda ()
+     (replace-transaction-void-approval-grant!/in-transaction!
+      connection
+      (transaction-void-approval-grant
+       (string-append "approval-" (string token-character))
+       (transaction-void-approval-capability-token-digest capability)
+       "http-test-instance"
+       test-operator-id
+       "http-supervisor"
+       1
+       (transaction-command-command-id command)
+       (transaction-command-transaction-id command)
+       1
+       (transaction-command-expected-version command)
+       1000 91000 590000)
+      "http-test-instance"
+      1000))
+   #:option 'immediate)
+  token)
 
 (define (check-safe-error response status code)
   (check-equal? (response-code response) status)
@@ -634,16 +721,23 @@ SQL
         409 #f "cmd-http-remove-stale" "txn-http-remove"
         "version_conflict" "stale_expected_version" 5))))
 
-  (test-case "void command produces an authoritative terminal projection"
+  (test-case "approved void command produces an authoritative terminal projection"
     (call-with-http-app
-     (lambda (_connection _service app)
+     (lambda (connection _service app)
        (accepted-start app "txn-http-void")
        (accepted-scan app "txn-http-void" 1 "cmd-http-void-scan")
        (define void-command
          (void-transaction-command
           "cmd-http-void" "txn-http-void" 2))
-       (check-command-result
+       (check-safe-error
         (post-command app void-command)
+        403
+        "approval_required")
+       (check-equal? (receipt-count connection "cmd-http-void") 0)
+       (check-command-result
+        (post-command
+         app void-command
+         #:approval-token (install-http-approval! connection void-command))
         200 #t "cmd-http-void" "txn-http-void"
         "accepted" "accepted" 3)
 
@@ -658,13 +752,88 @@ SQL
        (check-equal? (hash-ref transaction 'tendered_cash_minor_units) 'null)
        (check-equal? (hash-ref transaction 'change_due_minor_units) 'null)
 
-       (check-command-result
-        (post-command
-         app
+       (define again
          (void-transaction-command
           "cmd-http-void-again" "txn-http-void" 3))
+       (check-command-result
+        (post-command
+         app again
+         #:approval-token (install-http-approval! connection again #\b))
         409 #f "cmd-http-void-again" "txn-http-void"
         "domain_rejected" "invalid_transaction_state" 3))))
+
+  (test-case "approval endpoint authenticates a separate approver without switching session"
+    (call-with-http-app
+     (lambda (connection _service app)
+       (check-pred
+        journal-append-succeeded?
+        (append-transaction-events!
+         connection
+         "txn-approval-http"
+         0
+         (list
+          (operational-transaction-started
+           "txn-approval-http"
+           (transaction-operational-context
+            "register-http" "HTTP Register"
+            test-operator-id "HTTP Test Operator"
+            "shift-http" 1000)))))
+       (define command
+         (void-transaction-command
+          "cmd-approval-http" "txn-approval-http" 1))
+       (define token
+         (request-void-approval
+          app command "http-supervisor" test-operator-pin))
+       (check-regexp-match #px"^gpos_a1_[0-9a-f]{64}$" token)
+       (define session-response
+         (app (make-http-request #"GET" "/auth/session")))
+       (check-equal? (response-code session-response) 200)
+       (check-equal?
+        (hash-ref
+         (hash-ref (response-json session-response) 'session)
+         'operator_id)
+        test-operator-id)
+       (check-equal?
+        (db:query-value
+         connection
+         "SELECT approver_operator_id FROM transaction_void_approval_grants WHERE command_id = 'cmd-approval-http'")
+        "http-supervisor"))))
+
+  (test-case "unexpected and duplicate approval headers never consume the scoped grant"
+    (call-with-http-app
+     (lambda (connection _service app)
+       (accepted-start app "txn-approval-header")
+       (define void-command
+         (void-transaction-command
+          "cmd-approval-header-void" "txn-approval-header" 1))
+       (define token (install-http-approval! connection void-command))
+       (define scan-command
+         (scan-barcode-command
+          "cmd-approval-header-scan" "txn-approval-header" 1 test-barcode))
+       (check-safe-error
+        (post-command app scan-command #:approval-token token)
+        400 "unexpected_approval")
+       (check-equal? (receipt-count connection "cmd-approval-header-scan") 0)
+       (check-safe-error
+        (app
+         (make-http-request
+          #"POST" "/transaction-commands"
+          #:content-type "application/json"
+          #:body (transaction-command->json-bytes void-command)
+          #:headers
+          (list (header #"X-Grocery-POS-Approval"
+                        (string->bytes/utf-8 token))
+                (header #"X-Grocery-POS-Approval"
+                        (string->bytes/utf-8 token)))))
+        400 "invalid_approval")
+       (check-equal?
+        (db:query-value connection
+                        "SELECT COUNT(*) FROM transaction_void_approval_grants WHERE command_id = 'cmd-approval-header-void'")
+        1)
+       (check-command-result
+        (post-command app void-command #:approval-token token)
+        200 #t "cmd-approval-header-void" "txn-approval-header"
+        "accepted" "accepted" 2))))
 
   (test-case "malformed correction payloads fail before command execution"
     (call-with-http-app

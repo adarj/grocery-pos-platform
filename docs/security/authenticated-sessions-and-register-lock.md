@@ -168,6 +168,8 @@ Project output must not log those values. The formal security audit ledger is
 not implemented yet.
 
 Checkpoint 3 applies fixed role and resource-ownership authorization and
-durable transaction-command actor attribution. Manager approval, credential
-reset, login/security audit events, cloud identity, and remote authentication
-remain deferred.
+durable transaction-command actor attribution. Checkpoint 4 adds separately
+authenticated [Supervisor / Manager Approval](scoped-manager-approval.md) for
+fresh whole-sale voids without issuing an approver bearer session. Credential
+reset, general login/security audit events, cloud identity, and remote
+authentication remain deferred.

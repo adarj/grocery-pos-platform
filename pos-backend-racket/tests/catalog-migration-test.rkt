@@ -420,7 +420,8 @@ SQL
         #(6 "create_shift_cash_accountability")
         #(7 "create_operator_identity_credentials")
         #(8 "create_operator_login_throttle")
-        #(9 "create_transaction_command_actor_attributions")))
+        #(9 "create_transaction_command_actor_attributions")
+        #(10 "create_transaction_void_approvals")))
 
 (module+ test
   (test-case "fresh database creates catalog and tax schema through migration 4"

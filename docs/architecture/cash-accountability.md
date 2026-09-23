@@ -78,7 +78,10 @@ after retained-line corrections. It is not tendered cash. For example, a
 event; the clock is not called twice.
 
 A void appends no cash movement and releases the slot atomically with its event
-and command receipt. A zero-total completed sale appends a zero-valued movement
+and command receipt after its separate Supervisor / Manager Approval has been
+validated and consumed inside the same writer transaction. The cashier remains
+the command actor; see [Scoped Approval](../security/scoped-manager-approval.md).
+A zero-total completed sale appends a zero-valued movement
 and therefore still counts as one completed cash sale. Durable same-command
 completion retry returns the original command receipt before operational
 effects and cannot append a second movement; transaction-linked uniqueness is

@@ -101,7 +101,7 @@ a control.
 
 The Racket process now constructs its durable transaction service before the
 HTTP listener starts. Startup resolves `SQLITE_DB_PATH`, migrates and validates
-the POS database through schema v9 using a dedicated connection after
+the POS database through schema v10 using a dedicated connection after
 establishing WAL with FULL synchronous durability. Every production connection
 explicitly enables foreign-key enforcement, retains a 1000-page WAL automatic
 checkpoint threshold, and uses the bounded Racket connector busy policy.
@@ -187,6 +187,12 @@ Valid authentication with insufficient permission returns HTTP 403 with
 `authorization_denied`. It does not revoke the bearer session and does not
 include the missing permission. Authentication failures remain 401 and a
 temporary inability to revalidate security state remains 503.
+
+A fresh whole-sale void also requires the separate
+[`POST /approvals/transaction-void`](transaction-http-api-v1.md) ceremony.
+The approver's PIN issues no register bearer session. The resulting short-lived
+capability is sent only in `X-Grocery-POS-Approval` with the exact void command;
+see [Supervisor / Manager Approval](../security/scoped-manager-approval.md).
 
 ## Health Endpoint
 

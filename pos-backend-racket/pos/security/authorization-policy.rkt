@@ -21,7 +21,8 @@
     shift.close.own
     shift.close.any
     shift.cash_summary.read.own
-    shift.cash_summary.read.any))
+    shift.cash_summary.read.any
+    approval.transaction_void))
 
 (define role-grants
   (hash
@@ -44,7 +45,8 @@
      shift.open.own
      shift.close.own
      shift.cash_summary.read.own
-     shift.cash_summary.read.any)
+     shift.cash_summary.read.any
+     approval.transaction_void)
    'manager
    authorization-permissions))
 

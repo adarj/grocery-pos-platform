@@ -4,12 +4,14 @@
          web-server/http
          web-server/servlet-env
          "auth-http.rkt"
+         "approval-http.rkt"
          "http-safety.rkt"
          "http-response.rkt"
          "receipt-http.rkt"
          "register-operations-http.rkt"
          "transaction-http.rkt"
          "../application/transaction-service.rkt"
+         "../application/transaction-void-approval-service.rkt"
          "../application/authentication-service.rkt"
          "../application/register-operations-service.rkt"
          "../security/authorization-policy.rkt"
@@ -115,6 +117,8 @@
 (define (make-app transaction-service
                   [register-service #f]
                   #:authentication-service authentication-service
+                  #:transaction-void-approval-service
+                  [approval-service #f]
                   #:readiness-probe readiness-probe)
   (unless (transaction-service? transaction-service)
     (raise-argument-error
@@ -126,6 +130,12 @@
   (unless (authentication-service? authentication-service)
     (raise-argument-error
      'make-app "authentication-service?" authentication-service))
+  (unless (or (not approval-service)
+              (transaction-void-approval-service? approval-service))
+    (raise-argument-error
+     'make-app
+     "(or/c #f transaction-void-approval-service?)"
+     approval-service))
   (unless (and (procedure? readiness-probe)
                (procedure-arity-includes? readiness-probe 0))
     (raise-argument-error
@@ -174,6 +184,20 @@
                  (lambda (principal)
                    (handle-transaction-command-request
                     transaction-service principal req)))))
+             (method-not-allowed-response #"POST"))]
+
+        [(and approval-service
+              (equal? path '("approvals" "transaction-void")))
+         (if (equal? method #"POST")
+             (authenticate-protected-request
+              authentication-service req
+              (lambda (_token authenticated)
+                (with-route-permission
+                 authenticated
+                 'transaction.operate.own
+                 (lambda (principal)
+                   (handle-transaction-void-approval-request
+                    approval-service principal req)))))
              (method-not-allowed-response #"POST"))]
 
         [(and register-service (equal? path '("register-context")))

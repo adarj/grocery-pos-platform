@@ -8,9 +8,12 @@
          "application/operator-service.rkt"
          "application/register-operations-service.rkt"
          "application/transaction-service.rkt"
+         "application/transaction-void-approval-service.rkt"
          "persistence/pos-database-migrations.rkt"
          "persistence/sqlite-catalog.rkt"
          "persistence/sqlite-connection.rkt"
+         "persistence/transaction-void-approval-store.rkt"
+         "security/transaction-void-approval.rkt"
          "support/readiness.rkt")
 
 (provide runtime-sqlite-max-connections
@@ -23,6 +26,7 @@
          pos-runtime-register-operations-service
          pos-runtime-operator-service
          pos-runtime-authentication-service
+         pos-runtime-transaction-void-approval-service
          pos-runtime-sqlite-db-path
          pos-runtime-stopped?
          pos-runtime-readiness)
@@ -39,6 +43,7 @@
    register-operations-service
    operator-service
    authentication-service
+   transaction-void-approval-service
    sqlite-db-path
    custodian
    stopped-box
@@ -153,7 +158,8 @@
           (custodian-shutdown-all runtime-custodian)
           (raise value))])
     (define-values
-      (transaction-service register-service operator-service auth-service)
+      (transaction-service register-service operator-service auth-service
+                           approval-service)
       (parameterize ([current-custodian runtime-custodian])
         (define pool
           (db:connection-pool
@@ -177,21 +183,42 @@
            virtual-connection
            #:current-monotonic-ms current-monotonic-ms
            #:current-epoch-ms current-epoch-ms))
+        (define approval-authority
+          (make-transaction-void-approval-authority
+           #:current-monotonic-ms current-monotonic-ms
+           #:current-epoch-ms current-epoch-ms))
+        (define transaction-service
+          (make-transaction-service
+           virtual-connection
+           #:catalog-lookup effective-catalog-lookup
+           #:approval-consumer
+           (lambda (connection capability requester command)
+             (consume-transaction-void-approval!/in-transaction!
+              connection
+              capability
+              (transaction-void-approval-authority-issuer-instance-id
+               approval-authority)
+              requester
+              command
+              (current-monotonic-ms)))
+           #:current-epoch-ms current-epoch-ms))
+        (define approval-service
+          (make-transaction-void-approval-service
+           auth-service transaction-service approval-authority))
         (values
-         (make-transaction-service
-          virtual-connection
-          #:catalog-lookup effective-catalog-lookup
-          #:current-epoch-ms current-epoch-ms)
+         transaction-service
          (make-register-operations-service
           virtual-connection
           #:current-epoch-ms current-epoch-ms
           #:generate-shift-id generate-shift-id)
          operator-service
-         auth-service)))
+         auth-service
+         approval-service)))
     (pos-runtime transaction-service
                  register-service
                  operator-service
                  auth-service
+                 approval-service
                  database-path
                  runtime-custodian
                  stopped-box

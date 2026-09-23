@@ -15,7 +15,8 @@
     shift.close.own
     shift.close.any
     shift.cash_summary.read.own
-    shift.cash_summary.read.any))
+    shift.cash_summary.read.any
+    approval.transaction_void))
 
 (define expected-grants
   (hash
@@ -38,7 +39,8 @@
      shift.open.own
      shift.close.own
      shift.cash_summary.read.own
-     shift.cash_summary.read.any)
+     shift.cash_summary.read.any
+     approval.transaction_void)
    'manager
    expected-permissions))
 
@@ -71,6 +73,14 @@
        "shift.open.own"
        "shift.close.own"
        "shift.cash_summary.read.own")))
+
+  (test-case "transaction void approval is an explicit supervisor and manager grant"
+    (check-false
+     (operator-role-authorized? 'cashier 'approval.transaction_void))
+    (check-true
+     (operator-role-authorized? 'supervisor 'approval.transaction_void))
+    (check-true
+     (operator-role-authorized? 'manager 'approval.transaction_void)))
 
   (test-case "ownership is exact case-sensitive identity equality"
     (check-true (operator-owns-resource? "Cashier-A" "Cashier-A"))

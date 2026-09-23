@@ -88,6 +88,49 @@ a line index to the authoritative line list the caller observed. Structural
 index errors return `400`, while an exact nonnegative index that is not present
 is a durable domain rejection.
 
+### Scoped approval for a fresh whole-sale void
+
+Before a **fresh** `void_transaction`, the authenticated owning operator calls
+`POST /approvals/transaction-void` with `Content-Type: application/json` and
+exactly these fields:
+
+```json
+{
+  "command": {
+    "schema_version": 1,
+    "command_id": "cmd-void-001",
+    "transaction_id": "txn-001",
+    "expected_version": 3,
+    "command_type": "void_transaction",
+    "payload": {}
+  },
+  "approver_operator_id": "supervisor-01",
+  "approver_pin": "80421637"
+}
+```
+
+The approver must be a different active supervisor or manager with an enrolled
+PIN. No approver login or register-session switch occurs. The response uses
+`Cache-Control: no-store` and contains `ok: true` plus `approval` with
+`approval_token`, `expires_at_epoch_ms`, `approver_operator_id`, and
+`approver_display_name`. The opaque token expires after 90 monotonic seconds,
+is bound to the exact requester and command, and is unusable after POS Core
+restart or replacement by a new grant for the same command.
+
+The client first persists the exact command for recovery, then POSTs it to
+`/transaction-commands` with its normal bearer and one separate
+`X-Grocery-POS-Approval: gpos_a1_...` header. The approval token is never a
+Schema v1 command field. Supplying the header on a non-void command returns
+`400 unexpected_approval` without consuming a grant. A fresh void lacking a
+valid grant returns `403 approval_required` with
+`retry_same_command_id: true` and creates no durable command effect. The
+client keeps the exact pending command, discards the old token, and seeks a new
+approval for that same ID. An exact already-durable void retry by its original
+actor requires no new approval. Approval credential/role failures use generic
+`403 approval_not_granted`; malformed requests return 400, stale targets 409,
+and genuine security-state unavailability 503. See
+[Supervisor / Manager Approval](../security/scoped-manager-approval.md).
+
 ## Durable command result
 
 A resolved command returns only its durable original receipt metadata:

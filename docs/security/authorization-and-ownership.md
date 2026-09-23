@@ -49,8 +49,9 @@ manager read-any access remains possible.
 
 Cashiers can read and operate their own transactions. Supervisors and managers
 can read across owners but cannot scan, tender, complete, correct, or void
-another operator's transaction. Whole-sale void remains an own-transaction
-operation until Checkpoint 4 introduces manager approval.
+another operator's transaction. A fresh own whole-sale void additionally
+requires a different supervisor/manager's scoped approval; see
+[Supervisor / Manager Approval](scoped-manager-approval.md).
 
 For cashier transaction and receipt reads, a missing or foreign resource uses
 the same not-found-style public result. Knowledge of an ID is not authority.

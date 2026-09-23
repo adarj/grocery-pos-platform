@@ -20,6 +20,9 @@
          (struct-out authentication-session-invalid)
          (struct-out authentication-session-unavailable)
          (struct-out authentication-logout-succeeded)
+         (struct-out authentication-credential-verification-failed)
+         (struct-out authentication-credential-verification-unavailable)
+         authentication-service-with-verified-credential
          authentication-service-login
          authentication-service-authenticate
          authentication-service-logout)
@@ -38,6 +41,8 @@
 (struct authentication-session-invalid () #:transparent)
 (struct authentication-session-unavailable () #:transparent)
 (struct authentication-logout-succeeded () #:transparent)
+(struct authentication-credential-verification-failed () #:transparent)
+(struct authentication-credential-verification-unavailable () #:transparent)
 
 (struct authentication-service
   (connection
@@ -102,7 +107,7 @@
    (operator-identity-display-name operator)
    (operator-identity-role operator)))
 
-(define (attempt-login-under-lock service operator-id pin)
+(define (attempt-credential-under-lock service operator-id pin on-verified)
   (define connection (authentication-service-connection service))
   (define now ((authentication-service-current-epoch-ms service)))
   (define valid-id?
@@ -136,43 +141,67 @@
   ((authentication-service-after-verification service))
   (cond
     [(and eligible? verified?)
-     (define confirmation
-       (confirm-operator-login!
-        connection
-        operator-id
-        (operator-pin-record-password-hash credential)
-        (operator-pin-record-credential-revision credential)))
-     (cond
-       [(operator-login-confirmed? confirmation)
-        (define current-operator
-          (operator-login-confirmed-operator confirmation))
-        (define issued
-          (operator-session-store-issue!
-           (authentication-service-session-store service)
-           operator-id
-           (operator-pin-record-credential-revision credential)))
-        (authentication-login-succeeded
-         (issued-operator-session-access-token issued)
-         (operator->principal current-operator)
-         (issued-operator-session-session-id issued)
-         (issued-operator-session-absolute-expires-at-epoch-ms issued))]
-       [else (authentication-login-failed)])]
+     (on-verified
+      operator
+      (operator-pin-record-password-hash credential)
+      (operator-pin-record-credential-revision credential))]
     [else
      (when (and operator (not blocked?))
        (record-operator-login-failure! connection operator-id now))
-     (authentication-login-failed)]))
+     (authentication-credential-verification-failed)]))
 
-(define (authentication-service-login service operator-id pin)
+(define (authentication-service-with-verified-credential
+         service operator-id pin on-verified)
+  (define who 'authentication-service-with-verified-credential)
   (unless (authentication-service? service)
-    (raise-argument-error
-     'authentication-service-login "authentication-service?" service))
+    (raise-argument-error who "authentication-service?" service))
+  (check-procedure who on-verified 3 "on-verified")
   (call-with-semaphore
    (authentication-service-attempt-lock service)
    (lambda ()
      (with-handlers ([exn:fail?
                       (lambda (_exception)
-                        (authentication-login-unavailable))])
-       (attempt-login-under-lock service operator-id pin)))))
+                        (authentication-credential-verification-unavailable))])
+       (attempt-credential-under-lock
+        service operator-id pin on-verified)))))
+
+(define (authentication-service-login service operator-id pin)
+  (unless (authentication-service? service)
+    (raise-argument-error
+     'authentication-service-login "authentication-service?" service))
+  (define result
+    (authentication-service-with-verified-credential
+     service
+     operator-id
+     pin
+     (lambda (_operator password-hash credential-revision)
+       (define confirmation
+         (confirm-operator-login!
+          (authentication-service-connection service)
+          operator-id
+          password-hash
+          credential-revision))
+       (cond
+         [(operator-login-confirmed? confirmation)
+          (define current-operator
+            (operator-login-confirmed-operator confirmation))
+          (define issued
+            (operator-session-store-issue!
+             (authentication-service-session-store service)
+             operator-id
+             credential-revision))
+          (authentication-login-succeeded
+           (issued-operator-session-access-token issued)
+           (operator->principal current-operator)
+           (issued-operator-session-session-id issued)
+           (issued-operator-session-absolute-expires-at-epoch-ms issued))]
+         [else (authentication-login-failed)]))))
+  (cond
+    [(authentication-credential-verification-failed? result)
+     (authentication-login-failed)]
+    [(authentication-credential-verification-unavailable? result)
+     (authentication-login-unavailable)]
+    [else result]))
 
 (define (authentication-service-authenticate service access-token)
   (unless (authentication-service? service)

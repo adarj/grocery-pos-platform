@@ -15,9 +15,13 @@ import 'models/register_operations.dart';
 import 'models/transaction_command.dart';
 import 'models/transaction_snapshot.dart';
 import 'pos_core_client.dart';
+import 'transaction_void_approval_client.dart';
 
 final class HttpPosCoreClient
-    implements PosCoreClient, PosAuthenticationClient {
+    implements
+        PosCoreClient,
+        PosAuthenticationClient,
+        TransactionVoidApprovalClient {
   HttpPosCoreClient({
     required this.baseUri,
     http.Client? httpClient,
@@ -77,7 +81,83 @@ final class HttpPosCoreClient
 
   @override
   Future<PosCommandResult> executeCommand(TransactionCommand command) async {
-    final response = await _postCommand(command);
+    return _executeCommand(command);
+  }
+
+  @override
+  Future<TransactionVoidApproval> requestTransactionVoidApproval(
+    VoidTransactionCommand command,
+    String approverOperatorId,
+    String approverPin,
+  ) async {
+    final body = await _successfulQueryObject(
+      await _postJson(baseUri.resolve('/approvals/transaction-void'), {
+        'command': command.toJson(),
+        'approver_operator_id': approverOperatorId,
+        'approver_pin': approverPin,
+      }),
+      'transaction void approval response',
+    );
+    const context = 'transaction void approval';
+    final approval = expectJsonObject(
+      requireJsonField(body, 'approval', context),
+      context,
+    );
+    final token = requireJsonString(
+      approval,
+      'approval_token',
+      context,
+      nonEmpty: true,
+    );
+    if (!RegExp(r'^gpos_a1_[0-9a-f]{64}$').hasMatch(token)) {
+      throw const PosCoreInvalidResponseFailure(
+        'Transaction void approval token has invalid format.',
+      );
+    }
+    final returnedApprover = requireJsonString(
+      approval,
+      'approver_operator_id',
+      context,
+      nonEmpty: true,
+    );
+    if (returnedApprover != approverOperatorId) {
+      throw const PosCoreInvalidResponseFailure(
+        'Transaction void approver identity does not match the request.',
+      );
+    }
+    return TransactionVoidApproval(
+      approvalToken: token,
+      expiresAtEpochMs: requireJsonNonnegativeInt(
+        approval,
+        'expires_at_epoch_ms',
+        context,
+      ),
+      approverOperatorId: returnedApprover,
+      approverDisplayName: requireJsonString(
+        approval,
+        'approver_display_name',
+        context,
+        nonEmpty: true,
+      ),
+    );
+  }
+
+  @override
+  Future<PosCommandResult> executeApprovedVoid(
+    VoidTransactionCommand command,
+    String approvalToken,
+  ) {
+    if (!RegExp(r'^gpos_a1_[0-9a-f]{64}$').hasMatch(approvalToken)) {
+      throw ArgumentError.value(null, 'approvalToken', 'invalid token format');
+    }
+    return _executeCommand(command, approvalToken: approvalToken);
+  }
+
+  Future<PosCommandResult> _executeCommand(
+    TransactionCommand command, {
+    String? approvalToken,
+  }) async {
+    final response = await _postCommand(command, approvalToken: approvalToken);
     try {
       final body = _decodeObject(response);
       final ok = requireJsonBool(body, 'ok', 'transaction command response');
@@ -431,12 +511,19 @@ final class HttpPosCoreClient
     return ShiftOperationResult.fromJson(body);
   }
 
-  Future<http.Response> _postCommand(TransactionCommand command) async {
+  Future<http.Response> _postCommand(
+    TransactionCommand command, {
+    String? approvalToken,
+  }) async {
+    final headers = _requestHeaders(json: true);
+    if (approvalToken != null) {
+      headers['X-Grocery-POS-Approval'] = approvalToken;
+    }
     try {
       return await _httpClient
           .post(
             baseUri.resolve('/transaction-commands'),
-            headers: _requestHeaders(json: true),
+            headers: headers,
             body: jsonEncode(command.toJson()),
           )
           .timeout(timeout);

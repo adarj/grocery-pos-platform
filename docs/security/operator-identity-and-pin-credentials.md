@@ -144,9 +144,9 @@ explicit offline restore carry the PHC verifier and revision; there is no
 separate unbacked credential file or pepper. Protect backups as sensitive POS
 data.
 
-Readiness validates current migration 9 DDL and relational invariants but
+Readiness validates current migration 10 DDL and relational invariants but
 performs no Argon2 hashing and does not require every operator to be enrolled.
-Fresh M7 appliance provisioning reaches schema 9 and creates cashier operator
+Fresh M7 appliance provisioning reaches schema 10 and creates cashier operator
 stubs. An unenrolled register can be persistence-ready, but the Checkpoint 2
 terminal remains locked until an administrator explicitly enrolls a usable
 active operator.
@@ -164,7 +164,9 @@ without changing this identity/credential model. See
 Session validity alone does not grant an operation. Checkpoint 3 reloads the
 current role and applies fixed server-side permissions and resource ownership;
 see [Authorization and Ownership](authorization-and-ownership.md). Manager
-approval, security audit, and credential reset remain deferred.
+approval for whole-sale void is now defined by
+[Supervisor / Manager Approval](scoped-manager-approval.md). General security
+audit and credential reset remain deferred.
 
 The files under `docs/acceptance/m6` remain historical evidence for the schema
-6 M6 baseline. They are not regenerated to describe current schema 9 code.
+6 M6 baseline. They are not regenerated to describe current schema 10 code.

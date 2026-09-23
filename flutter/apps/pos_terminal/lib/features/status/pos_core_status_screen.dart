@@ -72,9 +72,7 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
     final mayReadActiveSummary =
         activeShift != null &&
         (activeShift.cashierId == widget.session.operatorId ||
-            widget.session.permits(
-              OperatorPermission.shiftCashSummaryReadAny,
-            ));
+            widget.session.permits(OperatorPermission.shiftCashSummaryReadAny));
     if (mayReadActiveSummary) {
       cashSummary = await widget.client.fetchShiftCashSummary(
         activeShift.shiftId,
@@ -105,6 +103,7 @@ final class _PosCoreStatusScreenState extends State<PosCoreStatusScreen> {
         builder: (context) => CashierScreen(
           controller: widget.cashierController,
           client: widget.client,
+          requesterDisplayName: widget.session.displayName,
         ),
       ),
     );

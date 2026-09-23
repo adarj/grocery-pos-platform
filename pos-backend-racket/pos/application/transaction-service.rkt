@@ -15,7 +15,9 @@
          "../persistence/transaction-command-actor-attribution-store.rkt"
          "../persistence/transaction-command-receipt-store.rkt"
          "../persistence/transaction-command-unit-of-work.rkt"
-         "../security/authorization-policy.rkt")
+         "../persistence/transaction-void-approval-store.rkt"
+         "../security/authorization-policy.rkt"
+         "../security/transaction-void-approval.rkt")
 
 (provide make-transaction-service
          transaction-service?
@@ -47,6 +49,7 @@
          transaction-service-command-id-reused?
          transaction-service-command-id-reused-command-id
          transaction-service-authorization-denied?
+         transaction-service-approval-required?
          transaction-service-command-persistence-failed?
          transaction-service-command-persistence-failed-command-id
          transaction-service-command-persistence-failed-code
@@ -60,6 +63,9 @@
    load-receipt
    load-attribution
    legacy-unattributed?
+   load-approver-attribution
+   legacy-unapproved-void?
+   approval-consumer
    commit-command!
    current-epoch-ms))
 
@@ -98,6 +104,9 @@
 (struct transaction-service-authorization-denied ()
   #:transparent)
 
+(struct transaction-service-approval-required ()
+  #:transparent)
+
 (struct transaction-service-command-persistence-failed
   (command-id code detail message)
   #:transparent)
@@ -121,6 +130,13 @@
          #:legacy-unattributed?
          [legacy-unattributed?
           transaction-command-receipt-legacy-unattributed?]
+         #:load-approver-attribution
+         [load-approver-attribution
+          load-transaction-command-approver-attribution]
+         #:legacy-unapproved-void?
+         [legacy-unapproved-void?
+          transaction-command-receipt-legacy-unapproved-void?]
+         #:approval-consumer [approval-consumer #f]
          #:commit-command!
          [commit-command! commit-transaction-command-outcome!]
          #:current-epoch-ms [current-epoch-ms #f])
@@ -132,6 +148,14 @@
   (check-procedure who load-receipt "load-receipt")
   (check-procedure who load-attribution "load-attribution")
   (check-procedure who legacy-unattributed? "legacy-unattributed?")
+  (check-procedure who load-approver-attribution "load-approver-attribution")
+  (check-procedure who legacy-unapproved-void? "legacy-unapproved-void?")
+  (when approval-consumer
+    (unless (and (procedure? approval-consumer)
+                 (procedure-arity-includes? approval-consumer 4))
+      (raise-arguments-error
+       who "expected a four-argument approval consumer"
+       "approval-consumer" approval-consumer)))
   (check-procedure who commit-command! "commit-command!")
   (when current-epoch-ms
     (check-procedure who current-epoch-ms "current-epoch-ms"))
@@ -142,6 +166,9 @@
    load-receipt
    load-attribution
    legacy-unattributed?
+   load-approver-attribution
+   legacy-unapproved-void?
+   approval-consumer
    commit-command!
    current-epoch-ms))
 
@@ -341,6 +368,8 @@
       (transaction-command-commit-id-reused-command-id result))]
     [(transaction-command-commit-authorization-denied? result)
      (transaction-service-authorization-denied)]
+    [(transaction-command-commit-approval-required? result)
+     (transaction-service-approval-required)]
     [(transaction-command-commit-failed? result)
      (transaction-service-command-persistence-failed
       (transaction-command-command-id command)
@@ -353,15 +382,26 @@
       "command unit of work returned an unsupported result: ~e"
       result)]))
 
-(define (commit-plan service principal plan)
+(define (commit-plan service principal plan [approval-capability #f])
   (define command
     (transaction-command-commit-plan-command plan))
+  (define actor-bound
+    (transaction-command-commit-plan-with-actor
+     plan (authenticated-operator-operator-id principal)))
+  (define approval-bound
+    (if (and approval-capability
+             (void-transaction-command? command)
+             (transaction-service-approval-consumer service))
+        (transaction-command-commit-plan-with-approval
+         actor-bound
+         approval-capability
+         (transaction-service-approval-consumer service))
+        actor-bound))
   (map-commit-result
    command
    ((transaction-service-commit-command! service)
     (transaction-service-connection service)
-    (transaction-command-commit-plan-with-actor
-     plan (authenticated-operator-operator-id principal)))))
+    approval-bound)))
 
 (define (current-epoch-ms service)
   (define clock (transaction-service-current-epoch-ms service))
@@ -637,7 +677,8 @@
       "unsupported existing-transaction command: ~e"
       command)]))
 
-(define (dispatch-existing-transaction-command service principal command)
+(define (dispatch-existing-transaction-command
+         service principal command approval-capability)
   (define current
     (load-transaction-unrestricted
      service
@@ -645,11 +686,12 @@
   (cond
     [(transaction-service-recovery-failed? current) current]
     [(transaction-service-not-found? current)
-     (commit-plan
+      (commit-plan
       service
       principal
       (receipt-only-plan
-       command 0 'not-found "transaction_not_found"))]
+       command 0 'not-found "transaction_not_found")
+      approval-capability)]
     [(transaction-service-success? current)
      (define actual-version
        (transaction-service-success-version current))
@@ -668,7 +710,8 @@
           command
           actual-version
           'version-conflict
-          "stale_expected_version"))]
+          "stale_expected_version")
+         approval-capability)]
        [else
         (commit-plan
          service
@@ -677,17 +720,19 @@
           service
           command
           (transaction-service-success-transaction current)
-          actual-version))])]
+          actual-version)
+         approval-capability)])]
     [else
      (error
       'dispatch-existing-transaction-command
       "transaction query returned an unsupported result: ~e"
       current)]))
 
-(define (dispatch-new-command service principal command)
+(define (dispatch-new-command service principal command approval-capability)
   (if (start-transaction-command? command)
       (dispatch-start-command service principal command)
-      (dispatch-existing-transaction-command service principal command)))
+      (dispatch-existing-transaction-command
+       service principal command approval-capability)))
 
 (define (receipt-recovery-failure command result)
   (transaction-service-recovery-failed
@@ -698,12 +743,21 @@
    (receipt-load-failed-detail result)
    (receipt-load-failed-message result)))
 
-(define (transaction-service-execute-command service principal command)
+(define (transaction-service-execute-command
+         service principal command #:approval-capability [approval-capability #f])
   (define who 'transaction-service-execute-command)
   (check-service who service)
   (check-principal who principal)
   (unless (transaction-command? command)
     (raise-argument-error who "transaction-command?" command))
+  (when (and approval-capability
+             (not (transaction-void-approval-capability? approval-capability)))
+    (raise-argument-error
+     who "(or/c #f transaction-void-approval-capability?)"
+     approval-capability))
+  (when (and approval-capability (not (void-transaction-command? command)))
+    (raise-arguments-error
+     who "approval is valid only for void_transaction" "command" command))
 
   ;; Known identity is resolved before journal recovery, catalog access, or
   ;; domain decision. The unit of work repeats this check under the final
@@ -724,12 +778,23 @@
        ((transaction-service-legacy-unattributed? service)
         (transaction-service-connection service)
         (transaction-command-command-id command)))
+     (define approver-attribution
+       ((transaction-service-load-approver-attribution service)
+        (transaction-service-connection service)
+        (transaction-command-command-id command)))
+     (define legacy-unapproved-void?
+       ((transaction-service-legacy-unapproved-void? service)
+        (transaction-service-connection service)
+        (transaction-command-command-id command)))
+     (define void-receipt?
+       (void-transaction-command?
+        (transaction-command-receipt-command existing)))
      (cond
        [(or (and attribution legacy-unattributed?)
             (and (not attribution) (not legacy-unattributed?)))
         ;; A receipt must carry exactly one immutable provenance category.
         ;; Missing modern attribution and contradictory classification both
-        ;; fail closed without exposing the stored payload or outcome.
+       ;; fail closed without exposing the stored payload or outcome.
         (transaction-service-authorization-denied)]
        [(and attribution
              (not
@@ -737,6 +802,13 @@
                (authenticated-operator-operator-id principal)
                (transaction-command-actor-attribution-operator-id
                 attribution))))
+        ;; Another actor cannot probe the command's approval provenance.
+        (transaction-service-authorization-denied)]
+       [(if void-receipt?
+            (or (and approver-attribution legacy-unapproved-void?)
+                (and (not approver-attribution)
+                     (not legacy-unapproved-void?)))
+            (or approver-attribution legacy-unapproved-void?))
         (transaction-service-authorization-denied)]
        [(equal? (transaction-command-receipt-command existing) command)
         (transaction-service-command-resolved existing)]
@@ -747,9 +819,10 @@
      (receipt-recovery-failure command receipt-result)]
     [(receipt-load-not-found? receipt-result)
      (if (operator-role-authorized?
-          (authenticated-operator-role principal)
+         (authenticated-operator-role principal)
           'transaction.operate.own)
-         (dispatch-new-command service principal command)
+         (dispatch-new-command
+          service principal command approval-capability)
          (transaction-service-authorization-denied))]
     [else
      (error

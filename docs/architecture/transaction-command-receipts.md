@@ -271,6 +271,24 @@ compared. Exact pre-v9 receipts remain recoverable but are never retroactively
 attributed. Actor metadata is not read by transaction replay or receipt
 derivation. See [Authorization and Ownership](../security/authorization-and-ownership.md).
 
+## Whole-sale void approval provenance
+
+Schema v10 stores an approved fresh void's independently authenticated
+approver ID, credential revision, approval ID and approval epoch beside the
+durable command receipt. The grant is consumed and that evidence, requester
+actor attribution, receipt, event and operational effect commit in the same
+writer transaction. A durable rejected outcome also consumes approval and
+carries both actors. Transaction replay and canonical receipt derivation do
+not use this security metadata.
+
+Migration v10 marks exactly the existing void receipts as legacy unapproved;
+it invents no approver. Every void receipt must have exactly one of modern
+approver attribution or the explicit legacy marker. Missing modern evidence
+fails closed rather than being mistaken for historical. The same original
+requester can recover an exact durable void without another approval, while a
+different requester is denied before payload, outcome or approval provenance
+is disclosed. See [Supervisor / Manager Approval](../security/scoped-manager-approval.md).
+
 ## Load and corruption handling
 
 Lookup by global command ID returns found, not-found, or failed. Not-found is a

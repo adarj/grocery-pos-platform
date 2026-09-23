@@ -4,13 +4,16 @@
          "../application/transaction-command-receipt.rkt"
          "../application/transaction-command.rkt"
          "../domain/transaction-command-actor-attribution.rkt"
+         "../domain/transaction-void-approval.rkt"
          "../domain/transaction-event.rkt"
          "sqlite-transaction-event-store.rkt"
          "transaction-command-actor-attribution-store.rkt"
-         "transaction-command-receipt-store.rkt")
+         "transaction-command-receipt-store.rkt"
+         "transaction-void-approval-store.rkt")
 
 (provide (struct-out transaction-command-commit-plan)
          transaction-command-commit-plan-with-actor
+         transaction-command-commit-plan-with-approval
          transaction-command-commit-plan-with-pre-append-effect
          transaction-command-commit-plan-with-post-append-effect
          (struct-out transaction-command-operational-effect-succeeded)
@@ -19,6 +22,7 @@
          (struct-out transaction-command-commit-resolved)
          (struct-out transaction-command-commit-id-reused)
          (struct-out transaction-command-commit-authorization-denied)
+         (struct-out transaction-command-commit-approval-required)
          (struct-out transaction-command-commit-failed)
          commit-transaction-command-outcome!)
 
@@ -34,7 +38,9 @@
    events
    [pre-append-effect #:auto #:mutable]
    [post-append-effect #:auto #:mutable]
-   [actor-operator-id #:auto #:mutable])
+   [actor-operator-id #:auto #:mutable]
+   [approval-capability #:auto #:mutable]
+   [approval-consumer #:auto #:mutable])
   #:auto-value #f
   #:transparent
   #:guard
@@ -96,6 +102,25 @@
      "requested operator ID" operator-id))
   (set-transaction-command-commit-plan-actor-operator-id!
    plan (string->immutable-string operator-id))
+  plan)
+
+(define (transaction-command-commit-plan-with-approval
+         plan capability consume-approval!)
+  (define who 'transaction-command-commit-plan-with-approval)
+  (unless (transaction-command-commit-plan? plan)
+    (raise-argument-error who "transaction-command-commit-plan?" plan))
+  (unless (void-transaction-command?
+           (transaction-command-commit-plan-command plan))
+    (raise-arguments-error
+     who "approval may be attached only to void_transaction" "plan" plan))
+  (unless capability
+    (raise-argument-error who "approval-capability" capability))
+  (unless (and (procedure? consume-approval!)
+               (procedure-arity-includes? consume-approval! 4))
+    (raise-argument-error who "four-argument-procedure?" consume-approval!))
+  (set-transaction-command-commit-plan-approval-capability! plan capability)
+  (set-transaction-command-commit-plan-approval-consumer!
+   plan consume-approval!)
   plan)
 
 ;; Operational coordination is attached only by application composition after
@@ -167,6 +192,9 @@
 (struct transaction-command-commit-authorization-denied ()
   #:transparent)
 
+(struct transaction-command-commit-approval-required ()
+  #:transparent)
+
 (struct transaction-command-commit-failed (code detail message)
   #:transparent)
 
@@ -198,7 +226,8 @@
    (receipt-load-failed-message result)))
 
 (define (insert-receipt-or-abort!
-         connection receipt actor-operator-id insert-receipt! insert-attribution!)
+         connection receipt actor-operator-id approver-attribution
+         insert-receipt! insert-attribution! insert-approver-attribution!)
   (define result
     (insert-receipt! connection receipt))
   (cond
@@ -209,6 +238,8 @@
        (transaction-command-command-id
         (transaction-command-receipt-command receipt))
        actor-operator-id))
+     (when approver-attribution
+       (insert-approver-attribution! connection approver-attribution))
      receipt]
     [(receipt-insert-rejected? result)
      (abort-transaction!
@@ -223,10 +254,12 @@
       result)]))
 
 (define (resolved-after-insert
-         connection receipt actor-operator-id insert-receipt! insert-attribution!)
+         connection receipt actor-operator-id approver-attribution
+         insert-receipt! insert-attribution! insert-approver-attribution!)
   (transaction-command-commit-resolved
    (insert-receipt-or-abort!
-    connection receipt actor-operator-id insert-receipt! insert-attribution!)))
+    connection receipt actor-operator-id approver-attribution
+    insert-receipt! insert-attribution! insert-approver-attribution!)))
 
 (define (resolve-unused-command!
          connection
@@ -234,7 +267,9 @@
          prepared-events
          insert-receipt!
          insert-attribution!
+         insert-approver-attribution!
          stream-version)
+  (let/ec return
   (define command
     (transaction-command-commit-plan-command plan))
   (define transaction-id
@@ -243,6 +278,25 @@
     (transaction-command-commit-plan-decision-stream-version plan))
   (define actor-operator-id
     (transaction-command-commit-plan-actor-operator-id plan))
+  ;; Approval is checked and consumed before any stream/version decision, but
+  ;; inside this same outer writer transaction. Consequently every durable
+  ;; void outcome consumes one grant and carries approver evidence, while a
+  ;; later persistence abort rolls the grant deletion back.
+  (define approval-result
+    (and
+     (void-transaction-command? command)
+     (let ([capability
+            (transaction-command-commit-plan-approval-capability plan)]
+           [consumer
+            (transaction-command-commit-plan-approval-consumer plan)])
+       (and capability consumer
+            (consumer connection capability actor-operator-id command)))))
+  (when (and (void-transaction-command? command)
+             (not (transaction-void-approval-consumed? approval-result)))
+    (return (transaction-command-commit-approval-required)))
+  (define approver-attribution
+    (and approval-result
+         (transaction-void-approval-consumed-attribution approval-result)))
   (define actual-version
     (stream-version connection transaction-id))
 
@@ -256,8 +310,9 @@
        command
        'version-conflict
        "stream_version_conflict"
-       actual-version)
-      actor-operator-id insert-receipt! insert-attribution!)]
+      actual-version)
+      actor-operator-id approver-attribution
+      insert-receipt! insert-attribution! insert-approver-attribution!)]
     [(eq? (transaction-command-commit-plan-outcome-kind plan) 'accepted)
      (define effect
        (transaction-command-commit-plan-pre-append-effect plan))
@@ -276,7 +331,8 @@
           (transaction-command-operational-effect-rejected-outcome-code
            effect-result)
           decision-version)
-         actor-operator-id insert-receipt! insert-attribution!)]
+         actor-operator-id approver-attribution
+         insert-receipt! insert-attribution! insert-approver-attribution!)]
        [(transaction-command-operational-effect-failed? effect-result)
         (abort-transaction!
          (transaction-command-commit-failed
@@ -307,7 +363,8 @@
                 'accepted
                 (transaction-command-commit-plan-outcome-code plan)
                 (journal-append-succeeded-new-version append-result))
-               actor-operator-id insert-receipt! insert-attribution!)]
+               actor-operator-id approver-attribution
+               insert-receipt! insert-attribution! insert-approver-attribution!)]
              [(transaction-command-operational-effect-failed? post-result)
               (abort-transaction!
                (transaction-command-commit-failed
@@ -350,7 +407,8 @@
        (transaction-command-commit-plan-outcome-kind plan)
        (transaction-command-commit-plan-outcome-code plan)
        decision-version)
-      actor-operator-id insert-receipt! insert-attribution!)]))
+      actor-operator-id approver-attribution
+      insert-receipt! insert-attribution! insert-approver-attribution!)])))
 
 (define (commit-transaction-command-outcome!
          connection
@@ -359,6 +417,15 @@
          [insert-receipt! insert-transaction-command-receipt!]
          #:insert-attribution!
          [insert-attribution! insert-transaction-command-actor-attribution!]
+         #:insert-approver-attribution!
+         [insert-approver-attribution!
+          insert-transaction-command-approver-attribution!]
+         #:load-approver-attribution
+         [load-approver-attribution
+          load-transaction-command-approver-attribution]
+         #:legacy-unapproved-void?
+         [legacy-unapproved-void?
+          transaction-command-receipt-legacy-unapproved-void?]
          #:stream-version
          [stream-version transaction-stream-version/in-transaction])
   (define who 'commit-transaction-command-outcome!)
@@ -384,6 +451,10 @@
      connection))
   (check-procedure who insert-receipt! "insert-receipt!")
   (check-procedure who insert-attribution! "insert-attribution!")
+  (check-procedure
+   who insert-approver-attribution! "insert-approver-attribution!")
+  (check-procedure who load-approver-attribution "load-approver-attribution")
+  (check-procedure who legacy-unapproved-void? "legacy-unapproved-void?")
   (check-procedure who stream-version "stream-version")
 
   ;; Complete Schema v1 serialization before BEGIN IMMEDIATE. The prepared
@@ -416,6 +487,13 @@
           (define legacy-unattributed?
             (transaction-command-receipt-legacy-unattributed?
              connection command-id))
+          (define approver-attribution
+            (load-approver-attribution connection command-id))
+          (define legacy-unapproved-void-receipt?
+            (legacy-unapproved-void? connection command-id))
+          (define void-receipt?
+            (void-transaction-command?
+             (transaction-command-receipt-command existing)))
           (cond
             [(or (and attribution legacy-unattributed?)
                  (and (not attribution) (not legacy-unattributed?)))
@@ -428,6 +506,16 @@
                     (transaction-command-actor-attribution-operator-id
                      attribution)
                     (transaction-command-commit-plan-actor-operator-id plan))))
+             ;; Requester ownership precedes any approval-provenance probe.
+             (transaction-command-commit-authorization-denied)]
+            [(if void-receipt?
+                 (or (and approver-attribution
+                          legacy-unapproved-void-receipt?)
+                     (and (not approver-attribution)
+                          (not legacy-unapproved-void-receipt?)))
+                 (or approver-attribution legacy-unapproved-void-receipt?))
+             ;; Modern missing approval evidence is never reclassified as a
+             ;; historical unapproved void merely because the row is absent.
              (transaction-command-commit-authorization-denied)]
             [(equal? (transaction-command-receipt-command existing) command)
              (transaction-command-commit-resolved existing)]
@@ -441,6 +529,7 @@
            prepared-events
            insert-receipt!
            insert-attribution!
+           insert-approver-attribution!
            stream-version)]
          [else
           (error

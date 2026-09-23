@@ -45,9 +45,9 @@
        (check-equal? (hash-ref result 'journal_mode) "wal")
        (define migrations (hash-ref result 'migrations))
        (check-equal? (hash-ref migrations 'status) "current")
-       (check-equal? (hash-ref migrations 'highest_applied_version) 9)
-       (check-equal? (hash-ref migrations 'current_supported_version) 9)
-       (check-equal? (length (hash-ref migrations 'history)) 9)
+       (check-equal? (hash-ref migrations 'highest_applied_version) 10)
+       (check-equal? (hash-ref migrations 'current_supported_version) 10)
+       (check-equal? (length (hash-ref migrations 'history)) 10)
        ;; Canonical migration names are structural metadata; table rows and
        ;; transaction payload fields are not part of diagnostic output.
        (check-false (regexp-match? #rx"event_json|command_json" output)))))

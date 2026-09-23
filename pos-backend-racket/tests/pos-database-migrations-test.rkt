@@ -78,10 +78,20 @@ SQL
         #(6 "create_shift_cash_accountability")
         #(7 "create_operator_identity_credentials")
         #(8 "create_operator_login_throttle")
-        #(9 "create_transaction_command_actor_attributions")))
+        #(9 "create_transaction_command_actor_attributions")
+        #(10 "create_transaction_void_approvals")))
+
+(define (rewind-current-fixture-to-v9! connection)
+  (migrate-pos-database! connection)
+  (query-exec
+   connection
+   "DROP TABLE transaction_command_legacy_unapproved_void_receipts")
+  (query-exec connection "DROP TABLE transaction_command_approver_attributions")
+  (query-exec connection "DROP TABLE transaction_void_approval_grants")
+  (query-exec connection "DELETE FROM pos_schema_migrations WHERE version = 10"))
 
 (define (rewind-current-fixture-to-v8! connection)
-  (migrate-pos-database! connection)
+  (rewind-current-fixture-to-v9! connection)
   (query-exec connection "DROP TABLE transaction_command_actor_attributions")
   (query-exec
    connection
@@ -89,7 +99,7 @@ SQL
   (query-exec connection "DELETE FROM pos_schema_migrations WHERE version = 9"))
 
 (define (rewind-current-fixture-to-v7! connection)
-  (migrate-pos-database! connection)
+  (rewind-current-fixture-to-v9! connection)
   (query-exec connection "DROP TABLE transaction_command_actor_attributions")
   (query-exec
    connection
@@ -101,7 +111,7 @@ SQL
   ;; The v1-v6 definitions remain owned by the production migrator. Rewinding
   ;; only the newly owned v7 objects gives this test a populated, valid v6
   ;; prefix without copying historical SQL into another fixture.
-  (migrate-pos-database! connection)
+  (rewind-current-fixture-to-v9! connection)
   (query-exec connection "DROP TABLE transaction_command_actor_attributions")
   (query-exec
    connection
@@ -215,7 +225,7 @@ SQL
      (lambda (connection)
        (install-frozen-v1! connection)
 
-       (check-equal? current-pos-database-schema-version 9)
+       (check-equal? current-pos-database-schema-version 10)
        (check-equal?
         (read-pos-database-migration-history connection)
         (list #(1 "create_transaction_events")))
@@ -269,7 +279,7 @@ SQL
 
        (query-exec
         connection
-        "INSERT INTO pos_schema_migrations (version, name) VALUES (10, 'unknown')")
+        "INSERT INTO pos_schema_migrations (version, name) VALUES (11, 'unknown')")
        (define unsupported-history
          (read-pos-database-migration-history connection))
        (check-equal?
@@ -279,7 +289,7 @@ SQL
         exn:fail?
         (lambda () (validate-pos-database-schema! connection))))))
 
-  (test-case "fresh database migrates through versions 1 through 9"
+  (test-case "fresh database migrates through versions 1 through 10"
     (call-with-test-database
      (lambda (connection)
        (migrate-pos-database! connection)
@@ -326,6 +336,119 @@ SQL
          connection
         "SELECT version, name FROM pos_schema_migrations ORDER BY version")
         expected-migration-history))))
+
+  (test-case "v10 classifies only historical void receipts without inventing approval"
+    (call-with-test-database
+     (lambda (connection)
+       (rewind-current-fixture-to-v9! connection)
+       (query-exec connection "PRAGMA foreign_keys = ON")
+       (for ([row (in-list
+                   (list
+                    (list "cmd-v9-scan" "txn-v9" "scan_barcode"
+                          "{\"schema_version\":1,\"command_id\":\"cmd-v9-scan\",\"transaction_id\":\"txn-v9\",\"expected_version\":1,\"command_type\":\"scan_barcode\",\"payload\":{\"barcode\":\"049000001234\"}}")
+                    (list "cmd-v9-void" "txn-v9" "void_transaction"
+                          "{\"schema_version\":1,\"command_id\":\"cmd-v9-void\",\"transaction_id\":\"txn-v9\",\"expected_version\":2,\"command_type\":\"void_transaction\",\"payload\":{}}")))])
+         (query-exec
+          connection
+          #<<SQL
+INSERT INTO transaction_command_receipts
+  (command_id, transaction_id, command_schema_version, command_type,
+   expected_version, command_json, outcome_kind, outcome_code,
+   outcome_stream_version)
+VALUES (?, ?, 1, ?, ?, ?, 'accepted', 'accepted', 3)
+SQL
+          (first row)
+          (second row)
+          (third row)
+          (if (string=? (third row) "void_transaction") 2 1)
+          (fourth row))
+         (query-exec
+          connection
+          "INSERT INTO transaction_command_actor_attributions VALUES (?, 'Alice')"
+          (first row)))
+       (define receipts-before
+         (query-rows
+          connection
+          "SELECT * FROM transaction_command_receipts ORDER BY command_id"))
+       (define actors-before
+         (query-rows
+          connection
+          "SELECT * FROM transaction_command_actor_attributions ORDER BY command_id"))
+
+       (migrate-pos-database! connection)
+
+       (check-equal?
+        (query-rows
+         connection
+         "SELECT * FROM transaction_command_receipts ORDER BY command_id")
+        receipts-before)
+       (check-equal?
+        (query-rows
+         connection
+         "SELECT * FROM transaction_command_actor_attributions ORDER BY command_id")
+        actors-before)
+       (check-equal?
+        (query-list
+         connection
+         "SELECT command_id FROM transaction_command_legacy_unapproved_void_receipts ORDER BY command_id")
+        '("cmd-v9-void"))
+       (check-equal?
+        (query-value
+         connection
+         "SELECT COUNT(*) FROM transaction_command_approver_attributions")
+        0)
+       (check-equal?
+        (query-value connection "SELECT COUNT(*) FROM transaction_void_approval_grants")
+        0)
+       (check-equal?
+        (query-rows
+         connection
+         "PRAGMA table_info('transaction_command_approver_attributions')")
+        (list (vector 0 "command_id" "TEXT" 1 sql-null 1)
+              (vector 1 "approval_id" "TEXT" 1 sql-null 0)
+              (vector 2 "approver_operator_id" "TEXT" 1 sql-null 0)
+              (vector 3 "approver_credential_revision" "INTEGER" 1 sql-null 0)
+              (vector 4 "approved_at_epoch_ms" "INTEGER" 1 sql-null 0)))
+       (migrate-pos-database! connection)
+       (check-equal?
+        (query-list
+         connection
+         "SELECT command_id FROM transaction_command_legacy_unapproved_void_receipts")
+        '("cmd-v9-void")))))
+
+  (test-case "v10 rejects missing, conflicting, and non-void approval provenance"
+    (for ([kind (in-list '(void-missing void-both scan-modern scan-legacy
+                           orphan-modern orphan-legacy))])
+      (call-with-test-database
+       (lambda (connection)
+         (migrate-pos-database! connection)
+         (query-exec connection "PRAGMA foreign_keys = OFF")
+         (unless (memq kind '(orphan-modern orphan-legacy))
+           (define void? (memq kind '(void-missing void-both)))
+           (query-exec
+            connection
+            #<<SQL
+INSERT INTO transaction_command_receipts
+  (command_id, transaction_id, command_schema_version, command_type,
+   expected_version, command_json, outcome_kind, outcome_code,
+   outcome_stream_version)
+VALUES ('cmd-corrupt', 'txn-corrupt', 1, ?, 0, ?,
+        'not_found', 'transaction_not_found', 0)
+SQL
+            (if void? "void_transaction" "scan_barcode")
+            (if void?
+                "{\"schema_version\":1,\"command_id\":\"cmd-corrupt\",\"transaction_id\":\"txn-corrupt\",\"expected_version\":0,\"command_type\":\"void_transaction\",\"payload\":{}}"
+                "{\"schema_version\":1,\"command_id\":\"cmd-corrupt\",\"transaction_id\":\"txn-corrupt\",\"expected_version\":0,\"command_type\":\"scan_barcode\",\"payload\":{\"barcode\":\"049000001234\"}}"))
+           (query-exec connection
+                       "INSERT INTO transaction_command_legacy_unattributed_receipts VALUES ('cmd-corrupt')"))
+         (when (memq kind '(void-both scan-modern orphan-modern))
+           (query-exec connection
+                       "INSERT INTO transaction_command_approver_attributions VALUES ('cmd-corrupt', 'approval-corrupt', 'Sam', 1, 1000)"))
+         (when (memq kind '(void-both scan-legacy orphan-legacy))
+           (query-exec connection
+                       "INSERT INTO transaction_command_legacy_unapproved_void_receipts VALUES ('cmd-corrupt')"))
+         (check-exn exn:fail?
+                    (lambda () (validate-pos-database-schema! connection)))))))
 
   (test-case "v9 adds strict command actor attribution without fabricating history"
     (call-with-test-database
@@ -658,7 +781,7 @@ SQL
        (migrate-pos-database! connection)
        (query-exec
         connection
-        "INSERT INTO pos_schema_migrations (version, name) VALUES (10, 'unknown')")
+        "INSERT INTO pos_schema_migrations (version, name) VALUES (11, 'unknown')")
        (check-exn exn:fail?
                   (lambda () (migrate-pos-database! connection)))))
 
