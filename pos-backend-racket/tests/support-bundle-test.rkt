@@ -8,7 +8,9 @@
          racket/list
          racket/string
          rackunit
+         "../pos/domain/security-audit-event.rkt"
          "../pos/domain/transaction-event.rkt"
+         "../pos/persistence/security-audit-store.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt"
          "../pos/runtime.rkt"
          "../pos/support/support-bundle.rkt")
@@ -19,6 +21,7 @@
 (define command-actor-sentinel "COMMAND_ACTOR_MUST_NOT_BE_EXPORTED")
 (define approval-id-sentinel "APPROVAL_ID_MUST_NOT_BE_EXPORTED")
 (define approver-id-sentinel "APPROVER_ID_MUST_NOT_BE_EXPORTED")
+(define audit-operator-sentinel "AUDIT_OPERATOR_ID_MUST_NOT_BE_EXPORTED")
 (define approval-token-sentinel
   "gpos_a1_APPROVAL_TOKEN_MUST_NOT_BE_EXPORTED")
 (define approval-digest-sentinel "APPROVAL_DIGEST_1234567890123456")
@@ -34,6 +37,7 @@
         command-actor-sentinel
         approval-id-sentinel
         approver-id-sentinel
+        audit-operator-sentinel
         approval-token-sentinel
         approval-digest-sentinel
         pin-sentinel
@@ -132,7 +136,13 @@ SQL
       (db:query-exec
        connection
        "INSERT INTO transaction_command_approver_attributions VALUES ('support-void-command', ?, ?, 1, 1000)"
-       approval-id-sentinel approver-id-sentinel))
+       approval-id-sentinel approver-id-sentinel)
+      (append-security-audit-event!
+       connection
+       (operator-created-event audit-operator-sentinel 'cashier)
+       #:source-kind 'root_cli
+       #:source-instance-id "audit_root_cli_support_privacy"
+       #:occurred-at-epoch-ms 1000))
     (lambda () (db:disconnect connection))))
 
 (define (fake-platform-provider)
@@ -251,7 +261,7 @@ SQL
          (call-with-input-file
           (build-path extraction-path "database.json") read-json))
        (check-equal? (hash-ref database 'migration_status) "current")
-       (check-equal? (hash-ref database 'current_supported_migration_version) 10)
+       (check-equal? (hash-ref database 'current_supported_migration_version) 11)
        (check-false (hash-has-key? database 'path))
        (check-false (hash-has-key? database 'diagnostic))
 

@@ -84,8 +84,9 @@ succeeded:
 open dedicated SQLite connection in create mode
   -> establish and verify WAL
   -> establish and verify per-connection durability policy
-  -> run and validate POS database migrations through v10
+  -> run and validate POS database migrations through v11 and the audit chain
   -> disconnect dedicated startup connection
+  -> append required runtime.started before accepting HTTP requests
   -> construct request-time database resources
   -> construct HTTP application
   -> start listener
@@ -381,7 +382,7 @@ Focused file-backed tests establish:
   transaction-history loss;
 - normal `read/write` production opening rejecting a non-WAL database;
 - policy failure disconnecting the newly opened connection;
-- fresh runtime migration through schema v10;
+- fresh runtime migration through schema v11;
 - an empty persistent catalog rejecting the former development barcode rather
   than falling back to a fake;
 - active/inactive/unknown persistent catalog lookup behavior and exact
@@ -426,7 +427,7 @@ Focused file-backed tests establish:
 This runtime composition and HTTP adapter do not add:
 
 - remote API access or remote authentication;
-- manager approval, credential reset, or general security audit events;
+- credential reset or remote audit export;
 - catalog HTTP administration, patch updates, or cloud synchronization;
 - application-level busy retry/backoff or whole-command retry;
 - custom checkpoint scheduling, manual checkpoint tooling, or WAL metrics;

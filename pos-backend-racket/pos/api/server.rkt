@@ -107,12 +107,16 @@
 (define (authenticated-principal authenticated)
   (authentication-session-authenticated-principal authenticated))
 
-(define (with-route-permission authenticated permission handler)
+(define (with-route-permission authentication-service authenticated permission
+                               resource-kind handler)
   (define principal (authenticated-principal authenticated))
   (if (operator-role-authorized?
        (authenticated-operator-role principal) permission)
       (handler principal)
-      (authorization-denied-response)))
+      (begin
+        (authentication-service-record-authorization-denial!
+         authentication-service authenticated permission resource-kind)
+        (authorization-denied-response))))
 
 (define (make-app transaction-service
                   [register-service #f]
@@ -179,8 +183,10 @@
               authentication-service req
               (lambda (_token authenticated)
                 (with-route-permission
+                 authentication-service
                  authenticated
                  'transaction.operate.own
+                 'transaction_command
                  (lambda (principal)
                    (handle-transaction-command-request
                     transaction-service principal req)))))
@@ -193,8 +199,10 @@
               authentication-service req
               (lambda (_token authenticated)
                 (with-route-permission
+                 authentication-service
                  authenticated
                  'transaction.operate.own
+                 'transaction_command
                  (lambda (principal)
                    (handle-transaction-void-approval-request
                     approval-service principal req)))))
@@ -206,8 +214,10 @@
               authentication-service req
               (lambda (_token authenticated)
                 (with-route-permission
+                 authentication-service
                  authenticated
                  'register.read
+                 'register
                  (lambda (_principal)
                    (handle-register-context-request register-service)))))
              (method-not-allowed-response #"GET"))]
@@ -218,8 +228,10 @@
               authentication-service req
               (lambda (_token authenticated)
                 (with-route-permission
+                 authentication-service
                  authenticated
                  'cashier_directory.read
+                 'cashier_directory
                  (lambda (_principal)
                    (handle-active-cashiers-request register-service)))))
              (method-not-allowed-response #"GET"))]
@@ -230,8 +242,10 @@
               authentication-service req
               (lambda (_token authenticated)
                 (with-route-permission
+                 authentication-service
                  authenticated
                  'shift.open.own
+                 'shift
                  (lambda (principal)
                    (handle-open-shift-request
                     register-service principal req)))))

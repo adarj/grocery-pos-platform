@@ -49,5 +49,8 @@ modern approver attribution fails closed.
 Approver identity and grant rows belong in validated SQLite backup, but an
 unconsumed grant restored under a new process instance remains unusable.
 Support bundles exclude the DB, grant rows, token digests, approver
-attributions, operator rosters, PINs and tokens. A general security audit
-ledger for issuance, denial and failed attempts is deferred to Checkpoint 5.
+attributions, operator rosters, PINs and tokens. Checkpoint 5 now records
+grant issuance, rejected ceremonies, approval-required decisions, and fresh
+approved void resolution in the separate
+[local security audit ledger](security-audit-ledger.md). That ledger does not
+replace command-local approver attribution.

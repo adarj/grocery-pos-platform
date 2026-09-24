@@ -1,6 +1,7 @@
 #lang racket
 
 (require (prefix-in db: db)
+         racket/file
          rackunit
          "../pos/application/authentication-service.rkt"
          (rename-in "../pos/application/register-operations-service.rkt"
@@ -10,6 +11,9 @@
          "../pos/domain/register-operations.rkt"
          "../pos/persistence/operational-configuration-snapshot-codec.rkt"
          "../pos/persistence/pos-database-migrations.rkt"
+         "../pos/persistence/security-audit-event-codec.rkt"
+         "../pos/persistence/security-audit-store.rkt"
+         "../pos/persistence/sqlite-connection.rkt"
          "../pos/persistence/sqlite-register-operations.rkt")
 
 (define (cashier-principal cashier-id)
@@ -221,6 +225,93 @@ SQL
          "SELECT COUNT(*) FROM operator_pin_credentials WHERE operator_id = 'cashier-new'")
         0))))
 
+  (test-case "configuration activation audits only newly created operator principals"
+    (call-with-database
+     (lambda (connection)
+       (activate-operational-configuration! connection (snapshot config-json))
+       (check-equal?
+        (for/list ([event-json
+                    (in-list
+                     (db:query-list
+                      connection
+                      "SELECT event_json FROM security_audit_events ORDER BY sequence"))])
+          (hash-ref
+           (decode-security-audit-event-json 'operator.created event-json)
+           'operator_id))
+        '("cashier-alice" "cashier-bob" "cashier-old"))
+       (activate-operational-configuration! connection (snapshot config-json))
+       (check-equal?
+        (db:query-value
+         connection
+         "SELECT COUNT(*) FROM security_audit_events WHERE event_type = 'operator.created'")
+        3)
+       (check-true
+        (security-audit-ledger-valid?
+         (verify-security-audit-ledger connection))))))
+
+  (test-case "single stub and existing principal keep distinct audit behavior"
+    (call-with-database
+     (lambda (connection)
+       (activate-operational-configuration!
+        connection (snapshot replacement-json))
+       (check-equal?
+        (db:query-value
+         connection
+         "SELECT COUNT(*) FROM security_audit_events WHERE event_type = 'operator.created'")
+        1)
+       (db:query-exec
+        connection
+        "UPDATE operator_roles SET role = 'manager' WHERE operator_id = 'cashier-alice'")
+       (activate-operational-configuration!
+        connection (snapshot security-seam-replacement-json))
+       (check-equal?
+        (db:query-list
+         connection
+         "SELECT event_json FROM security_audit_events WHERE event_type = 'operator.created' ORDER BY sequence")
+        (list
+         "{\"operator_id\":\"cashier-alice\",\"role\":\"cashier\"}"
+         "{\"operator_id\":\"cashier-new\",\"role\":\"cashier\"}"))
+       (check-equal?
+        (db:query-value
+         connection
+         "SELECT role FROM operator_roles WHERE operator_id = 'cashier-alice'")
+        "manager"))))
+
+  (test-case "configuration audit failure rolls back all stubs and snapshot state"
+    (call-with-database
+     (lambda (connection)
+       (define appends (box 0))
+       (check-exn
+        exn:fail?
+        (lambda ()
+          (activate-operational-configuration!
+           connection (snapshot config-json)
+           #:audit-append!
+           (lambda (writer event)
+             (append-security-audit-event!/in-transaction!
+              writer event
+              #:source-kind 'root_cli
+              #:source-instance-id "audit_root_cli_rollback"
+              #:occurred-at-epoch-ms 100)
+             (set-box! appends (add1 (unbox appends)))
+             (when (= (unbox appends) 2)
+               (error 'test "injected failure after second audit insert"))))))
+       (check-equal? (unbox appends) 2)
+       (for ([table '(operators operator_roles cashiers
+                     register_configuration security_audit_events)])
+         (check-equal?
+          (db:query-value connection (format "SELECT COUNT(*) FROM ~a" table))
+          0))
+       (activate-operational-configuration! connection (snapshot config-json))
+       (check-equal?
+        (db:query-list
+         connection
+         "SELECT sequence FROM security_audit_events ORDER BY sequence")
+        '(1 2 3))
+       (check-true
+        (security-audit-ledger-valid?
+         (verify-security-audit-ledger connection))))))
+
   (test-case "unconfigured unknown and inactive open attempts reject safely"
     (call-with-database
      (lambda (connection)
@@ -258,6 +349,10 @@ SQL
                      'shift-already-open)
        (check-equal?
         (db:query-value connection "SELECT COUNT(*) FROM register_shifts")
+        1)
+       (check-equal?
+        (db:query-value connection
+                        "SELECT COUNT(*) FROM security_audit_events WHERE event_type = 'shift.opened'")
         1))))
 
   (test-case "close is exact repeatable and refuses an active transaction"
@@ -291,9 +386,89 @@ SQL
        (check-equal? (register-shift-closed-shift repeated)
                      (register-shift-closed-shift closed))
        (check-equal?
+        (db:query-value connection
+                        "SELECT COUNT(*) FROM security_audit_events WHERE event_type = 'shift.closed'")
+        1)
+       (check-equal?
         (register-shift-close-rejected-code
          (register-operations-close-shift service "missing" (money 0)))
         'shift-not-found))))
+
+  (test-case "shift open and close recovery after reconnect never duplicate audit or cash state"
+    (define directory (make-temporary-file "shift-audit-retry-~a" 'directory))
+    (define database-path (build-path directory "pos.db"))
+    (dynamic-wind
+      void
+      (lambda ()
+        (define initial-connection
+          (open-pos-sqlite-connection database-path 'create))
+        (migrate-pos-database! initial-connection)
+        (db:disconnect initial-connection)
+        (define first-connection
+          (open-pos-sqlite-connection database-path 'read/write))
+        (dynamic-wind
+          void
+          (lambda ()
+            (activate-operational-configuration!
+             first-connection (snapshot config-json))
+            (define first-service
+              (make-service first-connection '(1000) '("shift_reconnect")))
+            (define opened
+              (register-operations-open-shift
+               first-service "cashier-alice" (money 500)))
+            (check-pred register-shift-opened? opened)
+            (check-pred
+             register-shift-opened?
+             (register-operations-open-shift
+              first-service "cashier-alice" (money 999))))
+          (lambda () (db:disconnect first-connection)))
+        (define second-connection
+          (open-pos-sqlite-connection database-path 'read/write))
+        (dynamic-wind
+          void
+          (lambda ()
+            (define second-service
+              (make-service second-connection '(2000) '("unused")))
+            (check-pred
+             register-shift-opened?
+             (register-operations-open-shift
+              second-service "cashier-alice" (money 1234)))
+            (check-pred
+             register-shift-closed?
+             (register-operations-close-shift
+              second-service "shift_reconnect" (money 500)))
+            (check-pred
+             register-shift-closed?
+             (register-operations-close-shift
+              second-service "shift_reconnect" (money 999))))
+          (lambda () (db:disconnect second-connection)))
+        (define third-connection
+          (open-pos-sqlite-connection database-path 'read/write))
+        (dynamic-wind
+          void
+          (lambda ()
+            (define third-service (make-service third-connection '() '()))
+            (check-pred
+             register-shift-closed?
+             (register-operations-close-shift
+              third-service "shift_reconnect" (money 999)))
+            (for ([table '(shift_cash_movements shift_cash_reconciliations)])
+              (check-equal?
+               (db:query-value
+                third-connection (format "SELECT COUNT(*) FROM ~a" table))
+               1))
+            (for ([kind '("shift.opened" "shift.closed")])
+              (check-equal?
+               (db:query-value
+                third-connection
+                "SELECT COUNT(*) FROM security_audit_events WHERE event_type = ?"
+                kind)
+               1))
+            (check-true
+             (security-audit-ledger-valid?
+              (verify-security-audit-ledger third-connection))))
+          (lambda () (db:disconnect third-connection))))
+      (lambda () (delete-directory/files directory))))
 
   (test-case "register context and active cashier list expose current state only"
     (call-with-database

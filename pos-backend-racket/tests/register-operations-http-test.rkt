@@ -138,6 +138,11 @@
     (define response (app (request* #"GET" "/cashiers")))
     (check-equal? (response-code response) 403)
     (check-equal? (error-code response) "authorization_denied")
+    (check-equal?
+     (db:query-value
+      connection
+      "SELECT COUNT(*) FROM security_audit_events WHERE event_type = 'authorization.denied'")
+     1)
     ;; Authorization denial does not revoke a valid bearer session.
     (check-equal?
      (response-code (app (request* #"GET" "/register-context")))

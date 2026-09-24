@@ -3,6 +3,7 @@
 (require (prefix-in db: db)
          rackunit
          "../pos/application/authentication-service.rkt"
+         "../pos/application/security-audit-service.rkt"
          "../pos/application/transaction-command.rkt"
          "../pos/application/transaction-service.rkt"
          "../pos/application/transaction-void-approval-service.rkt"
@@ -10,8 +11,10 @@
          "../pos/domain/money.rkt"
          "../pos/domain/register-operations.rkt"
          "../pos/persistence/pos-database-migrations.rkt"
+         "../pos/persistence/security-audit-store.rkt"
          "../pos/persistence/sqlite-auth-throttle.rkt"
          "../pos/persistence/sqlite-register-operations.rkt"
+         "../pos/persistence/transaction-command-unit-of-work.rkt"
          "../pos/persistence/transaction-void-approval-store.rkt"
          "../pos/security/operator-session.rkt"
          "../pos/security/transaction-void-approval.rkt")
@@ -50,7 +53,13 @@
        register-shift-opened?
        (open-register-shift!
         connection "Alice" (money 1000) (lambda () 1000)
-        (lambda () "shift-alice"))))
+        (lambda () "shift-alice")
+        #:audit-append!
+        (lambda (writer event)
+          (append-security-audit-event!/in-transaction!
+           writer event #:source-kind 'pos_core
+           #:source-instance-id "audit_runtime_test"
+           #:occurred-at-epoch-ms 1000)))))
     (lambda ()
       (define sessions
         (make-operator-session-store
@@ -92,6 +101,75 @@
     (lambda () (db:disconnect connection))))
 
 (module+ test
+  (test-case "required void-resolution audit failure rolls back command and grant consumption"
+    (call-with-services
+     (lambda (connection _auth _sessions _transactions approvals now)
+       (define command
+         (void-transaction-command "cmd-void-audit-fail" "txn-1" 1))
+       (define granted
+         (transaction-void-approval-service-request
+          approvals alice command "Sam" good-pin))
+       (check-pred transaction-void-approval-granted? granted)
+       (define failing-transactions
+         (make-transaction-service
+          connection
+          #:catalog-lookup fake-catalog-lookup
+          #:approval-consumer
+          (lambda (writer capability requester target)
+            (consume-transaction-void-approval!/in-transaction!
+             writer capability "instance-1" requester target (unbox now)))
+          #:commit-command!
+          (lambda (writer plan)
+            (commit-transaction-command-outcome!
+             writer plan
+             #:audit-append!
+             (lambda (_writer _event)
+               (error 'test "simulated audit append failure"))))
+          #:current-epoch-ms (lambda () (unbox now))))
+       (check-pred
+        transaction-service-command-persistence-failed?
+        (transaction-service-execute-command
+         failing-transactions alice command
+         #:approval-capability
+         (transaction-void-approval-token->capability
+          (transaction-void-approval-granted-approval-token granted))))
+       (check-equal?
+        (db:query-value connection
+                        "SELECT COUNT(*) FROM transaction_command_receipts WHERE command_id = 'cmd-void-audit-fail'")
+        0)
+       (check-equal?
+        (db:query-value connection
+                        "SELECT COUNT(*) FROM transaction_void_approval_grants WHERE command_id = 'cmd-void-audit-fail'")
+        1)
+       (check-equal?
+        (db:query-value connection
+                        "SELECT active_transaction_id FROM register_shifts WHERE shift_id = 'shift-alice'")
+        "txn-1"))))
+
+  (test-case "required approval.granted audit failure rolls back grant issuance"
+    (call-with-services
+     (lambda (connection auth _sessions transactions _approvals _now)
+       (define failing
+         (make-transaction-void-approval-service
+          auth transactions
+          (make-transaction-void-approval-authority
+           #:issuer-instance-id "instance-1"
+           #:current-monotonic-ms (lambda () 1000)
+           #:current-epoch-ms (lambda () 501000))
+          #:audit-append!
+          (lambda (_writer _event)
+            (error 'test "simulated audit append failure"))))
+       (check-pred
+        transaction-void-approval-unavailable?
+        (transaction-void-approval-service-request
+         failing alice
+         (void-transaction-command "cmd-audit-fail" "txn-1" 1)
+         "Sam" good-pin))
+       (check-equal?
+        (db:query-value connection
+                        "SELECT COUNT(*) FROM transaction_void_approval_grants")
+        0))))
+
   (test-case "supervisor and manager approval authenticate without replacing register session"
     (call-with-services
      (lambda (connection auth sessions _transactions approvals _now)
@@ -136,6 +214,34 @@
            (void-transaction-command
             (string-append "cmd-void-" approver-id) "txn-1" 1)
            approver-id good-pin)))
+       (check-equal?
+        (db:query-value connection
+                        "SELECT COUNT(*) FROM transaction_void_approval_grants")
+        0)
+       (check-equal?
+        (db:query-value connection
+                        "SELECT COUNT(*) FROM security_audit_events WHERE event_type = 'approval.not_granted'")
+        2))))
+
+  (test-case "best-effort approval rejection audit failure never grants approval"
+    (call-with-services
+     (lambda (connection auth _sessions transactions _approvals now)
+       (define approvals
+         (make-transaction-void-approval-service
+          auth transactions
+          (make-transaction-void-approval-authority
+           #:issuer-instance-id "instance-rejection-audit"
+           #:current-monotonic-ms (lambda () (unbox now))
+           #:current-epoch-ms (lambda () (unbox now)))
+          #:audit-source
+          (make-security-audit-source
+           'pos_core "audit_runtime_bad_clock" (lambda () -1))))
+       (check-pred
+        transaction-void-approval-not-granted?
+        (transaction-void-approval-service-request
+         approvals alice
+         (void-transaction-command "cmd-rejection-audit-fail" "txn-1" 1)
+         "Sam" "80421638"))
        (check-equal?
         (db:query-value connection
                         "SELECT COUNT(*) FROM transaction_void_approval_grants")
@@ -200,8 +306,76 @@
        (check-equal?
         (db:query-value
          connection
+         "SELECT COUNT(*) FROM security_audit_events WHERE event_type = 'transaction.void_resolved'")
+        1)
+       (define stored-audit-json
+         (format "~a"
+                 (db:query-list connection
+                                "SELECT event_json FROM security_audit_events ORDER BY sequence")))
+       (for ([secret (in-list
+                      (list good-pin password-hash
+                            (transaction-void-approval-granted-approval-token granted)
+                            "049000001234"))])
+         (check-false (string-contains? stored-audit-json secret)))
+       (check-pred
+        transaction-service-command-resolved?
+        (transaction-service-execute-command transactions alice command))
+       (check-equal?
+        (db:query-value
+         connection
+         "SELECT COUNT(*) FROM security_audit_events WHERE event_type = 'transaction.void_resolved'")
+        1)
+       (check-equal?
+        (db:query-value
+         connection
          "SELECT approver_operator_id FROM transaction_command_approver_attributions WHERE command_id = 'cmd-consume'")
         "Sam"))))
+
+  (test-case "approved durable version conflict has one atomic resolution audit"
+    (call-with-services
+     (lambda (connection _auth _sessions transactions approvals _now)
+       (define command
+         (void-transaction-command "cmd-audited-stale-void" "txn-1" 1))
+       (define granted
+         (transaction-void-approval-service-request
+          approvals alice command "Sam" good-pin))
+       (check-pred transaction-void-approval-granted? granted)
+       (check-pred
+        transaction-service-command-resolved?
+        (transaction-service-execute-command
+         transactions alice
+         (scan-barcode-command "cmd-intervening-scan" "txn-1" 1
+                               "049000001234")))
+       (check-pred
+        transaction-service-command-resolved?
+        (transaction-service-execute-command
+         transactions alice command
+         #:approval-capability
+         (transaction-void-approval-token->capability
+          (transaction-void-approval-granted-approval-token granted))))
+       (check-equal?
+        (db:query-value
+         connection
+         "SELECT outcome_kind FROM transaction_command_receipts WHERE command_id = 'cmd-audited-stale-void'")
+        "version_conflict")
+       (check-equal?
+        (db:query-value
+         connection
+         "SELECT COUNT(*) FROM security_audit_events WHERE event_type = 'transaction.void_resolved'")
+        1)
+       (check-equal?
+        (db:query-value
+         connection
+         "SELECT COUNT(*) FROM transaction_command_approver_attributions WHERE command_id = 'cmd-audited-stale-void'")
+        1)
+       (check-pred
+        transaction-service-command-resolved?
+        (transaction-service-execute-command transactions alice command))
+       (check-equal?
+        (db:query-value
+         connection
+         "SELECT COUNT(*) FROM security_audit_events WHERE event_type = 'transaction.void_resolved'")
+        1))))
 
   (test-case "approval failures use normal durable throttle and success clears it"
     (call-with-services

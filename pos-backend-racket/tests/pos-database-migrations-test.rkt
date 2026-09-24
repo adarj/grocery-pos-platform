@@ -3,6 +3,7 @@
 (require db
          rackunit
          "../pos/domain/money.rkt"
+         "../pos/domain/security-audit-event.rkt"
          "../pos/domain/transaction-event.rkt"
          (only-in "../pos/domain/transaction.rkt"
                   replay-transaction
@@ -12,7 +13,8 @@
                   transaction-status
                   transaction-subtotal)
          "../pos/persistence/sqlite-transaction-event-store.rkt"
-         "../pos/persistence/pos-database-migrations.rkt")
+         "../pos/persistence/pos-database-migrations.rkt"
+         "../pos/persistence/security-audit-store.rkt")
 
 (define (call-with-test-database procedure)
   (define connection
@@ -79,10 +81,19 @@ SQL
         #(7 "create_operator_identity_credentials")
         #(8 "create_operator_login_throttle")
         #(9 "create_transaction_command_actor_attributions")
-        #(10 "create_transaction_void_approvals")))
+        #(10 "create_transaction_void_approvals")
+        #(11 "create_security_audit_ledger")))
+
+(define (rewind-current-fixture-to-v10! connection)
+  (migrate-pos-database! connection)
+  (query-exec connection "DROP TRIGGER security_audit_events_no_update")
+  (query-exec connection "DROP TRIGGER security_audit_events_no_delete")
+  (query-exec connection "DROP TRIGGER security_audit_events_append_order")
+  (query-exec connection "DROP TABLE security_audit_events")
+  (query-exec connection "DELETE FROM pos_schema_migrations WHERE version = 11"))
 
 (define (rewind-current-fixture-to-v9! connection)
-  (migrate-pos-database! connection)
+  (rewind-current-fixture-to-v10! connection)
   (query-exec
    connection
    "DROP TABLE transaction_command_legacy_unapproved_void_receipts")
@@ -220,12 +231,75 @@ SQL
    ))
 
 (module+ test
+  (test-case "populated v10 migrates to an empty v11 ledger without changing prior rows"
+    (call-with-test-database
+     (lambda (connection)
+       (rewind-current-fixture-to-v10! connection)
+       (query-exec connection
+                   "INSERT INTO operators VALUES ('Audit-Alice', 'Alice', 1)")
+       (query-exec connection
+                   "INSERT INTO operator_roles VALUES ('Audit-Alice', 'cashier')")
+       (query-exec connection
+                   "INSERT INTO operator_pin_credentials VALUES ('Audit-Alice', '$argon2id$fixture', 1)")
+       (query-exec connection
+                   "INSERT INTO operator_login_throttle VALUES ('Audit-Alice', 4, 1000, 6000)")
+       (query-exec connection
+                   #<<SQL
+INSERT INTO transaction_command_receipts
+  (command_id, transaction_id, command_schema_version, command_type,
+   expected_version, command_json, outcome_kind, outcome_code,
+   outcome_stream_version)
+VALUES ('pre-v11-void', 'missing-transaction', 1, 'void_transaction', 0,
+        '{"schema_version":1,"command_id":"pre-v11-void","transaction_id":"missing-transaction","expected_version":0,"command_type":"void_transaction","payload":{}}',
+        'not_found', 'transaction_not_found', 0)
+SQL
+                   )
+       (query-exec connection
+                   "INSERT INTO transaction_command_actor_attributions VALUES ('pre-v11-void', 'Audit-Alice')")
+       (query-exec connection
+                   "INSERT INTO transaction_command_legacy_unapproved_void_receipts VALUES ('pre-v11-void')")
+       (define prior-tables
+         (query-list connection
+                     "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name <> 'pos_schema_migrations' ORDER BY name"))
+       (define prior-rows
+         (for/hash ([name (in-list prior-tables)])
+           (values name
+                   (query-rows connection (format "SELECT * FROM ~a" name)))))
+       (migrate-pos-database! connection)
+       (check-equal? (read-pos-database-migration-history connection)
+                     expected-migration-history)
+       (for ([name (in-list prior-tables)])
+         (check-equal?
+          (query-rows connection (format "SELECT * FROM ~a" name))
+          (hash-ref prior-rows name)))
+       (check-equal?
+        (query-value connection "SELECT COUNT(*) FROM security_audit_events")
+        0)
+       (check-not-exn
+        (lambda ()
+          (validate-pos-database-schema! connection #:require-current? #t)))
+       (check-equal?
+        (append-security-audit-event!
+         connection (runtime-started-event)
+         #:source-kind 'pos_core
+         #:source-instance-id "audit_runtime_post_migration"
+         #:occurred-at-epoch-ms 1001)
+        1)
+       (check-equal?
+        (query-row
+         connection
+         "SELECT sequence, previous_event_hash FROM security_audit_events")
+        (vector 1 (make-bytes 32 0)))
+       (check-true
+        (security-audit-ledger-valid?
+         (verify-security-audit-ledger connection))))))
+
   (test-case "migration history and schema validation are reusable without migrating"
     (call-with-test-database
      (lambda (connection)
        (install-frozen-v1! connection)
 
-       (check-equal? current-pos-database-schema-version 10)
+       (check-equal? current-pos-database-schema-version 11)
        (check-equal?
         (read-pos-database-migration-history connection)
         (list #(1 "create_transaction_events")))
@@ -279,7 +353,7 @@ SQL
 
        (query-exec
         connection
-        "INSERT INTO pos_schema_migrations (version, name) VALUES (11, 'unknown')")
+        "INSERT INTO pos_schema_migrations (version, name) VALUES (12, 'unknown')")
        (define unsupported-history
          (read-pos-database-migration-history connection))
        (check-equal?
@@ -289,7 +363,7 @@ SQL
         exn:fail?
         (lambda () (validate-pos-database-schema! connection))))))
 
-  (test-case "fresh database migrates through versions 1 through 10"
+  (test-case "fresh database migrates through versions 1 through 11"
     (call-with-test-database
      (lambda (connection)
        (migrate-pos-database! connection)
@@ -781,7 +855,7 @@ SQL
        (migrate-pos-database! connection)
        (query-exec
         connection
-        "INSERT INTO pos_schema_migrations (version, name) VALUES (11, 'unknown')")
+        "INSERT INTO pos_schema_migrations (version, name) VALUES (12, 'unknown')")
        (check-exn exn:fail?
                   (lambda () (migrate-pos-database! connection)))))
 

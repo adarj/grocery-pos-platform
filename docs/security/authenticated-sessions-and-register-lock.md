@@ -164,12 +164,13 @@ it intentionally does not claim that an unlock credential exists.
 
 Support bundles continue to exclude operator rosters, PINs, PHC verifiers,
 bearer tokens, Authorization headers, environment dumps, and database content.
-Project output must not log those values. The formal security audit ledger is
-not implemented yet.
+Project output must not log those values. The separate
+[security audit ledger](security-audit-ledger.md) records only typed, minimal
+security evidence; it never stores PINs, verifiers, or bearer capabilities.
 
 Checkpoint 3 applies fixed role and resource-ownership authorization and
 durable transaction-command actor attribution. Checkpoint 4 adds separately
 authenticated [Supervisor / Manager Approval](scoped-manager-approval.md) for
 fresh whole-sale voids without issuing an approver bearer session. Credential
-reset, general login/security audit events, cloud identity, and remote
-authentication remain deferred.
+reset, cloud identity, and remote authentication remain deferred. Checkpoint 5
+adds local login/session audit events without making sessions durable.

@@ -1,6 +1,6 @@
 Name:           grocery-pos-core
 Version:        0.0.0
-Release:        0.7.dev%{?dist}
+Release:        0.8.dev%{?dist}
 Summary:        Local-first Grocery POS transaction core
 License:        LicenseRef-Project-Undecided
 URL:            https://github.com/adarj/grocery-pos-platform
@@ -51,6 +51,8 @@ install -D -m 0755 packaging/fedora/grocery-pos-support \
   %{buildroot}/usr/bin/grocery-pos-support
 install -D -m 0755 packaging/fedora/grocery-pos-auth \
   %{buildroot}/usr/bin/grocery-pos-auth
+install -D -m 0755 packaging/fedora/grocery-pos-audit \
+  %{buildroot}/usr/bin/grocery-pos-audit
 
 install -D -m 0644 packaging/fedora/grocery-pos-core.service \
   %{buildroot}/usr/lib/systemd/system/grocery-pos-core.service
@@ -73,12 +75,16 @@ install -D -m 0644 packaging/fedora/pos-core.env \
 /usr/bin/grocery-pos-recovery
 /usr/bin/grocery-pos-support
 /usr/bin/grocery-pos-auth
+/usr/bin/grocery-pos-audit
 /usr/lib/systemd/system/grocery-pos-core.service
 /usr/lib/sysusers.d/grocery-pos.conf
 %dir /etc/grocery-pos
 %config(noreplace) /etc/grocery-pos/pos-core.env
 
 %changelog
+* Wed Sep 23 2026 Grocery POS Platform <internal@invalid> - 0.0.0-0.8.dev
+- Add the local hash-chained security audit ledger and root audit inspection.
+
 * Tue Sep 22 2026 Grocery POS Platform <internal@invalid> - 0.0.0-0.7.dev
 - Add scoped whole-sale void approval and durable approver evidence.
 

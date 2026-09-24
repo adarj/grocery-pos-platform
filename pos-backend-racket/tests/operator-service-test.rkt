@@ -6,10 +6,17 @@
          "../pos/application/operator-service.rkt"
          "../pos/domain/operator-identity.rkt"
          "../pos/persistence/pos-database-migrations.rkt"
+         "../pos/persistence/security-audit-store.rkt"
          "../pos/persistence/sqlite-connection.rkt"
          "../pos/persistence/sqlite-operators.rkt")
 
 (define fake-hash "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA")
+
+(define (append-test-audit! connection event)
+  (append-security-audit-event!/in-transaction!
+   connection event #:source-kind 'root_cli
+   #:source-instance-id "audit_root_cli_test"
+   #:occurred-at-epoch-ms 1000))
 
 (define (call-with-operator-service procedure)
   (define connection (db:sqlite3-connect #:database 'memory))
@@ -28,6 +35,72 @@
     (lambda () (db:disconnect connection))))
 
 (module+ test
+  (test-case "failure after required operator audit insert rolls back row and sequence"
+    (call-with-operator-service
+     (lambda (connection ordinary)
+       (define failing
+         (make-operator-service
+          connection
+          #:audit-append!
+          (lambda (writer event)
+            (append-test-audit! writer event)
+            (error 'test "failed after audit row insertion"))))
+       (check-exn
+        exn:fail?
+        (lambda ()
+          (operator-service-create
+           failing "transient-operator" "Transient" 'cashier)))
+       (check-equal?
+        (db:query-value connection "SELECT COUNT(*) FROM operators") 0)
+       (check-equal?
+        (db:query-value connection "SELECT COUNT(*) FROM security_audit_events") 0)
+       (check-pred
+        operator-create-succeeded?
+        (operator-service-create ordinary "durable-operator" "Durable" 'cashier))
+       (check-equal?
+        (db:query-list connection
+                       "SELECT sequence FROM security_audit_events ORDER BY sequence")
+        '(1))
+       (check-true
+        (security-audit-ledger-valid?
+         (verify-security-audit-ledger connection))))))
+
+  (test-case "required admin audit failure rolls back operator mutation"
+    (call-with-operator-service
+     (lambda (connection ordinary)
+       (define failing
+         (make-operator-service
+          connection
+          #:hash-pin (lambda (_pin) fake-hash)
+          #:audit-append!
+          (lambda (_connection _event)
+            (error 'test "simulated audit append failure"))))
+       (check-exn exn:fail?
+                  (lambda ()
+                    (operator-service-create
+                     failing "rollback-operator" "Rollback" 'manager)))
+       (check-equal?
+        (db:query-value connection
+                        "SELECT COUNT(*) FROM operators WHERE operator_id = 'rollback-operator'")
+        0)
+       (check-pred operator-create-succeeded?
+                   (operator-service-create ordinary "existing" "Existing" 'cashier))
+       (check-exn exn:fail?
+                  (lambda ()
+                    (operator-service-set-role failing "existing" 'manager)))
+       (check-eq? (operator-identity-role
+                   (operator-service-load ordinary "existing"))
+                  'cashier)
+       (check-exn exn:fail?
+                  (lambda ()
+                    (operator-service-set-active failing "existing" #f)))
+       (check-true (operator-identity-active?
+                    (operator-service-load ordinary "existing")))
+       (check-exn exn:fail?
+                  (lambda ()
+                    (operator-service-enroll-pin failing "existing" "80421637")))
+       (check-false (load-operator-pin-record connection "existing")))))
+
   (test-case "create list role and active updates expose only safe identity state"
     (call-with-operator-service
      (lambda (_connection service)
@@ -60,7 +133,8 @@
   (test-case "enrollment hashes outside the writer and never overwrites"
     (call-with-operator-service
      (lambda (connection _service)
-       (create-operator! connection "cashier" "Cashier" 'cashier)
+       (create-operator! connection "cashier" "Cashier" 'cashier
+                         #:audit-append! append-test-audit!)
        (define service
          (make-operator-service
           connection
@@ -161,7 +235,8 @@
     (define first-connection
       (open-pos-sqlite-connection database-path 'create))
     (migrate-pos-database! first-connection)
-    (create-operator! first-connection "race" "Race" 'cashier)
+    (create-operator! first-connection "race" "Race" 'cashier
+                      #:audit-append! append-test-audit!)
     (define second-connection
       (open-pos-sqlite-connection database-path 'read/write))
     (define lock (make-semaphore 1))

@@ -4,7 +4,9 @@
          rackunit
          "../pos/application/authentication-service.rkt"
          "../pos/domain/operator-identity.rkt"
+         "../pos/domain/security-audit-event.rkt"
          "../pos/persistence/pos-database-migrations.rkt"
+         "../pos/persistence/security-audit-store.rkt"
          "../pos/persistence/sqlite-auth-throttle.rkt"
          "../pos/security/operator-session.rkt")
 
@@ -64,6 +66,255 @@
   result)
 
 (module+ test
+  (test-case "all structurally valid login failures audit the same null identity"
+    (call-with-authentication
+     (lambda (connection service now verify-calls)
+       (for ([attempt
+              (in-list
+               (list (list "unknown-CLAIMED-ID" good-pin)
+                     (list "inactive" good-pin)
+                     (list "unenrolled" good-pin)
+                     (list "cashier-1" "80421638")
+                     (list "cashier-1" "not-a-pin")))])
+         (check-pred authentication-login-failed?
+                     (authentication-service-login
+                      service (first attempt) (second attempt))))
+       (for ([index (in-range 3)])
+         (set-box! now (+ 2000 index))
+         (check-pred authentication-login-failed?
+                     (authentication-service-login
+                      service "cashier-1" "80421638")))
+       (set-box! now 2004)
+       (check-pred authentication-login-failed?
+                   (authentication-service-login service "cashier-1" good-pin))
+       (check-not-false (member real-hash (unbox verify-calls)))
+       (check-not-false (member dummy-hash (unbox verify-calls)))
+       (define failed-json
+         (query-list
+          connection
+          "SELECT event_json FROM security_audit_events WHERE event_type = 'auth.login_failed' ORDER BY sequence"))
+       (check-equal? (length failed-json) 9)
+       (check-true
+        (andmap (lambda (text) (string=? text "{\"operator_id\":null}"))
+                failed-json))
+       (check-false
+        (regexp-match? #rx"unknown-CLAIMED-ID|not-a-pin|\\$argon2id"
+                       (format "~s" failed-json))))))
+
+  (test-case "failed required login audit locks both first and replacement attempts"
+    (call-with-authentication
+     (lambda (connection _service now _calls)
+       (insert-operator! connection "cashier-bob" "Bob" 'cashier #t)
+       (define sessions
+         (make-operator-session-store
+          #:current-monotonic-ms (lambda () (unbox now))
+          #:current-epoch-ms (lambda () (unbox now))))
+       (define fail-audit? (box #t))
+       (define attempted-session-id (box #f))
+       (define service
+         (make-authentication-service
+          connection
+          #:session-store sessions
+          #:verify-pin
+          (lambda (pin hash)
+            (and (string=? pin good-pin) (string=? hash real-hash)))
+          #:dummy-password-hash dummy-hash
+          #:audit-append!
+          (lambda (writer event)
+            (when (unbox fail-audit?)
+              (set-box! attempted-session-id
+                        (operator-session-session-id
+                         (operator-session-store-current sessions)))
+              (error 'test "required audit unavailable"))
+            (append-security-audit-event!
+             writer event
+             #:source-kind 'pos_core
+             #:source-instance-id "audit_runtime_login_test"
+             #:occurred-at-epoch-ms (unbox now)))))
+       (check-pred authentication-login-unavailable?
+                   (authentication-service-login service "cashier-1" good-pin))
+       (check-true (string? (unbox attempted-session-id)))
+       (check-false (operator-session-store-current sessions))
+       (set-box! fail-audit? #f)
+       (define alice (successful-login service))
+       (define alice-token (authentication-login-succeeded-access-token alice))
+       (set-box! fail-audit? #t)
+       (check-pred authentication-login-unavailable?
+                   (authentication-service-login service "cashier-bob" good-pin))
+       (check-false (operator-session-store-current sessions))
+       (check-pred authentication-session-invalid?
+                   (authentication-service-authenticate service alice-token))
+       (check-equal?
+        (query-value connection
+                     "SELECT COUNT(*) FROM security_audit_events WHERE event_type = 'auth.login_succeeded'")
+        1))))
+
+  (test-case "session audit callbacks run after the process-local semaphore is released"
+    (call-with-authentication
+     (lambda (connection _service now _calls)
+       (define sessions
+         (make-operator-session-store
+          #:current-monotonic-ms (lambda () (unbox now))
+          #:current-epoch-ms (lambda () (unbox now))))
+       (define lock-probes (box '()))
+       (define (probe-store-lock)
+         (define answer (make-channel))
+         (define probe
+           (thread
+            (lambda ()
+              (channel-put answer (list (operator-session-store-current sessions))))))
+         (define observed (sync/timeout 1 answer))
+         (unless observed (kill-thread probe))
+         (set-box! lock-probes (cons (and observed #t) (unbox lock-probes))))
+       (define service
+         (make-authentication-service
+          connection
+          #:session-store sessions
+          #:current-epoch-ms (lambda () (unbox now))
+          #:verify-pin
+          (lambda (pin hash)
+            (and (string=? pin good-pin) (string=? hash real-hash)))
+          #:dummy-password-hash dummy-hash
+          #:audit-append!
+          (lambda (writer event)
+            (probe-store-lock)
+            (append-security-audit-event!
+             writer event
+             #:source-kind 'pos_core
+             #:source-instance-id "audit_runtime_lock_probe"
+             #:occurred-at-epoch-ms (unbox now)))))
+       (define logout-token
+         (authentication-login-succeeded-access-token (successful-login service)))
+       (check-pred authentication-logout-succeeded?
+                   (authentication-service-logout service logout-token))
+       (define idle-token
+         (authentication-login-succeeded-access-token (successful-login service)))
+       (set-box! now (+ (unbox now) operator-session-idle-timeout-ms))
+       (check-pred authentication-session-invalid?
+                   (authentication-service-authenticate service idle-token))
+       (define absolute-token
+         (authentication-login-succeeded-access-token (successful-login service)))
+       (set-box! now (+ (unbox now) operator-session-absolute-timeout-ms))
+       (check-pred authentication-session-invalid?
+                   (authentication-service-authenticate service absolute-token))
+       (define disabled-token
+         (authentication-login-succeeded-access-token (successful-login service)))
+       (query-exec connection
+                   "UPDATE operators SET active = 0 WHERE operator_id = 'cashier-1'")
+       (check-pred authentication-session-invalid?
+                   (authentication-service-authenticate service disabled-token))
+       (query-exec connection
+                   "UPDATE operators SET active = 1 WHERE operator_id = 'cashier-1'")
+       (define revision-token
+         (authentication-login-succeeded-access-token (successful-login service)))
+       (query-exec connection
+                   "UPDATE operator_pin_credentials SET credential_revision = 2 WHERE operator_id = 'cashier-1'")
+       (check-pred authentication-session-invalid?
+                   (authentication-service-authenticate service revision-token))
+       (check-equal? (length (unbox lock-probes)) 10)
+       (check-true (andmap values (unbox lock-probes))))))
+
+  (test-case "best-effort failure/logout audit cannot reverse denial or revocation"
+    (call-with-authentication
+     (lambda (connection _service now _calls)
+       (define fail-audit? (box #f))
+       (define sessions
+         (make-operator-session-store
+          #:current-monotonic-ms (lambda () (unbox now))
+          #:current-epoch-ms (lambda () (unbox now))))
+       (define service
+         (make-authentication-service
+          connection
+          #:session-store sessions
+          #:verify-pin
+          (lambda (pin hash)
+            (and (string=? pin good-pin) (string=? hash real-hash)))
+          #:dummy-password-hash dummy-hash
+          #:audit-append!
+          (lambda (_connection _event)
+            (when (unbox fail-audit?)
+              (error 'test "simulated audit failure")))))
+       (define login (successful-login service))
+       (set-box! fail-audit? #t)
+       (check-pred authentication-login-failed?
+                   (authentication-service-login
+                    service "cashier-1" "80421638"))
+       (define authenticated
+         (authentication-service-authenticate
+          service (authentication-login-succeeded-access-token login)))
+       (check-pred authentication-session-authenticated? authenticated)
+       (check-not-exn
+        (lambda ()
+          (authentication-service-record-authorization-denial!
+           service authenticated 'cashier_directory.read
+           'cashier_directory)))
+       (check-pred authentication-logout-succeeded?
+                   (authentication-service-logout
+                    service (authentication-login-succeeded-access-token login)))
+       (check-false (operator-session-store-current sessions))
+       (set-box! fail-audit? #f)
+       (define expiring (successful-login service))
+       (set-box! fail-audit? #t)
+       (set-box! now (+ (unbox now) operator-session-idle-timeout-ms))
+       (check-pred
+        authentication-session-invalid?
+        (authentication-service-authenticate
+         service (authentication-login-succeeded-access-token expiring)))
+       (check-false (operator-session-store-current sessions)))))
+
+  (test-case "observed idle expiry and authoritative disable leave safe audit evidence"
+    (call-with-authentication
+     (lambda (connection service now _calls)
+       (define first (successful-login service))
+       (set-box! now (+ (unbox now) operator-session-idle-timeout-ms))
+       (check-pred
+        authentication-session-invalid?
+        (authentication-service-authenticate
+         service (authentication-login-succeeded-access-token first)))
+       (check-equal?
+        (query-value connection
+                     "SELECT event_type FROM security_audit_events ORDER BY sequence DESC LIMIT 1")
+        "auth.session_expired")
+       (define second (successful-login service))
+       (query-exec connection
+                   "UPDATE operators SET active = 0 WHERE operator_id = 'cashier-1'")
+       (check-pred
+        authentication-session-invalid?
+        (authentication-service-authenticate
+         service (authentication-login-succeeded-access-token second)))
+       (check-equal?
+        (query-value connection
+                     "SELECT event_type FROM security_audit_events ORDER BY sequence DESC LIMIT 1")
+        "auth.session_invalidated"))))
+
+  (test-case "required login audit failure invalidates newly issued bearer"
+    (call-with-authentication
+     (lambda (connection _service now _calls)
+       (define sessions
+         (make-operator-session-store
+          #:current-monotonic-ms (lambda () (unbox now))
+          #:current-epoch-ms (lambda () (unbox now))))
+       (define failing
+         (make-authentication-service
+          connection
+          #:session-store sessions
+          #:verify-pin
+          (lambda (pin hash)
+            (and (string=? pin good-pin) (string=? hash real-hash)))
+          #:dummy-password-hash dummy-hash
+          #:audit-append!
+          (lambda (_connection _event)
+            (error 'test "simulated required audit failure"))))
+       (define previous
+         (operator-session-store-issue! sessions "cashier-1" 1))
+       (check-pred
+        authentication-login-unavailable?
+        (authentication-service-login failing "cashier-1" good-pin))
+       (check-false (operator-session-store-current sessions))
+       (check-false
+        (operator-session-store-find
+         sessions (issued-operator-session-access-token previous))))))
+
   (test-case "correct credentials issue one safe register session"
     (call-with-authentication
      (lambda (_connection service _now verify-calls)

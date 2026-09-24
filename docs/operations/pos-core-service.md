@@ -106,6 +106,13 @@ but invalidates every register token. `/health` and `/ready` may recover while
 the cashier terminal correctly returns to its lock screen. Do not treat this as
 credential loss or attempt to persist tokens outside the service.
 
+Current v11 startup verifies the full local security audit chain and records a
+required `runtime.started` event before serving HTTP. Audit corruption or an
+unwritable required event fails startup closed. Root inspection uses
+`grocery-pos-audit verify` or `grocery-pos-audit list`; see
+[Local Security Audit Ledger](../security/security-audit-ledger.md). The CLI
+does not expose the ledger to the cashier terminal or support bundle.
+
 The package does not enable or start the unit and has no install-time migration
 or database scriptlet. Explicit appliance provisioning builds and validates the
 initial database first, then enables/starts the unit and requires `/ready`.

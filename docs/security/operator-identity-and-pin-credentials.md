@@ -135,7 +135,12 @@ grocery-pos-auth operator disable OPERATOR_ID
 
 There is no delete or credential-reset operation and no implicit manager. Root
 is only the current OS administration boundary; application-level technician
-authentication and durable security audit are later M7 work.
+authentication remains later work. Checkpoint 5 now records successful root
+operator mutations in the separate
+[security audit ledger](security-audit-ledger.md). Successful operational-
+configuration activation also records `operator.created` for each genuinely
+new cashier/operator stub inside its configuration transaction; existing
+operator security state is neither rewritten nor logged as a new principal.
 
 ## Backup, restore, readiness, and diagnostics
 
@@ -144,9 +149,10 @@ explicit offline restore carry the PHC verifier and revision; there is no
 separate unbacked credential file or pepper. Protect backups as sensitive POS
 data.
 
-Readiness validates current migration 10 DDL and relational invariants but
-performs no Argon2 hashing and does not require every operator to be enrolled.
-Fresh M7 appliance provisioning reaches schema 10 and creates cashier operator
+Startup and backup validation check current migration 11 DDL and the audit
+chain. Ordinary `/ready` remains a lightweight migration-history probe; it
+performs no Argon2 hashing or full audit scan and does not require every
+operator to be enrolled. Fresh M7 appliance provisioning reaches schema 11 and creates cashier operator
 stubs. An unenrolled register can be persistence-ready, but the Checkpoint 2
 terminal remains locked until an administrator explicitly enrolls a usable
 active operator.
@@ -165,8 +171,9 @@ Session validity alone does not grant an operation. Checkpoint 3 reloads the
 current role and applies fixed server-side permissions and resource ownership;
 see [Authorization and Ownership](authorization-and-ownership.md). Manager
 approval for whole-sale void is now defined by
-[Supervisor / Manager Approval](scoped-manager-approval.md). General security
-audit and credential reset remain deferred.
+[Supervisor / Manager Approval](scoped-manager-approval.md). Checkpoint 5 adds
+the [local security audit ledger](security-audit-ledger.md); credential reset
+remains deferred.
 
 The files under `docs/acceptance/m6` remain historical evidence for the schema
-6 M6 baseline. They are not regenerated to describe current schema 10 code.
+6 M6 baseline. They are not regenerated to describe current schema 11 code.

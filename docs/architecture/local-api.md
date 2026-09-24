@@ -101,7 +101,7 @@ a control.
 
 The Racket process now constructs its durable transaction service before the
 HTTP listener starts. Startup resolves `SQLITE_DB_PATH`, migrates and validates
-the POS database through schema v10 using a dedicated connection after
+the POS database through schema v11 using a dedicated connection after
 establishing WAL with FULL synchronous durability. Every production connection
 explicitly enables foreign-key enforcement, retains a 1000-page WAL automatic
 checkpoint threshold, and uses the bounded Racket connector busy policy.
@@ -193,6 +193,11 @@ A fresh whole-sale void also requires the separate
 The approver's PIN issues no register bearer session. The resulting short-lived
 capability is sent only in `X-Grocery-POS-Approval` with the exact void command;
 see [Supervisor / Manager Approval](../security/scoped-manager-approval.md).
+
+Checkpoint 5's security-audit ledger is not exposed by HTTP or Flutter. POS
+Core records typed local evidence behind these routes; root-only
+`grocery-pos-audit` is the inspection boundary. See
+[Local Security Audit Ledger](../security/security-audit-ledger.md).
 
 ## Health Endpoint
 

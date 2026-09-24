@@ -1,11 +1,16 @@
 #lang racket
 
 (require (prefix-in db: db)
+         file/sha1
+         racket/random
+         racket/string
          "../application/transaction-command-receipt.rkt"
          "../application/transaction-command.rkt"
          "../domain/transaction-command-actor-attribution.rkt"
          "../domain/transaction-void-approval.rkt"
          "../domain/transaction-event.rkt"
+         "../domain/security-audit-event.rkt"
+         "security-audit-store.rkt"
          "sqlite-transaction-event-store.rkt"
          "transaction-command-actor-attribution-store.rkt"
          "transaction-command-receipt-store.rkt"
@@ -197,6 +202,17 @@
 
 (struct transaction-command-commit-failed (code detail message)
   #:transparent)
+
+(define default-audit-source-instance-id
+  (string-append "audit_runtime_"
+                 (bytes->hex-string (crypto-random-bytes 16))))
+
+(define (default-audit-append! connection event)
+  (append-security-audit-event!/in-transaction!
+   connection event #:source-kind 'pos_core
+   #:source-instance-id default-audit-source-instance-id
+   #:occurred-at-epoch-ms
+   (inexact->exact (floor (current-inexact-milliseconds)))))
 
 ;; Stable persistence failures that occur after event insertion must leave the
 ;; transaction callback abnormally. Returning a failure normally would cause
@@ -426,6 +442,7 @@
          #:legacy-unapproved-void?
          [legacy-unapproved-void?
           transaction-command-receipt-legacy-unapproved-void?]
+         #:audit-append! [audit-append! default-audit-append!]
          #:stream-version
          [stream-version transaction-stream-version/in-transaction])
   (define who 'commit-transaction-command-outcome!)
@@ -456,6 +473,7 @@
   (check-procedure who load-approver-attribution "load-approver-attribution")
   (check-procedure who legacy-unapproved-void? "legacy-unapproved-void?")
   (check-procedure who stream-version "stream-version")
+  (check-procedure who audit-append! "audit-append!")
 
   ;; Complete Schema v1 serialization before BEGIN IMMEDIATE. The prepared
   ;; representation is opaque and can only be produced by the event codec.
@@ -523,14 +541,47 @@
          [(receipt-load-failed? load-result)
           (receipt-load-failure-result load-result)]
          [(receipt-load-not-found? load-result)
-          (resolve-unused-command!
-           connection
-           plan
-           prepared-events
-           insert-receipt!
-           insert-attribution!
-           insert-approver-attribution!
-           stream-version)]
+          (define fresh-result
+            (resolve-unused-command!
+             connection
+             plan
+             prepared-events
+             insert-receipt!
+             insert-attribution!
+             insert-approver-attribution!
+             stream-version))
+          (when (and (void-transaction-command? command)
+                     (transaction-command-commit-resolved? fresh-result))
+            (define approver (load-approver-attribution connection command-id))
+            (unless (transaction-command-approver-attribution? approver)
+              (abort-transaction!
+               (transaction-command-commit-failed
+                'audit-evidence-missing #f
+                "fresh approved void has no durable approver evidence")))
+            (define receipt
+              (transaction-command-commit-resolved-receipt fresh-result))
+            (with-handlers
+                ([exn:fail?
+                  (lambda (_exception)
+                    (abort-transaction!
+                     (transaction-command-commit-failed
+                      'audit-append-failed #f
+                      "required void security audit could not be appended")))])
+              (audit-append!
+               connection
+               (void-resolved-event
+                (transaction-command-commit-plan-actor-operator-id plan)
+                (transaction-command-approver-attribution-approver-operator-id
+                 approver)
+                (transaction-command-approver-attribution-approval-id approver)
+                command-id
+                (transaction-command-transaction-id command)
+                (string-replace
+                 (symbol->string (transaction-command-receipt-outcome-kind
+                                  receipt))
+                 "-" "_")
+                (transaction-command-receipt-outcome-code receipt)))))
+          fresh-result]
          [else
           (error
            who

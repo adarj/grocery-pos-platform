@@ -48,6 +48,8 @@ The ordinary bundle never includes:
 
 - `pos.db`, WAL, SHM, or rollback journals;
 - backups or displaced recovery databases;
+- the v11 security audit ledger, its event JSON, hashes, operator IDs, session
+  IDs, or approval IDs;
 - transaction events, command receipts, receipt contents, catalog, cashier,
   operator/role roster, credential verifier, or shift contents;
 - raw journald message text;

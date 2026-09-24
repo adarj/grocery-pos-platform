@@ -8,11 +8,13 @@
          operator-session-token-valid-shape?
          (struct-out operator-session)
          (struct-out issued-operator-session)
+         (struct-out operator-session-expiration)
          make-operator-session-store
          operator-session-store?
          operator-session-store-current
          operator-session-store-issue!
          operator-session-store-find
+         operator-session-store-find/observed
          operator-session-store-refresh!
          operator-session-store-invalidate!)
 
@@ -42,6 +44,11 @@
    credential-revision
    created-at-epoch-ms
    absolute-expires-at-epoch-ms)
+  #:transparent)
+
+;; Safe observation returned only after leaving the session-store semaphore.
+;; It contains no bearer token or token digest.
+(struct operator-session-expiration (session-id operator-id reason)
   #:transparent)
 
 (struct operator-session-store
@@ -106,12 +113,16 @@
    (operator-session-token-digest session)
    (token->digest token)))
 
-(define (session-expired? session monotonic-now)
-  (or (>= monotonic-now
-          (operator-session-absolute-expires-at-monotonic-ms session))
-      (>= (- monotonic-now
-             (operator-session-last-activity-at-monotonic-ms session))
-          operator-session-idle-timeout-ms)))
+(define (session-expiration-reason session monotonic-now)
+  (cond
+    [(>= monotonic-now
+         (operator-session-absolute-expires-at-monotonic-ms session))
+     'absolute_timeout]
+    [(>= (- monotonic-now
+            (operator-session-last-activity-at-monotonic-ms session))
+         operator-session-idle-timeout-ms)
+     'idle_timeout]
+    [else #f]))
 
 (define (operator-session-store-current store)
   (check-store 'operator-session-store-current store)
@@ -168,7 +179,7 @@
       epoch-now
       absolute-expires-at-epoch-ms))))
 
-(define (find-under-lock store token refresh?)
+(define (find-under-lock store token refresh? report-expiration?)
   (cond
     [(not (operator-session-token-valid-shape? token)) #f]
     [else
@@ -179,9 +190,14 @@
         (define monotonic-now
           ((operator-session-store-current-monotonic-ms store)))
         (cond
-          [(session-expired? current monotonic-now)
+          [(session-expiration-reason current monotonic-now)
+           => (lambda (reason)
            (set-box! (operator-session-store-current-box store) #f)
-           #f]
+           (and report-expiration?
+                (operator-session-expiration
+                 (operator-session-session-id current)
+                 (operator-session-operator-id current)
+                 reason)))]
           [refresh?
            (define refreshed
              (struct-copy operator-session current
@@ -194,13 +210,19 @@
   (check-store 'operator-session-store-find store)
   (call-with-semaphore
    (operator-session-store-lock store)
-   (lambda () (find-under-lock store token #f))))
+   (lambda () (find-under-lock store token #f #f))))
+
+(define (operator-session-store-find/observed store token)
+  (check-store 'operator-session-store-find/observed store)
+  (call-with-semaphore
+   (operator-session-store-lock store)
+   (lambda () (find-under-lock store token #f #t))))
 
 (define (operator-session-store-refresh! store token)
   (check-store 'operator-session-store-refresh! store)
   (call-with-semaphore
    (operator-session-store-lock store)
-   (lambda () (find-under-lock store token #t))))
+   (lambda () (find-under-lock store token #t #f))))
 
 (define (operator-session-store-invalidate! store token)
   (check-store 'operator-session-store-invalidate! store)

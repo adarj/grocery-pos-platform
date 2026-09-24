@@ -1,9 +1,13 @@
 #lang racket
 
-(require "authentication-service.rkt"
+(require file/sha1
+         racket/random
+         "authentication-service.rkt"
+         "security-audit-service.rkt"
          "transaction-command.rkt"
          "transaction-service.rkt"
          "../domain/operator-identity.rkt"
+         "../domain/security-audit-event.rkt"
          "../domain/transaction-void-approval.rkt"
          "../persistence/sqlite-authentication.rkt"
          "../persistence/transaction-void-approval-store.rkt"
@@ -20,7 +24,7 @@
          transaction-void-approval-service-request)
 
 (struct transaction-void-approval-service
-  (authentication-service transaction-service authority))
+  (authentication-service transaction-service authority audit-source audit-append!))
 
 (struct transaction-void-approval-granted
   (approval-token expires-at-epoch-ms approver-operator-id
@@ -31,7 +35,9 @@
 (struct transaction-void-approval-unavailable () #:transparent)
 
 (define (make-transaction-void-approval-service
-         authentication-service transaction-service authority)
+         authentication-service transaction-service authority
+         #:audit-source [audit-source #f]
+         #:audit-append! [audit-append! #f])
   (unless (authentication-service? authentication-service)
     (raise-argument-error
      'make-transaction-void-approval-service
@@ -47,8 +53,29 @@
      'make-transaction-void-approval-service
      "transaction-void-approval-authority?"
      authority))
+  (define source
+    (or audit-source
+        (make-security-audit-source
+         'pos_core
+         (string-append "audit_runtime_"
+                        (bytes->hex-string (crypto-random-bytes 16)))
+         (lambda ()
+           (inexact->exact (floor (current-inexact-milliseconds)))))))
+  (unless (security-audit-source? source)
+    (raise-argument-error 'make-transaction-void-approval-service
+                          "security-audit-source?" source))
+  (define effective-append!
+    (or audit-append!
+        (lambda (writer-connection event)
+          (security-audit-append-required!/in-transaction!
+           source writer-connection event))))
+  (unless (and (procedure? effective-append!)
+               (procedure-arity-includes? effective-append! 2))
+    (raise-argument-error 'make-transaction-void-approval-service
+                          "two-argument audit append procedure?"
+                          effective-append!))
   (transaction-void-approval-service
-   authentication-service transaction-service authority))
+   authentication-service transaction-service authority source effective-append!))
 
 (define (requester-may-approve-target? service requester command)
   (cond
@@ -129,7 +156,9 @@
         grant
         password-hash
         (transaction-void-approval-authority-issuer-instance-id authority)
-        (issued-transaction-void-approval-granted-at-monotonic-ms issued)))
+        (issued-transaction-void-approval-granted-at-monotonic-ms issued)
+        #:audit-append!
+        (transaction-void-approval-service-audit-append! service)))
      (if (transaction-void-approval-grant-stored? stored)
          (transaction-void-approval-granted
           (issued-transaction-void-approval-token issued)
@@ -162,9 +191,19 @@
         (lambda (approver password-hash credential-revision)
           (issue-grant-after-verification
            service requester command approver password-hash credential-revision))))
-     (cond
-       [(authentication-credential-verification-failed? result)
-        (transaction-void-approval-not-granted)]
-       [(authentication-credential-verification-unavailable? result)
-        (transaction-void-approval-unavailable)]
-       [else result])]))
+     (define public-result
+       (cond
+         [(authentication-credential-verification-failed? result)
+          (transaction-void-approval-not-granted)]
+         [(authentication-credential-verification-unavailable? result)
+          (transaction-void-approval-unavailable)]
+         [else result]))
+     (when (transaction-void-approval-not-granted? public-result)
+       (security-audit-append-best-effort!
+        (transaction-void-approval-service-audit-source service)
+        (authentication-service-connection authentication-service)
+        (approval-not-granted-event
+         (authenticated-operator-operator-id requester)
+         (transaction-command-command-id command)
+         (transaction-command-transaction-id command))))
+     public-result]))

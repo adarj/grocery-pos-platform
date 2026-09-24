@@ -1,7 +1,10 @@
 #lang racket
 
 (require (prefix-in db: db)
+         file/sha1
+         racket/random
          "../domain/operator-identity.rkt"
+         "security-audit-service.rkt"
          "../persistence/sqlite-operators.rkt"
          "../security/operator-pin.rkt")
 
@@ -18,7 +21,8 @@
          operator-service-enroll-pin
          operator-service-verify-pin)
 
-(struct operator-service (connection hash-pin verify-pin-provider) #:transparent)
+(struct operator-service (connection hash-pin verify-pin-provider audit-append!)
+  #:transparent)
 (struct operator-pin-enrollment-succeeded (operator-id credential-revision)
   #:transparent)
 (struct operator-pin-enrollment-rejected (code) #:transparent)
@@ -33,13 +37,31 @@
 (define (make-operator-service
          connection
          #:hash-pin [hash-pin hash-operator-pin]
-         #:verify-pin [verify-pin verify-operator-pin])
+         #:verify-pin [verify-pin verify-operator-pin]
+         #:audit-source [audit-source #f]
+         #:audit-append! [audit-append! #f])
   (define who 'make-operator-service)
   (unless (db:connection? connection)
     (raise-argument-error who "connection?" connection))
   (check-provider who hash-pin 1 "hash-pin")
   (check-provider who verify-pin 2 "verify-pin")
-  (operator-service connection hash-pin verify-pin))
+  (define source
+    (or audit-source
+        (make-security-audit-source
+         'root_cli
+         (string-append "audit_root_cli_"
+                        (bytes->hex-string (crypto-random-bytes 16)))
+         (lambda ()
+           (inexact->exact (floor (current-inexact-milliseconds)))))))
+  (unless (security-audit-source? source)
+    (raise-argument-error who "security-audit-source?" source))
+  (define effective-audit-append!
+    (or audit-append!
+        (lambda (writer-connection event)
+          (security-audit-append-required!/in-transaction!
+           source writer-connection event))))
+  (check-provider who effective-audit-append! 2 "audit-append!")
+  (operator-service connection hash-pin verify-pin effective-audit-append!))
 
 (define (check-service who service)
   (unless (operator-service? service)
@@ -56,17 +78,20 @@
 (define (operator-service-create service operator-id display-name role)
   (check-service 'operator-service-create service)
   (create-operator!
-   (operator-service-connection service) operator-id display-name role))
+   (operator-service-connection service) operator-id display-name role
+   #:audit-append! (operator-service-audit-append! service)))
 
 (define (operator-service-set-role service operator-id role)
   (check-service 'operator-service-set-role service)
   (set-operator-role!
-   (operator-service-connection service) operator-id role))
+   (operator-service-connection service) operator-id role
+   #:audit-append! (operator-service-audit-append! service)))
 
 (define (operator-service-set-active service operator-id active?)
   (check-service 'operator-service-set-active service)
   (set-operator-active!
-   (operator-service-connection service) operator-id active?))
+   (operator-service-connection service) operator-id active?
+   #:audit-append! (operator-service-audit-append! service)))
 
 (define (operator-service-enroll-pin service operator-id pin)
   (check-service 'operator-service-enroll-pin service)
@@ -84,7 +109,9 @@
      (define password-hash
        ((operator-service-hash-pin service) pin))
      (define stored
-       (store-initial-operator-pin! connection operator-id password-hash))
+       (store-initial-operator-pin!
+        connection operator-id password-hash
+        #:audit-append! (operator-service-audit-append! service)))
      (cond
        [(operator-pin-store-succeeded? stored)
         (operator-pin-enrollment-succeeded

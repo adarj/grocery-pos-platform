@@ -54,6 +54,37 @@
     (lambda () (db:disconnect connection))))
 
 (module+ test
+  (test-case "required shift audit failure rolls back opening and closing"
+    (call-with-service
+     (lambda (connection ordinary)
+       (define failing
+         (make-register-operations-service
+          connection
+          #:current-epoch-ms (lambda () 2000)
+          #:generate-shift-id (lambda () "shift-audit-fail")
+          #:audit-append!
+          (lambda (_connection _event)
+            (error 'test "simulated audit insertion failure"))))
+       (check-exn exn:fail?
+                  (lambda ()
+                    (register-operations-open-shift
+                     failing alice (money 12345))))
+       (check-equal?
+        (db:query-value connection "SELECT COUNT(*) FROM register_shifts") 0)
+       (check-equal?
+        (db:query-value connection "SELECT COUNT(*) FROM shift_cash_movements") 0)
+       (register-operations-open-shift ordinary alice (money 12345))
+       (check-exn exn:fail?
+                  (lambda ()
+                    (register-operations-close-shift
+                     failing alice "shift-1" (money 12345))))
+       (check-equal?
+        (db:query-value connection
+                        "SELECT COUNT(*) FROM shift_cash_reconciliations") 0)
+       (check-equal?
+        (db:query-value connection
+                        "SELECT COUNT(*) FROM register_shifts WHERE closed_at_epoch_ms IS NULL") 1))))
+
   (test-case "shift opening derives exact authenticated operator identity"
     (call-with-service
      (lambda (_connection service)
@@ -75,14 +106,19 @@
   (test-case "only manager may close another operator shift"
     (for ([principal (in-list (list bob sam))])
       (call-with-service
-       (lambda (_connection service)
+       (lambda (connection service)
          (register-operations-open-shift service alice (money 1000))
          (define result
            (register-operations-close-shift
             service principal "shift-1" (money 1000)))
          (check-pred register-shift-close-rejected? result)
          (check-equal? (register-shift-close-rejected-code result)
-                       'authorization-denied))))
+                       'authorization-denied)
+         (check-equal?
+          (db:query-value
+           connection
+           "SELECT COUNT(*) FROM security_audit_events WHERE event_type = 'authorization.denied'")
+          1))))
     (call-with-service
      (lambda (_connection service)
        (register-operations-open-shift service alice (money 1000))
@@ -122,7 +158,7 @@
 
   (test-case "open own cash summary is limited while read-any is full"
     (call-with-service
-     (lambda (_connection service)
+     (lambda (connection service)
        (register-operations-open-shift service alice (money 12345))
        (define own-open
          (register-operations-load-cash-summary service alice "shift-1"))
@@ -131,6 +167,11 @@
        (check-pred
         register-cash-summary-authorization-denied?
         (register-operations-load-cash-summary service bob "shift-1"))
+       (check-equal?
+        (db:query-value
+         connection
+         "SELECT COUNT(*) FROM security_audit_events WHERE event_type = 'authorization.denied'")
+        1)
        (for ([principal (in-list (list sam morgan))])
          (define broad
            (register-operations-load-cash-summary

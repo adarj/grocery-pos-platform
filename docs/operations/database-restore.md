@@ -26,7 +26,7 @@ service.
 The workflow is:
 
 ```text
-validate selected backup read-only
+validate selected backup read-only (including the v11 security audit chain)
   -> copy to /var/lib/grocery-pos/.grocery-pos-restore.<random>.partial
   -> synchronize and validate staged copy read-only
   -> systemctl stop grocery-pos-core

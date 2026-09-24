@@ -4,6 +4,7 @@
          racket/file
          rackunit
          "../pos/application/authentication-service.rkt"
+         "../pos/application/security-audit-service.rkt"
          "../pos/application/transaction-command-receipt.rkt"
          "../pos/application/transaction-command.rkt"
          "../pos/application/transaction-service.rkt"
@@ -14,6 +15,7 @@
          "../pos/domain/transaction-void-approval.rkt"
          "../pos/domain/transaction-event.rkt"
          "../pos/persistence/pos-database-migrations.rkt"
+         "../pos/persistence/security-audit-store.rkt"
          "../pos/persistence/sqlite-connection.rkt"
          "../pos/persistence/sqlite-register-operations.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt"
@@ -60,7 +62,8 @@
                            #:commit-command!
                            [commit-command! commit-transaction-command-outcome!]
                            #:database-path [database-path #f]
-                           #:approval-now [approval-now (lambda () 2000)])
+                           #:approval-now [approval-now (lambda () 2000)]
+                           #:audit-source [audit-source #f])
   (define connection
     (if database-path
         (open-pos-sqlite-connection database-path 'create)
@@ -89,13 +92,20 @@
        register-shift-opened?
        (open-register-shift!
         connection "Alice" (money 1000) (lambda () 1000)
-        (lambda () "shift-alice"))))
+        (lambda () "shift-alice")
+        #:audit-append!
+        (lambda (writer event)
+          (append-security-audit-event!/in-transaction!
+           writer event #:source-kind 'pos_core
+           #:source-instance-id "audit_runtime_test"
+           #:occurred-at-epoch-ms 1000)))))
     (lambda ()
       (proc connection
             (make-transaction-service
              connection
              #:catalog-lookup fake-catalog-lookup
              #:commit-command! commit-command!
+             #:audit-source audit-source
              #:approval-consumer
              (lambda (approval-connection capability requester command)
                (consume-transaction-void-approval!/in-transaction!
@@ -108,6 +118,42 @@
   (transaction-service-command-resolved? result))
 
 (module+ test
+  (test-case "best-effort denial and approval-required audit failures preserve zero mutation"
+    (call-with-service
+     (lambda (connection service)
+       (check-true
+        (resolved?
+         (transaction-service-execute-command
+          service alice
+          (start-transaction-command "cmd-audit-bad-start" "txn-audit-bad" 0))))
+       (check-pred
+        transaction-service-authorization-denied?
+        (transaction-service-execute-command
+         service bob
+         (scan-barcode-command
+          "cmd-audit-bad-foreign" "txn-audit-bad" 1 "049000001234")))
+       (check-pred
+        transaction-service-approval-required?
+        (transaction-service-execute-command
+         service alice
+         (void-transaction-command "cmd-audit-bad-void" "txn-audit-bad" 1)))
+       (check-equal?
+        (db:query-value
+         connection
+         "SELECT COUNT(*) FROM transaction_command_receipts WHERE command_id IN ('cmd-audit-bad-foreign', 'cmd-audit-bad-void')")
+        0)
+       (check-equal?
+        (db:query-value connection
+                        "SELECT COUNT(*) FROM transaction_events WHERE transaction_id = 'txn-audit-bad'")
+        1)
+       (check-equal?
+        (db:query-value connection
+                        "SELECT active_transaction_id FROM register_shifts WHERE shift_id = 'shift-alice'")
+        "txn-audit-bad"))
+     #:audit-source
+     (make-security-audit-source
+      'pos_core "audit_runtime_invalid_clock" (lambda () -1))))
+
   (test-case "fresh commands require the active shift owner for every role"
     (call-with-service
      (lambda (connection service)
@@ -129,7 +175,7 @@
 
   (test-case "reads use durable ownership while supervisor and manager have read-any"
     (call-with-service
-     (lambda (_connection service)
+     (lambda (connection service)
        (check-true
         (resolved?
          (transaction-service-execute-command
@@ -137,8 +183,40 @@
           (start-transaction-command "cmd-read-start" "txn-read" 0))))
        (check-pred transaction-service-success?
                    (transaction-service-load-transaction service alice "txn-read"))
+       (check-true
+        (resolved?
+         (transaction-service-execute-command
+          service alice
+          (scan-barcode-command
+           "cmd-read-scan" "txn-read" 1 "049000001234"))))
        (check-pred transaction-service-not-found?
                    (transaction-service-load-transaction service bob "txn-read"))
+       (check-pred transaction-service-receipt-not-found?
+                   (transaction-service-load-canonical-receipt
+                    service bob "txn-read"))
+       (check-equal?
+        (db:query-value
+         connection
+         "SELECT COUNT(*) FROM security_audit_events WHERE event_type = 'authorization.denied'")
+        2)
+       (check-pred transaction-service-not-found?
+                   (transaction-service-load-transaction
+                    service bob "txn-genuinely-missing"))
+       (check-pred transaction-service-receipt-not-found?
+                   (transaction-service-load-canonical-receipt
+                    service bob "txn-genuinely-missing"))
+       (check-equal?
+        (db:query-value
+         connection
+         "SELECT COUNT(*) FROM security_audit_events WHERE event_type = 'authorization.denied'")
+        2)
+       (for ([event-json
+              (in-list
+               (db:query-list
+                connection
+                "SELECT event_json FROM security_audit_events WHERE event_type = 'authorization.denied' ORDER BY sequence"))])
+         (check-false (string-contains? event-json "049000001234"))
+         (check-false (string-contains? event-json "txn-genuinely-missing")))
        (check-pred transaction-service-success?
                    (transaction-service-load-transaction service sam "txn-read"))
        (check-pred transaction-service-success?
@@ -396,6 +474,12 @@
   (test-case "legacy unattributed exact receipt remains recoverable without attribution"
     (call-with-service
      (lambda (connection service)
+       (db:query-exec connection "DROP TRIGGER security_audit_events_no_update")
+       (db:query-exec connection "DROP TRIGGER security_audit_events_no_delete")
+       (db:query-exec connection "DROP TRIGGER security_audit_events_append_order")
+       (db:query-exec connection "DROP TABLE security_audit_events")
+       (db:query-exec
+        connection "DELETE FROM pos_schema_migrations WHERE version = 11")
        (db:query-exec
         connection "DROP TABLE transaction_void_approval_grants")
        (db:query-exec

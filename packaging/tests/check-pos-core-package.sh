@@ -32,7 +32,7 @@ fi
   fail "unexpected RPM package name"
 [[ "$(rpm -qp --queryformat '%{VERSION}' "$rpm_path")" == "0.0.0" ]] ||
   fail "unexpected internal RPM version"
-[[ "$(rpm -qp --queryformat '%{RELEASE}' "$rpm_path")" == "0.7.dev" ]] ||
+[[ "$(rpm -qp --queryformat '%{RELEASE}' "$rpm_path")" == "0.8.dev" ]] ||
   fail "unexpected internal RPM release"
 [[ "$(rpm -qp --queryformat '%{ARCH}' "$rpm_path")" == "noarch" ]] ||
   fail "RPM architecture is not noarch"
@@ -84,6 +84,10 @@ required_files=(
   "$payload_root/pos/api/approval-http.rkt"
   "$payload_root/pos/application/authentication-service.rkt"
   "$payload_root/pos/application/transaction-void-approval-service.rkt"
+  "$payload_root/pos/application/security-audit-service.rkt"
+  "$payload_root/pos/domain/security-audit-event.rkt"
+  "$payload_root/pos/persistence/security-audit-event-codec.rkt"
+  "$payload_root/pos/persistence/security-audit-store.rkt"
   "$payload_root/pos/persistence/sqlite-connection.rkt"
   "$payload_root/pos/persistence/sqlite-maintenance.rkt"
   "$payload_root/pos/persistence/atomic-file.rkt"
@@ -109,6 +113,7 @@ required_files=(
   "$payload_root/scripts/support-diagnostics.rkt"
   "$payload_root/scripts/appliance.rkt"
   "$payload_root/scripts/operator-auth.rkt"
+  "$payload_root/scripts/security-audit.rkt"
   "$payload_root/scripts/catalog.rkt"
   "$payload_root/scripts/register-configuration.rkt"
   "$payload_root/run-pos-core"
@@ -121,6 +126,7 @@ required_files=(
   "$extract_root/usr/bin/grocery-pos-recovery"
   "$extract_root/usr/bin/grocery-pos-support"
   "$extract_root/usr/bin/grocery-pos-auth"
+  "$extract_root/usr/bin/grocery-pos-audit"
   "$payload_root/vendor/racket/collects/crypto/main.rkt"
   "$payload_root/vendor/racket/collects/crypto/argon2.rkt"
   "$payload_root/vendor/racket/collects/asn1/main.rkt"
@@ -304,6 +310,20 @@ grep -Fq '/usr/bin/stty -echo' "$auth_launcher" ||
   fail "auth launcher does not disable terminal echo for PIN entry"
 if grep -Eq -- '--pin|SQLITE_DB_PATH|[[:space:]]PIN([[:space:]]|=)' "$auth_launcher"; then
   fail "auth launcher exposes a PIN argv or database override surface"
+fi
+audit_launcher="$extract_root/usr/bin/grocery-pos-audit"
+[[ "$(stat -c '%a' "$audit_launcher")" == "755" ]] ||
+  fail "audit launcher mode is not 0755"
+grep -Fq '/usr/libexec/grocery-pos-core/scripts/security-audit.rkt' \
+  "$audit_launcher" ||
+  fail "audit launcher does not use packaged Racket inspection code"
+grep -Fq '$(/usr/bin/id -u)' "$audit_launcher" ||
+  fail "audit launcher does not enforce the root boundary"
+grep -Fq '/var/lib/grocery-pos/pos.db' \
+  "$payload_root/scripts/security-audit.rkt" ||
+  fail "audit inspection code does not fix the appliance database path"
+if grep -Eq 'SQLITE_DB_PATH|--database' "$audit_launcher"; then
+  fail "audit launcher exposes a database override surface"
 fi
 if grep -R -a -E '\$argon2id\$v=[0-9]+\$m=' \
   "$payload_root/pos" "$payload_root/scripts" >/dev/null; then

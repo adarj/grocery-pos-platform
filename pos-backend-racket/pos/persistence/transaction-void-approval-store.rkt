@@ -2,6 +2,7 @@
 
 (require (prefix-in db: db)
          "../application/transaction-command.rkt"
+         "../domain/security-audit-event.rkt"
          "../domain/transaction-void-approval.rkt"
          "sqlite-auth-throttle.rkt"
          "../security/authorization-policy.rkt"
@@ -111,7 +112,8 @@ SQL
 ;; current, clears the shared durable throttle after successful credential
 ;; authentication, rechecks approval privilege, and replaces the scoped grant.
 (define (confirm-and-replace-transaction-void-approval-grant!
-         connection grant expected-password-hash issuer-instance-id monotonic-now)
+         connection grant expected-password-hash issuer-instance-id monotonic-now
+         #:audit-append! audit-append!)
   (define who 'confirm-and-replace-transaction-void-approval-grant!)
   (check-connection who connection)
   (unless (transaction-void-approval-grant? grant)
@@ -153,7 +155,18 @@ SQL
              'approval.transaction_void)
             (if (replace-transaction-void-approval-grant!/in-transaction!
                  connection grant issuer-instance-id monotonic-now)
-                (transaction-void-approval-grant-stored)
+                (begin
+                  (audit-append!
+                   connection
+                   (approval-granted-event
+                    (transaction-void-approval-grant-approval-id grant)
+                    (transaction-void-approval-grant-requester-operator-id grant)
+                    (transaction-void-approval-grant-approver-operator-id grant)
+                    (transaction-void-approval-grant-command-id grant)
+                    (transaction-void-approval-grant-transaction-id grant)
+                    (transaction-void-approval-grant-expected-version grant)
+                    (transaction-void-approval-grant-expires-at-epoch-ms grant)))
+                  (transaction-void-approval-grant-stored))
                 (transaction-void-approval-grant-not-stored))
             (transaction-void-approval-grant-not-stored))]))
    #:option 'immediate))

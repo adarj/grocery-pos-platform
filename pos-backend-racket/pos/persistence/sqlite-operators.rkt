@@ -1,7 +1,8 @@
 #lang racket
 
 (require (prefix-in db: db)
-         "../domain/operator-identity.rkt")
+         "../domain/operator-identity.rkt"
+         "../domain/security-audit-event.rkt")
 
 (provide (struct-out operator-create-succeeded)
          (struct-out operator-create-rejected)
@@ -80,7 +81,8 @@ SQL
                                    " ORDER BY operator.operator_id")))])
     (row->operator row)))
 
-(define (create-operator! connection operator-id display-name role)
+(define (create-operator! connection operator-id display-name role
+                          #:audit-append! audit-append!)
   (check-connection 'create-operator! connection)
   ;; Constructing the safe domain representation validates inputs before SQL.
   (define proposed
@@ -107,24 +109,31 @@ SQL
             "INSERT INTO operator_roles (operator_id, role) VALUES (?, ?)"
             operator-id
             (operator-role->string role))
+           (audit-append!
+            connection (operator-created-event operator-id role))
            (operator-create-succeeded proposed))))
    #:option 'immediate))
 
-(define (update-operator! who connection operator-id update!)
+(define (update-operator! who connection operator-id update! event-maker
+                          audit-append!)
   (check-connection who connection)
   (unless (and (string? operator-id) (positive? (string-length operator-id)))
     (raise-argument-error who "non-empty-string?" operator-id))
   (db:call-with-transaction
    connection
    (lambda ()
-     (if (not (load-operator connection operator-id))
+     (define before (load-operator connection operator-id))
+     (if (not before)
          (operator-update-rejected 'operator-not-found)
-         (begin
-           (update!)
-           (operator-update-succeeded (load-operator connection operator-id)))))
+         (let* ([_updated (update!)]
+                [after (load-operator connection operator-id)]
+                [audit-event (event-maker before after)])
+           (when audit-event (audit-append! connection audit-event))
+           (operator-update-succeeded after))))
    #:option 'immediate))
 
-(define (set-operator-role! connection operator-id role)
+(define (set-operator-role! connection operator-id role
+                            #:audit-append! audit-append!)
   (unless (operator-role? role)
     (raise-argument-error 'set-operator-role! "operator-role?" role))
   (update-operator!
@@ -136,9 +145,17 @@ SQL
       connection
       "UPDATE operator_roles SET role = ? WHERE operator_id = ?"
       (operator-role->string role)
-      operator-id))))
+      operator-id))
+   (lambda (before after)
+     (and (not (eq? (operator-identity-role before)
+                    (operator-identity-role after)))
+          (operator-role-changed-event
+           operator-id (operator-identity-role before)
+           (operator-identity-role after))))
+   audit-append!))
 
-(define (set-operator-active! connection operator-id active?)
+(define (set-operator-active! connection operator-id active?
+                              #:audit-append! audit-append!)
   (unless (boolean? active?)
     (raise-argument-error 'set-operator-active! "boolean?" active?))
   (update-operator!
@@ -150,7 +167,14 @@ SQL
       connection
       "UPDATE operators SET active = ? WHERE operator_id = ?"
       (if active? 1 0)
-      operator-id))))
+      operator-id))
+   (lambda (before after)
+     (and (not (eq? (operator-identity-active? before)
+                    (operator-identity-active? after)))
+          (operator-active-changed-event
+           operator-id (operator-identity-active? before)
+           (operator-identity-active? after))))
+   audit-append!))
 
 (define (load-operator-pin-record connection operator-id)
   (check-connection 'load-operator-pin-record connection)
@@ -168,7 +192,8 @@ SQL
      operator-id))
   (and row (operator-pin-record (vector-ref row 0) (vector-ref row 1))))
 
-(define (store-initial-operator-pin! connection operator-id password-hash)
+(define (store-initial-operator-pin! connection operator-id password-hash
+                                     #:audit-append! audit-append!)
   (check-connection 'store-initial-operator-pin! connection)
   (unless (and (string? operator-id) (positive? (string-length operator-id)))
     (raise-argument-error
@@ -197,5 +222,6 @@ INSERT INTO operator_pin_credentials
 VALUES (?, ?, 1)
 SQL
          operator-id password-hash)
+        (audit-append! connection (operator-pin-enrolled-event operator-id 1))
         (operator-pin-store-succeeded 1)]))
    #:option 'immediate))

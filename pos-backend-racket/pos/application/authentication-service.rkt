@@ -1,7 +1,11 @@
 #lang racket
 
 (require (prefix-in db: db)
+         file/sha1
+         racket/random
+         "security-audit-service.rkt"
          "../domain/operator-identity.rkt"
+         "../domain/security-audit-event.rkt"
          "../persistence/sqlite-authentication.rkt"
          "../persistence/sqlite-auth-throttle.rkt"
          "../persistence/sqlite-operators.rkt"
@@ -25,7 +29,8 @@
          authentication-service-with-verified-credential
          authentication-service-login
          authentication-service-authenticate
-         authentication-service-logout)
+         authentication-service-logout
+         authentication-service-record-authorization-denial!)
 
 (define dummy-pin "50627184")
 (define default-dummy-password-hash
@@ -51,7 +56,8 @@
    verify-pin
    dummy-password-hash
    attempt-lock
-   after-verification)
+   after-verification
+   audit-append!)
   #:transparent)
 
 (define (system-current-epoch-ms)
@@ -72,7 +78,9 @@
          #:current-epoch-ms [current-epoch-ms system-current-epoch-ms]
          #:verify-pin [verify-pin verify-operator-pin]
          #:dummy-password-hash [dummy-password-hash #f]
-         #:after-verification [after-verification void])
+         #:after-verification [after-verification void]
+         #:audit-source [audit-source #f]
+         #:audit-append! [audit-append! #f])
   (define who 'make-authentication-service)
   (unless (db:connection? connection)
     (raise-argument-error who "connection?" connection))
@@ -92,6 +100,21 @@
   (unless (operator-pin-password-hash-supported? effective-dummy-hash)
     (raise-argument-error
      who "supported-operator-pin-password-hash?" effective-dummy-hash))
+  (define source
+    (or audit-source
+        (make-security-audit-source
+         'pos_core
+         (string-append "audit_runtime_"
+                        (bytes->hex-string (crypto-random-bytes 16)))
+         current-epoch-ms)))
+  (unless (security-audit-source? source)
+    (raise-argument-error who "security-audit-source?" source))
+  (define effective-audit-append!
+    (or audit-append!
+        (lambda (audit-connection event)
+          (security-audit-append-required!
+           source audit-connection event))))
+  (check-procedure who effective-audit-append! 2 "audit-append!")
   (authentication-service
    connection
    effective-session-store
@@ -99,7 +122,31 @@
    verify-pin
    effective-dummy-hash
    (make-semaphore 1)
-   after-verification))
+   after-verification
+   effective-audit-append!))
+
+(define (append-auth-audit-best-effort! service event)
+  (with-handlers ([exn:fail?
+                   (lambda (_exception)
+                     (eprintf "security audit append failed\n")
+                     #f)])
+    ((authentication-service-audit-append! service)
+     (authentication-service-connection service) event)
+    #t))
+
+(define (authentication-service-record-authorization-denial!
+         service authenticated action resource-kind [resource-id #f])
+  (define principal
+    (authentication-session-authenticated-principal authenticated))
+  (define session
+    (authentication-session-authenticated-session authenticated))
+  (append-auth-audit-best-effort!
+   service
+   (authorization-denied-event
+    (authenticated-operator-operator-id principal)
+    (authenticated-operator-role principal)
+    (operator-session-session-id session)
+    action resource-kind resource-id)))
 
 (define (operator->principal operator)
   (authenticated-operator
@@ -190,26 +237,51 @@
              (authentication-service-session-store service)
              operator-id
              credential-revision))
-          (authentication-login-succeeded
-           (issued-operator-session-access-token issued)
-           (operator->principal current-operator)
-           (issued-operator-session-session-id issued)
-           (issued-operator-session-absolute-expires-at-epoch-ms issued))]
+          (with-handlers
+              ([exn:fail?
+                (lambda (_exception)
+                  (operator-session-store-invalidate!
+                   (authentication-service-session-store service)
+                   (issued-operator-session-access-token issued))
+                  (authentication-login-unavailable))])
+            ((authentication-service-audit-append! service)
+             (authentication-service-connection service)
+             (login-succeeded-event
+              operator-id
+              (operator-identity-role current-operator)
+              (issued-operator-session-session-id issued)))
+            (authentication-login-succeeded
+             (issued-operator-session-access-token issued)
+             (operator->principal current-operator)
+             (issued-operator-session-session-id issued)
+             (issued-operator-session-absolute-expires-at-epoch-ms issued))) ]
          [else (authentication-login-failed)]))))
   (cond
     [(authentication-credential-verification-failed? result)
+     (append-auth-audit-best-effort! service (login-failed-event #f))
      (authentication-login-failed)]
     [(authentication-credential-verification-unavailable? result)
      (authentication-login-unavailable)]
-    [else result]))
+    [else
+     (when (authentication-login-failed? result)
+       (append-auth-audit-best-effort! service (login-failed-event #f)))
+     result]))
 
 (define (authentication-service-authenticate service access-token)
   (unless (authentication-service? service)
     (raise-argument-error
      'authentication-service-authenticate "authentication-service?" service))
   (define store (authentication-service-session-store service))
-  (define session (operator-session-store-find store access-token))
+  (define session (operator-session-store-find/observed store access-token))
   (cond
+    [(operator-session-expiration? session)
+     (append-auth-audit-best-effort!
+      service
+      (session-expired-event
+       (operator-session-expiration-operator-id session)
+       (operator-session-expiration-session-id session)
+       (operator-session-expiration-reason session)))
+     (authentication-session-invalid)]
     [(not session) (authentication-session-invalid)]
     [else
      (with-handlers ([exn:fail?
@@ -231,7 +303,17 @@
                     credential
                     (= (operator-pin-record-credential-revision credential)
                        (operator-session-credential-revision session))))
-          (operator-session-store-invalidate! store access-token)
+         (operator-session-store-invalidate! store access-token)
+          (append-auth-audit-best-effort!
+           service
+           (session-invalidated-event
+            (operator-session-operator-id session)
+            (operator-session-session-id session)
+            (cond
+              [(not operator) 'operator_missing]
+              [(not (operator-identity-active? operator)) 'operator_disabled]
+              [(not credential) 'credential_missing]
+              [else 'credential_changed])))
           (authentication-session-invalid)]
          [else
           ;; Refresh only after authoritative security state is confirmed. A
@@ -250,5 +332,12 @@
     [(authentication-session-authenticated? authenticated)
      (operator-session-store-invalidate!
       (authentication-service-session-store service) access-token)
+     (define session
+       (authentication-session-authenticated-session authenticated))
+     (append-auth-audit-best-effort!
+      service
+      (logout-event
+       (operator-session-operator-id session)
+       (operator-session-session-id session)))
      (authentication-logout-succeeded)]
     [else authenticated]))

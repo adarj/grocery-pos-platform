@@ -135,6 +135,12 @@ roll back together. A nonzero variance is preserved honestly and does not
 block closure. Repeated close returns the first durable reconciliation without
 rewriting it, even if the repeated request supplies another count.
 
+Schema v11 also appends a minimal required `shift.opened` or `shift.closed`
+security-audit event within the corresponding existing SQLite writer
+transaction. The event identifies operators and shift but contains no opening,
+counted, expected, or variance amount. It does not replace the cash ledger or
+reconciliation; see [Local Security Audit Ledger](../security/security-audit-ledger.md).
+
 Open/close are operational resource writes, not Transaction Command Schema
 commands. After an uncertain response Flutter explicitly reads register state
 and the exact shift cash summary; it does not automatically retry the write or

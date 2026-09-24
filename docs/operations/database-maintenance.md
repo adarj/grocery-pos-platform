@@ -106,6 +106,11 @@ verify exact current live source
   -> same-filesystem atomic rename to OUTPUT
 ```
 
+On a current v11 database, schema/application validation also streams and
+verifies the complete hash-chained security audit ledger. A broken chain makes
+the candidate invalid; it is not published. The backup contains audit records
+because they are authoritative local evidence, but support bundles never do.
+
 The `VACUUM INTO` filename is parameter-bound rather than interpolated into
 SQL. The result is a consistent standalone SQLite snapshot; raw `cp` of a live
 WAL main file, or manual copying of DB/WAL/SHM sidecars, is not the canonical

@@ -39,7 +39,7 @@
         (define result
           (build-initial-pos-database!
            valid-catalog-path valid-register-path target))
-        (check-equal? (initial-pos-database-schema-version result) 10)
+        (check-equal? (initial-pos-database-schema-version result) 11)
         (check-true (file-exists? target))
         (check-true
          (sqlite-backup-validation-valid?

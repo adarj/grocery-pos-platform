@@ -1,11 +1,15 @@
 #lang racket
 
 (require (prefix-in db: db)
+         file/sha1
+         racket/random
          "authentication-service.rkt"
+         "security-audit-service.rkt"
          "transaction-command-receipt.rkt"
          "transaction-command.rkt"
          "../domain/canonical-receipt.rkt"
          "../domain/register-operations.rkt"
+         "../domain/security-audit-event.rkt"
          "../domain/transaction-command-actor-attribution.rkt"
          "../domain/transaction.rkt"
          (prefix-in op: "../domain/transaction-operational-context.rkt")
@@ -67,7 +71,8 @@
    legacy-unapproved-void?
    approval-consumer
    commit-command!
-   current-epoch-ms))
+   current-epoch-ms
+   audit-source))
 
 ;; Query results expose authoritative reconstructed transaction state.
 (struct transaction-service-success (transaction version)
@@ -139,7 +144,8 @@
          #:approval-consumer [approval-consumer #f]
          #:commit-command!
          [commit-command! commit-transaction-command-outcome!]
-         #:current-epoch-ms [current-epoch-ms #f])
+         #:current-epoch-ms [current-epoch-ms #f]
+         #:audit-source [audit-source #f])
   (define who 'make-transaction-service)
   (unless (db:connection? connection)
     (raise-argument-error who "connection?" connection))
@@ -159,6 +165,16 @@
   (check-procedure who commit-command! "commit-command!")
   (when current-epoch-ms
     (check-procedure who current-epoch-ms "current-epoch-ms"))
+  (define effective-audit-source
+    (or audit-source
+        (make-security-audit-source
+         'pos_core
+         (string-append "audit_runtime_"
+                        (bytes->hex-string (crypto-random-bytes 16)))
+         (lambda ()
+           (inexact->exact (floor (current-inexact-milliseconds)))))))
+  (unless (security-audit-source? effective-audit-source)
+    (raise-argument-error who "security-audit-source?" effective-audit-source))
   (transaction-service
    connection
    catalog-lookup
@@ -170,7 +186,26 @@
    legacy-unapproved-void?
    approval-consumer
    commit-command!
-   current-epoch-ms))
+   current-epoch-ms
+   effective-audit-source))
+
+(define (audit-transaction-denial! service principal action kind resource-id)
+  (security-audit-append-best-effort!
+   (transaction-service-audit-source service)
+   (transaction-service-connection service)
+   (authorization-denied-event
+    (authenticated-operator-operator-id principal)
+    (authenticated-operator-role principal)
+    #f action kind resource-id)))
+
+(define (audit-transaction-approval-required! service principal command)
+  (security-audit-append-best-effort!
+   (transaction-service-audit-source service)
+   (transaction-service-connection service)
+   (approval-required-event
+    (authenticated-operator-operator-id principal)
+    (transaction-command-command-id command)
+    (transaction-command-transaction-id command))))
 
 (define (check-service who service)
   (unless (transaction-service? service)
@@ -303,7 +338,11 @@
           'transaction.read.any)
          result
          ;; Cashier reads deliberately collapse non-ownership into not-found.
-         (transaction-service-not-found transaction-id))]
+         (begin
+           (audit-transaction-denial!
+            service principal 'transaction.read.own
+            'transaction transaction-id)
+           (transaction-service-not-found transaction-id)))]
     [else result]))
 
 (define (transaction-service-load-canonical-receipt
@@ -320,7 +359,11 @@
           'receipt.read.own
           'receipt.read.any)
          (load-canonical-receipt-unrestricted service transaction-id)
-         (transaction-service-receipt-not-found transaction-id))]
+         (begin
+           (audit-transaction-denial!
+            service principal 'receipt.read.own
+            'receipt transaction-id)
+           (transaction-service-receipt-not-found transaction-id)))]
     [(transaction-service-not-found? current)
      (transaction-service-receipt-not-found transaction-id)]
     [else current]))
@@ -766,7 +809,8 @@
     ((transaction-service-load-receipt service)
      (transaction-service-connection service)
      (transaction-command-command-id command)))
-  (cond
+  (define outcome
+    (cond
     [(receipt-load-found? receipt-result)
      (define existing
        (receipt-load-found-receipt receipt-result))
@@ -829,3 +873,11 @@
       who
       "receipt store returned an unsupported load result: ~e"
       receipt-result)]))
+  (cond
+    [(transaction-service-authorization-denied? outcome)
+     (audit-transaction-denial!
+      service principal 'transaction.operate.own
+      'transaction_command (transaction-command-command-id command))]
+    [(transaction-service-approval-required? outcome)
+     (audit-transaction-approval-required! service principal command)])
+  outcome)

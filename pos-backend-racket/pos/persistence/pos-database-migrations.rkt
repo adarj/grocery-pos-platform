@@ -1,6 +1,7 @@
 #lang racket
 
-(require (prefix-in db: db))
+(require (prefix-in db: db)
+         "security-audit-store.rkt")
 
 (provide current-pos-database-schema-version
          read-pos-database-migration-history
@@ -21,6 +22,7 @@
 (define migration-8-name "create_operator_login_throttle")
 (define migration-9-name "create_transaction_command_actor_attributions")
 (define migration-10-name "create_transaction_void_approvals")
+(define migration-11-name "create_security_audit_ledger")
 (define stream-sequence-index-name
   "transaction_events_stream_sequence_unique")
 
@@ -681,6 +683,70 @@ CREATE TABLE transaction_command_legacy_unapproved_void_receipts (
 SQL
   )
 
+(define create-security-audit-events-table-sql
+  #<<SQL
+CREATE TABLE security_audit_events (
+  sequence INTEGER PRIMARY KEY
+    CHECK (typeof(sequence) = 'integer' AND sequence > 0),
+  schema_version INTEGER NOT NULL
+    CHECK (typeof(schema_version) = 'integer' AND schema_version = 1),
+  occurred_at_epoch_ms INTEGER NOT NULL
+    CHECK (typeof(occurred_at_epoch_ms) = 'integer' AND occurred_at_epoch_ms >= 0),
+  source_kind TEXT NOT NULL
+    CHECK (typeof(source_kind) = 'text' AND source_kind IN ('pos_core', 'root_cli')),
+  source_instance_id TEXT NOT NULL
+    CHECK (typeof(source_instance_id) = 'text' AND length(source_instance_id) > 0),
+  event_type TEXT NOT NULL
+    CHECK (typeof(event_type) = 'text' AND length(event_type) > 0),
+  event_json TEXT NOT NULL
+    CHECK (typeof(event_json) = 'text'),
+  previous_event_hash BLOB NOT NULL
+    CHECK (typeof(previous_event_hash) = 'blob' AND length(previous_event_hash) = 32),
+  event_hash BLOB NOT NULL UNIQUE
+    CHECK (typeof(event_hash) = 'blob' AND length(event_hash) = 32)
+)
+SQL
+  )
+
+(define create-security-audit-events-append-order-trigger-sql
+  #<<SQL
+CREATE TRIGGER security_audit_events_append_order
+BEFORE INSERT ON security_audit_events
+BEGIN
+  SELECT CASE
+    WHEN NEW.sequence <> COALESCE((SELECT MAX(sequence) FROM security_audit_events), 0) + 1
+    THEN RAISE(ABORT, 'security audit sequence is not append-only')
+  END;
+  SELECT CASE
+    WHEN NEW.previous_event_hash <> COALESCE(
+      (SELECT event_hash FROM security_audit_events ORDER BY sequence DESC LIMIT 1),
+      zeroblob(32))
+    THEN RAISE(ABORT, 'security audit previous hash does not match tail')
+  END;
+END
+SQL
+  )
+
+(define create-security-audit-events-no-update-trigger-sql
+  #<<SQL
+CREATE TRIGGER security_audit_events_no_update
+BEFORE UPDATE ON security_audit_events
+BEGIN
+  SELECT RAISE(ABORT, 'security audit events are append-only');
+END
+SQL
+  )
+
+(define create-security-audit-events-no-delete-trigger-sql
+  #<<SQL
+CREATE TRIGGER security_audit_events_no_delete
+BEFORE DELETE ON security_audit_events
+BEGIN
+  SELECT RAISE(ABORT, 'security audit events are append-only');
+END
+SQL
+  )
+
 (define (schema-object-exists? connection type name)
   (= 1
      (db:query-value
@@ -883,6 +949,17 @@ SQL
 (define expected-transaction-command-legacy-unapproved-void-receipt-columns
   (list (vector "command_id" "TEXT" 1 1)))
 
+(define expected-security-audit-event-columns
+  (list (vector "sequence" "INTEGER" 0 1)
+        (vector "schema_version" "INTEGER" 1 0)
+        (vector "occurred_at_epoch_ms" "INTEGER" 1 0)
+        (vector "source_kind" "TEXT" 1 0)
+        (vector "source_instance_id" "TEXT" 1 0)
+        (vector "event_type" "TEXT" 1 0)
+        (vector "event_json" "TEXT" 1 0)
+        (vector "previous_event_hash" "BLOB" 1 0)
+        (vector "event_hash" "BLOB" 1 0)))
+
 (define (validate-owned-table-schema connection
                                      migration-version
                                      table-name
@@ -1017,6 +1094,18 @@ SQL
     (error 'migrate-pos-database!
            "~a definition has drifted"
            index-name)))
+
+(define (validate-owned-trigger-schema connection name expected-sql)
+  (unless (schema-object-exists? connection "trigger" name)
+    (error 'migrate-pos-database! "security audit trigger is missing: ~a" name))
+  (define recorded-sql
+    (db:query-value
+     connection
+     "SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = ?"
+     name))
+  (unless (string=? (normalize-schema-sql recorded-sql)
+                    (normalize-schema-sql expected-sql))
+    (error 'migrate-pos-database! "security audit trigger has drifted: ~a" name)))
 
 (define (validate-register-operations-schema connection)
   (validate-owned-table-schema
@@ -1428,6 +1517,26 @@ SQL
     (error 'migrate-pos-database!
            "non-void receipts cannot carry void approval provenance")))
 
+(define (validate-security-audit-schema connection)
+  (validate-owned-table-schema
+   connection 11 "security_audit_events"
+   expected-security-audit-event-columns
+   create-security-audit-events-table-sql)
+  (validate-owned-trigger-schema
+   connection "security_audit_events_append_order"
+   create-security-audit-events-append-order-trigger-sql)
+  (validate-owned-trigger-schema
+   connection "security_audit_events_no_update"
+   create-security-audit-events-no-update-trigger-sql)
+  (validate-owned-trigger-schema
+   connection "security_audit_events_no_delete"
+   create-security-audit-events-no-delete-trigger-sql)
+  (define verification (verify-security-audit-ledger connection))
+  (unless (security-audit-ledger-valid? verification)
+    (error 'migrate-pos-database!
+           "security audit ledger failed integrity verification at sequence ~a"
+           (security-audit-ledger-invalid-sequence verification))))
+
 (define (apply-migration-1! connection)
   (db:query-exec connection create-events-table-sql)
   (db:query-exec connection create-stream-sequence-index-sql))
@@ -1541,6 +1650,13 @@ WHERE command_type = 'void_transaction'
 SQL
    ))
 
+(define (apply-migration-11! connection)
+  ;; No historical events are inferred or fabricated at the v11 boundary.
+  (db:query-exec connection create-security-audit-events-table-sql)
+  (db:query-exec connection create-security-audit-events-append-order-trigger-sql)
+  (db:query-exec connection create-security-audit-events-no-update-trigger-sql)
+  (db:query-exec connection create-security-audit-events-no-delete-trigger-sql))
+
 (define migrations
   (list
    (pos-database-migration 1
@@ -1582,7 +1698,11 @@ SQL
    (pos-database-migration 10
                            migration-10-name
                            apply-migration-10!
-                           validate-transaction-void-approvals-schema)))
+                           validate-transaction-void-approvals-schema)
+   (pos-database-migration 11
+                           migration-11-name
+                           apply-migration-11!
+                           validate-security-audit-schema)))
 
 (define current-pos-database-schema-version (length migrations))
 

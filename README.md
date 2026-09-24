@@ -291,6 +291,10 @@ the fixed role and resource-ownership policy documented in
 Fresh whole-sale voids now require a different supervisor/manager's local PIN
 approval, scoped to the exact command without replacing the cashier's register
 session. See [Supervisor / Manager Approval](docs/security/scoped-manager-approval.md).
+Security-sensitive local activity now has a separate hash-chained audit ledger,
+inspectable through a root-only CLI and validated with database backups; it is
+not transaction replay input or a Flutter/HTTP audit feed. See
+[Local Security Audit Ledger](docs/security/security-audit-ledger.md).
 
 ### Terminal 1 — POS Core
 

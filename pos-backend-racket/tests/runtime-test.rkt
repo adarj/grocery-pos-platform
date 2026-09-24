@@ -14,12 +14,14 @@
          "../pos/application/transaction-void-approval-service.rkt"
          "../pos/domain/fake-catalog.rkt"
          "../pos/domain/money.rkt"
+         "../pos/domain/security-audit-event.rkt"
          "../pos/domain/tax.rkt"
          "../pos/domain/transaction-event.rkt"
          "../pos/persistence/catalog-snapshot-codec.rkt"
          "../pos/persistence/operational-configuration-snapshot-codec.rkt"
          "../pos/persistence/sqlite-catalog.rkt"
          "../pos/persistence/sqlite-connection.rkt"
+         "../pos/persistence/security-audit-store.rkt"
          "../pos/persistence/sqlite-register-operations.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt"
          "../pos/security/operator-pin.rkt"
@@ -153,6 +155,89 @@
   receipt)
 
 (module+ test
+  (test-case "fresh v11 runtime and restart append one distinct start boundary each"
+    (call-with-temporary-database
+     (lambda (database-path _directory)
+       (initialize-sqlite-database! database-path)
+       (with-connection
+        database-path
+        (lambda (connection)
+          (check-equal?
+           (db:query-value connection "SELECT COUNT(*) FROM security_audit_events")
+           0)))
+       (for ([expected-count '(1 2)])
+         (define runtime (start-pos-runtime (runtime-config database-path)))
+         (dynamic-wind
+           void
+           (lambda ()
+             (for ([_ (in-range 3)])
+               (check-not-exn (lambda () (pos-runtime-readiness runtime))))
+             (with-connection
+              database-path
+              (lambda (connection)
+                (check-equal?
+                 (db:query-list
+                  connection
+                  "SELECT sequence FROM security_audit_events WHERE event_type = 'runtime.started' ORDER BY sequence")
+                 (build-list expected-count add1)))))
+           (lambda () (stop-pos-runtime! runtime))))
+       (with-connection
+        database-path
+        (lambda (connection)
+          (define sources
+            (db:query-list
+             connection
+             "SELECT source_instance_id FROM security_audit_events ORDER BY sequence"))
+          (check-equal? (length sources) 2)
+          (check-false (string=? (first sources) (second sources)))
+          (check-true
+           (security-audit-ledger-valid?
+            (verify-security-audit-ledger connection))))))))
+
+  (test-case "startup fails closed if required runtime audit append fails"
+    (call-with-temporary-database
+     (lambda (database-path _directory)
+       (check-exn
+        exn:fail?
+        (lambda ()
+          (start-pos-runtime
+           (runtime-config database-path)
+           #:current-epoch-ms (lambda () -1))))
+       (with-connection
+        database-path
+        (lambda (connection)
+          (check-equal?
+           (db:query-value connection
+                           "SELECT COUNT(*) FROM security_audit_events")
+           0))))))
+
+  (test-case "startup rejects a damaged chain before appending a restart event"
+    (call-with-temporary-database
+     (lambda (database-path _directory)
+       (initialize-sqlite-database! database-path)
+       (with-connection
+        database-path
+        (lambda (connection)
+          (append-security-audit-event!
+           connection (runtime-started-event)
+           #:source-kind 'pos_core
+           #:source-instance-id "audit_runtime_damaged"
+           #:occurred-at-epoch-ms 100)
+          (db:query-exec connection
+                         "DROP TRIGGER security_audit_events_no_update")
+          (db:query-exec connection
+                         "UPDATE security_audit_events SET occurred_at_epoch_ms = 200 WHERE sequence = 1")))
+       (check-exn exn:fail?
+                  (lambda ()
+                    (start-pos-runtime (runtime-config database-path))))
+       (with-connection
+        database-path
+        (lambda (connection)
+          (check-equal?
+           (db:query-value connection
+                           "SELECT COUNT(*) FROM security_audit_events")
+           1))))))
+
   (test-case "startup migration connection is disconnected on success and failure"
     (call-with-temporary-database
      (lambda (database-path _directory)
@@ -201,7 +286,16 @@
                   (vector 7 "create_operator_identity_credentials")
                   (vector 8 "create_operator_login_throttle")
                   (vector 9 "create_transaction_command_actor_attributions")
-                  (vector 10 "create_transaction_void_approvals")))
+                  (vector 10 "create_transaction_void_approvals")
+                  (vector 11 "create_security_audit_ledger")))
+           (with-connection
+            database-path
+            (lambda (connection)
+              (check-equal?
+               (db:query-list
+                connection
+                "SELECT event_type FROM security_audit_events ORDER BY sequence")
+               '("runtime.started"))))
            (with-connection
             database-path
             (lambda (connection)
@@ -399,15 +493,16 @@ SQL
          (start-pos-runtime
           (runtime-config database-path)
           #:connect recording-connect))
-       (check-equal? (map car opened) '(create))
+       (check-equal? (map car opened) '(create read/write))
        (check-false (db:connected? (cdar opened)))
+       (check-false (db:connected? (cdr (second opened))))
 
        (resolved-receipt
         (execute
          (pos-runtime-transaction-service runtime)
          (start-transaction-command "cmd-start" "txn-owned" 0)))
-       (check-equal? (map car opened) '(create read/write))
-       (define request-connection (cdr (second opened)))
+       (check-equal? (map car opened) '(create read/write read/write))
+       (define request-connection (cdr (third opened)))
        (check-true (db:connected? request-connection))
        (check-equal?
         (db:query-value request-connection "PRAGMA journal_mode")
@@ -475,7 +570,8 @@ SQL
                   (vector 7 "create_operator_identity_credentials")
                   (vector 8 "create_operator_login_throttle")
                   (vector 9 "create_transaction_command_actor_attributions")
-                  (vector 10 "create_transaction_void_approvals")))
+                  (vector 10 "create_transaction_void_approvals")
+                  (vector 11 "create_security_audit_ledger")))
            (define service
              (pos-runtime-transaction-service runtime-B))
            (define retry-receipt

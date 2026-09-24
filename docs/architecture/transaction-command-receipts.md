@@ -289,6 +289,13 @@ requester can recover an exact durable void without another approval, while a
 different requester is denied before payload, outcome or approval provenance
 is disclosed. See [Supervisor / Manager Approval](../security/scoped-manager-approval.md).
 
+Schema v11 adds a separate chronological
+[security audit ledger](../security/security-audit-ledger.md). Fresh approved
+void resolution appends one required audit event inside the same command writer
+transaction, including durable rejection outcomes. Exact receipt retry appends
+no second resolution event. The audit chain is not consulted for duplicate
+recovery, transaction replay, receipt derivation, or actor/approver provenance.
+
 ## Load and corruption handling
 
 Lookup by global command ID returns found, not-found, or failed. Not-found is a

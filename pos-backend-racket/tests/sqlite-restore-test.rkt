@@ -4,12 +4,15 @@
          racket/file
          racket/string
          rackunit
+         "../pos/domain/security-audit-event.rkt"
          "../pos/domain/transaction-event.rkt"
          "../pos/persistence/pos-database-migrations.rkt"
+         "../pos/persistence/security-audit-store.rkt"
          "../pos/persistence/sqlite-connection.rkt"
          "../pos/persistence/sqlite-maintenance.rkt"
          "../pos/persistence/sqlite-restore.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt"
+         "../pos/runtime-config.rkt"
          "../pos/runtime.rkt")
 
 (define (call-with-temporary-directory procedure)
@@ -70,6 +73,60 @@
     entry))
 
 (module+ test
+  (test-case "offline restore preserves exact validated security audit evidence"
+    (call-with-temporary-directory
+     (lambda (directory)
+       (define source (build-path directory "audit-source.db"))
+       (define backup (build-path directory "audit-backup.db"))
+       (define target (build-path directory "audit-target.db"))
+       (create-current-database-with-fact! source "txn-audit-source")
+       (define original-rows
+         (call-with-production-connection
+          source
+          (lambda (connection)
+            (append-security-audit-event!
+             connection (runtime-started-event)
+             #:source-kind 'pos_core
+             #:source-instance-id "audit_runtime_restore"
+             #:occurred-at-epoch-ms 1000)
+            (db:query-rows
+             connection
+             "SELECT sequence, event_json, previous_event_hash, event_hash FROM security_audit_events ORDER BY sequence"))))
+       (create-pos-sqlite-backup! source backup)
+       (create-current-database-with-fact! target "txn-displaced")
+       (restore-pos-sqlite-database-offline!
+        backup target #:operation-id "restore-audit-evidence")
+       (call-with-pos-sqlite-inspection-connection
+        target
+        (lambda (connection)
+          (check-equal?
+           (db:query-rows
+            connection
+            "SELECT sequence, event_json, previous_event_hash, event_hash FROM security_audit_events ORDER BY sequence")
+           original-rows)
+          (check-true
+           (security-audit-ledger-valid?
+            (verify-security-audit-ledger connection)))))
+       (define restored-runtime
+         (start-pos-runtime (pos-runtime-config "127.0.0.1" 7340 target)))
+       (stop-pos-runtime! restored-runtime)
+       (call-with-pos-sqlite-inspection-connection
+        target
+        (lambda (connection)
+          (define rows
+            (db:query-rows
+             connection
+             "SELECT sequence, event_json, previous_event_hash, event_hash FROM security_audit_events ORDER BY sequence"))
+          (check-equal? (first rows) (first original-rows))
+          (check-equal? (length rows) 2)
+          (check-equal?
+           (db:query-list connection
+                          "SELECT event_type FROM security_audit_events ORDER BY sequence")
+           '("runtime.started" "runtime.started"))
+          (check-true
+           (security-audit-ledger-valid?
+            (verify-security-audit-ledger connection))))))))
+
   (test-case "offline restore replaces current DB and preserves prior durable state"
     (call-with-temporary-directory
      (lambda (directory)

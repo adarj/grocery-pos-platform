@@ -1,8 +1,12 @@
 #lang racket
 
 (require (prefix-in db: db)
+         file/sha1
+         racket/random
+         "security-audit-service.rkt"
          "authentication-service.rkt"
          "../domain/register-operations.rkt"
+         "../domain/security-audit-event.rkt"
          "../domain/shift-cash-accountability.rkt"
          "../persistence/sqlite-register-operations.rkt"
          "../persistence/sqlite-shift-cash-accountability.rkt"
@@ -28,13 +32,15 @@
 (struct register-cash-summary-authorization-denied () #:transparent)
 
 (struct register-operations-service
-  (connection current-epoch-ms generate-shift-id)
+  (connection current-epoch-ms generate-shift-id audit-source audit-append!)
   #:transparent)
 
 (define (make-register-operations-service
          connection
          #:current-epoch-ms current-epoch-ms
-         #:generate-shift-id generate-shift-id)
+         #:generate-shift-id generate-shift-id
+         #:audit-source [audit-source #f]
+         #:audit-append! [audit-append! #f])
   (define who 'make-register-operations-service)
   (unless (db:connection? connection)
     (raise-argument-error who "connection?" connection))
@@ -43,8 +49,36 @@
     (unless (and (procedure? value) (procedure-arity-includes? value 0))
       (raise-arguments-error
        who "expected a zero-argument procedure" (symbol->string name) value)))
+  (define source
+    (or audit-source
+        (make-security-audit-source
+         'pos_core
+         (string-append "audit_runtime_"
+                        (bytes->hex-string (crypto-random-bytes 16)))
+         (lambda ()
+           (inexact->exact (floor (current-inexact-milliseconds)))))))
+  (unless (security-audit-source? source)
+    (raise-argument-error who "security-audit-source?" source))
+  (define effective-audit-append!
+    (or audit-append!
+        (lambda (writer-connection event)
+          (security-audit-append-required!/in-transaction!
+           source writer-connection event))))
+  (unless (and (procedure? effective-audit-append!)
+               (procedure-arity-includes? effective-audit-append! 2))
+    (raise-argument-error who "two-argument audit append procedure?"
+                          effective-audit-append!))
   (register-operations-service
-   connection current-epoch-ms generate-shift-id))
+   connection current-epoch-ms generate-shift-id source effective-audit-append!))
+
+(define (audit-register-denial! service principal action shift-id)
+  (security-audit-append-best-effort!
+   (register-operations-service-audit-source service)
+   (register-operations-service-connection service)
+   (authorization-denied-event
+    (authenticated-operator-operator-id principal)
+    (authenticated-operator-role principal)
+    #f action 'shift shift-id)))
 
 (define (check-service who service)
   (unless (register-operations-service? service)
@@ -74,19 +108,37 @@
        (authenticated-operator-operator-id principal)
        opening-cash
        (register-operations-service-current-epoch-ms service)
-       (register-operations-service-generate-shift-id service))
-      (register-shift-open-rejected 'authorization-denied)))
+       (register-operations-service-generate-shift-id service)
+       #:audit-append!
+       (register-operations-service-audit-append! service))
+      (begin
+        (audit-register-denial! service principal 'shift.open.own #f)
+        (register-shift-open-rejected 'authorization-denied))))
 
 (define (register-operations-close-shift service principal shift-id counted-cash)
   (check-service 'register-operations-close-shift service)
   (check-principal 'register-operations-close-shift principal)
-  (close-register-shift!
-   (register-operations-service-connection service)
-   shift-id
-   counted-cash
-   (register-operations-service-current-epoch-ms service)
-   (authenticated-operator-operator-id principal)
-   (authenticated-operator-role principal)))
+  (define result
+    (close-register-shift!
+     (register-operations-service-connection service)
+     shift-id
+     counted-cash
+     (register-operations-service-current-epoch-ms service)
+     (authenticated-operator-operator-id principal)
+     (authenticated-operator-role principal)
+     #:audit-append!
+     (register-operations-service-audit-append! service)))
+  (when (and (register-shift-close-rejected? result)
+             (eq? (register-shift-close-rejected-code result)
+                  'authorization-denied))
+    (audit-register-denial!
+     service principal
+     (if (operator-role-authorized?
+          (authenticated-operator-role principal) 'shift.close.any)
+         'shift.close.any
+         'shift.close.own)
+     shift-id))
+  result)
 
 (define (full-summary-result connection shift-id)
   (define result (load-shift-cash-summary connection shift-id))
@@ -118,4 +170,7 @@
         (if (register-shift-closed-at-epoch-ms shift)
             (full-summary-result connection shift-id)
             (register-cash-summary-limited shift-id 'open))]
-       [else (register-cash-summary-authorization-denied)])]))
+       [else
+        (audit-register-denial!
+         service principal 'shift.cash_summary.read.own shift-id)
+        (register-cash-summary-authorization-denied)])]))

@@ -151,9 +151,11 @@ A definitive 403 means the pending mutation did not enter the business
 handler. Flutter may clear that pending marker while preserving the active
 recovery context. It never generates a replacement command ID to evade denial.
 
-## Boundaries still deferred
+## Later checkpoint boundaries
 
-Checkpoint 3 does not add manager approvals, approval tokens, approver
-attribution, credential reset, editable roles, or a general security audit
-ledger. In particular, manager close-any is not yet a durable security-audit
-event. Those boundaries are defined by later M7 checkpoints.
+Checkpoint 3 itself did not add approval or a general audit ledger. Checkpoint
+4 added [scoped whole-sale void approval](scoped-manager-approval.md), and
+Checkpoint 5 added [local security audit evidence](security-audit-ledger.md),
+including a required event for a successful manager foreign shift close.
+Credential reset and editable roles remain deferred. Authorization continues
+to use current operator/policy state, never audit-ledger replay.
