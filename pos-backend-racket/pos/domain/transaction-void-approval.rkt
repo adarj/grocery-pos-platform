@@ -14,6 +14,7 @@
    token-digest
    issuer-instance-id
    requester-operator-id
+   requester-credential-revision
    approver-operator-id
    approver-credential-revision
    command-id
@@ -29,6 +30,7 @@
            token-digest
            issuer-instance-id
            requester-operator-id
+           requester-credential-revision
            approver-operator-id
            approver-credential-revision
            command-id
@@ -53,6 +55,11 @@
     (when (string=? requester-operator-id approver-operator-id)
       (raise-arguments-error
        type-name "requester and approver must differ" "operator ID" requester-operator-id))
+    (unless (and (exact-integer? requester-credential-revision)
+                 (positive? requester-credential-revision))
+      (raise-argument-error
+       type-name "exact positive requester credential revision"
+       requester-credential-revision))
     (unless (and (exact-integer? approver-credential-revision)
                  (positive? approver-credential-revision))
       (raise-argument-error
@@ -82,6 +89,7 @@
      (bytes->immutable-bytes token-digest)
      (string->immutable-string issuer-instance-id)
      (string->immutable-string requester-operator-id)
+     requester-credential-revision
      (string->immutable-string approver-operator-id)
      approver-credential-revision
      (string->immutable-string command-id)

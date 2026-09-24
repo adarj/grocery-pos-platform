@@ -34,7 +34,8 @@ Supported types are `runtime.started`; `auth.login_succeeded`,
 `approval.granted`, `approval.not_granted`, `approval.required`;
 `transaction.void_resolved`; `shift.opened`, `shift.closed`;
 `operator.created`, `operator.role_changed`, `operator.active_changed`,
-`operator.pin_enrolled`; and `audit.accessed`.
+`operator.pin_enrolled`, `operator.pin_changed`,
+`operator.pin_change_failed`, `operator.pin_reset`; and `audit.accessed`.
 
 Events use stable operator/session/command/shift/approval IDs, fixed roles,
 actions, reasons and outcome codes, and only minimal event-specific facts.
@@ -53,6 +54,12 @@ written. Login failure, logout, observed session expiry/invalidation,
 authorization denial, approval rejection, and approval-required are
 best-effort; audit failure never reverses the security decision. Best-effort
 failure diagnostics are sanitized.
+CP6 self-change and root reset append required `operator.pin_changed` and
+`operator.pin_reset` inside the credential rotation writer; audit failure rolls
+the credential/throttle/grant changes back. A wrong current PIN emits
+best-effort `operator.pin_change_failed` without any PIN material. The event
+row format remains schema version 1; database schema v12 gates the expanded
+fixed vocabulary.
 Operational-configuration activation may create same-ID cashier operator
 stubs. Each genuinely new principal receives `operator.created` inside the
 same activation transaction, in snapshot order; existing principals are not

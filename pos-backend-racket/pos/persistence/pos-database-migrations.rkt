@@ -23,6 +23,7 @@
 (define migration-9-name "create_transaction_command_actor_attributions")
 (define migration-10-name "create_transaction_void_approvals")
 (define migration-11-name "create_security_audit_ledger")
+(define migration-12-name "bind_transaction_void_approvals_to_requester_credentials")
 (define stream-sequence-index-name
   "transaction_events_stream_sequence_unique")
 
@@ -633,6 +634,86 @@ CREATE TABLE transaction_void_approval_grants (
 SQL
   )
 
+;; v12 deliberately rebuilds only unconsumed, process-bound capabilities.
+;; The v10 definition above remains frozen for historical-prefix validation.
+(define create-v12-transaction-void-approval-grants-table-sql
+  #<<SQL
+CREATE TABLE transaction_void_approval_grants (
+  approval_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(approval_id) = 'text'
+      AND length(approval_id) > 0
+    ),
+  token_digest BLOB NOT NULL UNIQUE
+    CHECK (
+      typeof(token_digest) = 'blob'
+      AND length(token_digest) = 32
+    ),
+  issuer_instance_id TEXT NOT NULL
+    CHECK (
+      typeof(issuer_instance_id) = 'text'
+      AND length(issuer_instance_id) > 0
+    ),
+  requester_operator_id TEXT NOT NULL
+    CHECK (
+      typeof(requester_operator_id) = 'text'
+      AND length(requester_operator_id) > 0
+    ),
+  requester_credential_revision INTEGER NOT NULL
+    CHECK (
+      typeof(requester_credential_revision) = 'integer'
+      AND requester_credential_revision >= 1
+    ),
+  approver_operator_id TEXT NOT NULL
+    CHECK (
+      typeof(approver_operator_id) = 'text'
+      AND length(approver_operator_id) > 0
+    ),
+  approver_credential_revision INTEGER NOT NULL
+    CHECK (
+      typeof(approver_credential_revision) = 'integer'
+      AND approver_credential_revision >= 1
+    ),
+  command_id TEXT NOT NULL UNIQUE
+    CHECK (
+      typeof(command_id) = 'text'
+      AND length(command_id) > 0
+    ),
+  transaction_id TEXT NOT NULL
+    CHECK (
+      typeof(transaction_id) = 'text'
+      AND length(transaction_id) > 0
+    ),
+  command_schema_version INTEGER NOT NULL
+    CHECK (
+      typeof(command_schema_version) = 'integer'
+      AND command_schema_version = 1
+    ),
+  expected_version INTEGER NOT NULL
+    CHECK (
+      typeof(expected_version) = 'integer'
+      AND expected_version >= 0
+    ),
+  granted_at_monotonic_ms INTEGER NOT NULL
+    CHECK (
+      typeof(granted_at_monotonic_ms) = 'integer'
+      AND granted_at_monotonic_ms >= 0
+    ),
+  expires_at_monotonic_ms INTEGER NOT NULL
+    CHECK (
+      typeof(expires_at_monotonic_ms) = 'integer'
+      AND expires_at_monotonic_ms > granted_at_monotonic_ms
+    ),
+  expires_at_epoch_ms INTEGER NOT NULL
+    CHECK (
+      typeof(expires_at_epoch_ms) = 'integer'
+      AND expires_at_epoch_ms >= 0
+    ),
+  CHECK (requester_operator_id <> approver_operator_id)
+)
+SQL
+  )
+
 (define create-transaction-command-approver-attributions-table-sql
   #<<SQL
 CREATE TABLE transaction_command_approver_attributions (
@@ -938,6 +1019,11 @@ SQL
         (vector "granted_at_monotonic_ms" "INTEGER" 1 0)
         (vector "expires_at_monotonic_ms" "INTEGER" 1 0)
         (vector "expires_at_epoch_ms" "INTEGER" 1 0)))
+
+(define expected-v12-transaction-void-approval-grant-columns
+  (append (take expected-transaction-void-approval-grant-columns 4)
+          (list (vector "requester_credential_revision" "INTEGER" 1 0))
+          (drop expected-transaction-void-approval-grant-columns 4)))
 
 (define expected-transaction-command-approver-attribution-columns
   (list (vector "command_id" "TEXT" 1 1)
@@ -1428,10 +1514,15 @@ SQL
            "every command receipt must be attributed or explicitly classified as pre-v9")))
 
 (define (validate-transaction-void-approvals-schema connection)
-  (validate-owned-table-schema
-   connection 10 "transaction_void_approval_grants"
-   expected-transaction-void-approval-grant-columns
-   create-transaction-void-approval-grants-table-sql)
+  ;; The v12 validator owns the replacement DDL. Historical v10/v11 prefixes
+  ;; still validate against exactly the original v10 definition.
+  (unless (db:query-maybe-value
+           connection
+           "SELECT 1 FROM pos_schema_migrations WHERE version = 12")
+    (validate-owned-table-schema
+     connection 10 "transaction_void_approval_grants"
+     expected-transaction-void-approval-grant-columns
+     create-transaction-void-approval-grants-table-sql))
   (validate-owned-table-schema
    connection 10 "transaction_command_approver_attributions"
    expected-transaction-command-approver-attribution-columns
@@ -1657,6 +1748,19 @@ SQL
   (db:query-exec connection create-security-audit-events-no-update-trigger-sql)
   (db:query-exec connection create-security-audit-events-no-delete-trigger-sql))
 
+(define (apply-migration-12! connection)
+  ;; A migration requires a POS Core restart. Existing unconsumed grants are
+  ;; bound to that old process instance and cannot authorize future commands.
+  ;; Do not copy them into the revision-bound table or invent security history.
+  (db:query-exec connection "DROP TABLE transaction_void_approval_grants")
+  (db:query-exec connection create-v12-transaction-void-approval-grants-table-sql))
+
+(define (validate-v12-transaction-void-approvals-schema connection)
+  (validate-owned-table-schema
+   connection 12 "transaction_void_approval_grants"
+   expected-v12-transaction-void-approval-grant-columns
+   create-v12-transaction-void-approval-grants-table-sql))
+
 (define migrations
   (list
    (pos-database-migration 1
@@ -1702,7 +1806,11 @@ SQL
    (pos-database-migration 11
                            migration-11-name
                            apply-migration-11!
-                           validate-security-audit-schema)))
+                           validate-security-audit-schema)
+   (pos-database-migration 12
+                           migration-12-name
+                           apply-migration-12!
+                           validate-v12-transaction-void-approvals-schema)))
 
 (define current-pos-database-schema-version (length migrations))
 

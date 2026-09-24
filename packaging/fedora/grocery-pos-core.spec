@@ -1,6 +1,6 @@
 Name:           grocery-pos-core
 Version:        0.0.0
-Release:        0.8.dev%{?dist}
+Release:        0.9.dev%{?dist}
 Summary:        Local-first Grocery POS transaction core
 License:        LicenseRef-Project-Undecided
 URL:            https://github.com/adarj/grocery-pos-platform
@@ -82,6 +82,9 @@ install -D -m 0644 packaging/fedora/pos-core.env \
 %config(noreplace) /etc/grocery-pos/pos-core.env
 
 %changelog
+* Thu Sep 24 2026 Grocery POS Platform <internal@invalid> - 0.0.0-0.9.dev
+- Add credential rotation, root PIN recovery, and schema-v12 grant binding.
+
 * Wed Sep 23 2026 Grocery POS Platform <internal@invalid> - 0.0.0-0.8.dev
 - Add the local hash-chained security audit ledger and root audit inspection.
 

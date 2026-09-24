@@ -171,6 +171,8 @@ security evidence; it never stores PINs, verifiers, or bearer capabilities.
 Checkpoint 3 applies fixed role and resource-ownership authorization and
 durable transaction-command actor attribution. Checkpoint 4 adds separately
 authenticated [Supervisor / Manager Approval](scoped-manager-approval.md) for
-fresh whole-sale voids without issuing an approver bearer session. Credential
-reset, cloud identity, and remote authentication remain deferred. Checkpoint 5
+fresh whole-sale voids without issuing an approver bearer session. Checkpoint 5
 adds local login/session audit events without making sessions durable.
+Checkpoint 6 adds [credential change and root recovery](credential-lifecycle-and-recovery.md)
+with revision rotation. Cloud identity and remote authentication remain
+deferred.

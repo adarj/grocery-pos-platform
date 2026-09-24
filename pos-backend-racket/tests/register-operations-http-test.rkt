@@ -74,9 +74,9 @@
       #:catalog-lookup fake-catalog-lookup
       #:current-epoch-ms (lambda () 1500)
       #:approval-consumer
-      (lambda (approval-connection capability requester command)
+      (lambda (approval-connection capability requester revision command)
         (consume-transaction-void-approval!/in-transaction!
-         approval-connection capability "http-test-instance" requester
+         approval-connection capability "http-test-instance" requester revision
          command 2000)))
      register-service
      #:authentication-service auth-service
@@ -278,6 +278,7 @@
          (transaction-void-approval-capability-token-digest approval-capability)
          "http-test-instance"
          test-operator-id
+         1
          "http-supervisor"
          1 "cmd-under-shift-void" "txn-under-shift" 1 1
          1000 91000 91000)

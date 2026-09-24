@@ -16,7 +16,13 @@
   (dynamic-wind
     (lambda ()
       (db:query-exec connection "PRAGMA foreign_keys = ON")
-      (migrate-pos-database! connection))
+      (migrate-pos-database! connection)
+      (for ([id (in-list '("Alice" "Bob"))])
+        (db:query-exec connection "INSERT INTO operators VALUES (?, ?, 1)" id id)
+        (db:query-exec connection "INSERT INTO operator_roles VALUES (?, 'cashier')" id)
+        (db:query-exec connection
+                       "INSERT INTO operator_pin_credentials VALUES (?, '$argon2id$fixture', 1)"
+                       id)))
     (lambda () (proc connection))
     (lambda () (db:disconnect connection))))
 
@@ -26,7 +32,7 @@
     command 0 'accepted "accepted"
     (list (transaction-started
            (transaction-command-transaction-id command))))
-   "Alice"))
+   "Alice" 1))
 
 (module+ test
   (test-case "actor attribution store round trips opaque case-sensitive IDs"
@@ -71,7 +77,7 @@
            (transaction-command-commit-plan-with-actor
             (transaction-command-commit-plan
              command 0 (third entry) (fourth entry) '())
-            "Alice"))
+            "Alice" 1))
          (check-pred
           transaction-command-commit-resolved?
           (commit-transaction-command-outcome! connection plan))
@@ -117,7 +123,7 @@
           (transaction-command-commit-plan
            (start-transaction-command "cmd-retry" "txn-different" 0)
            0 'already-exists "transaction_already_exists" '())
-          "Bob"))
+          "Bob" 1))
        (check-pred transaction-command-commit-authorization-denied?
                    (commit-transaction-command-outcome! connection bob-plan))
        (check-equal?
@@ -148,7 +154,7 @@
           (transaction-command-commit-plan
            command 0 'accepted "accepted"
            (list (transaction-started "txn-modern")))
-          "Bob")))
+          "Bob" 1)))
        (check-false
         (load-transaction-command-actor-attribution connection "cmd-modern"))
        (check-equal?

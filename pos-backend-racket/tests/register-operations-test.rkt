@@ -17,7 +17,18 @@
          "../pos/persistence/sqlite-register-operations.rkt")
 
 (define (cashier-principal cashier-id)
-  (authenticated-operator cashier-id cashier-id 'cashier))
+  (authenticated-operator cashier-id cashier-id 'cashier 1))
+
+(define (enroll-test-operator! connection id)
+  ;; Configuration creates uncredentialed stubs. Protected shift tests need
+  ;; an explicitly enrolled application principal, including negative cases.
+  (db:query-exec connection
+                 "INSERT OR IGNORE INTO operators VALUES (?, ?, 1)" id id)
+  (db:query-exec connection
+                 "INSERT OR IGNORE INTO operator_roles VALUES (?, 'cashier')" id)
+  (db:query-exec connection
+                 "INSERT OR IGNORE INTO operator_pin_credentials VALUES (?, '$argon2id$fixture', 1)"
+                 id))
 
 (define (register-operations-open-shift service cashier-id opening-cash)
   (open-shift/authorized service (cashier-principal cashier-id) opening-cash))
@@ -116,6 +127,8 @@ JSON
         (db:query-value connection "SELECT register_id FROM register_configuration")
         "register-front-01")
        (check-equal? (db:query-value connection "SELECT COUNT(*) FROM cashiers") 3)
+
+       (enroll-test-operator! connection "cashier-alice")
 
        (define service (make-service connection '(1000 2000) '("shift_one")))
        (define opened
@@ -316,11 +329,16 @@ SQL
     (call-with-database
      (lambda (connection)
        (define service (make-service connection '(1000) '("unused")))
+       (enroll-test-operator! connection "cashier-alice")
        (define unconfigured
          (register-operations-open-shift service "cashier-alice" (money 0)))
        (check-equal? (register-shift-open-rejected-code unconfigured)
                      'register-not-configured)
        (activate-operational-configuration! connection (snapshot config-json))
+       (enroll-test-operator! connection "cashier-missing")
+       (enroll-test-operator! connection "cashier-old")
+       (db:query-exec connection
+                      "UPDATE operators SET active = 1 WHERE operator_id = 'cashier-old'")
        (check-equal?
         (register-shift-open-rejected-code
          (register-operations-open-shift service "cashier-missing" (money 0)))
@@ -334,6 +352,8 @@ SQL
     (call-with-database
      (lambda (connection)
        (activate-operational-configuration! connection (snapshot config-json))
+       (enroll-test-operator! connection "cashier-alice")
+       (enroll-test-operator! connection "cashier-bob")
        (define service (make-service connection '(1000) '("shift_exact")))
        (define first
          (register-operations-open-shift service "cashier-alice" (money 0)))
@@ -359,6 +379,7 @@ SQL
     (call-with-database
      (lambda (connection)
        (activate-operational-configuration! connection (snapshot config-json))
+       (enroll-test-operator! connection "cashier-alice")
        (define service
          (make-service connection '(1000 2000) '("shift_close")))
        (register-operations-open-shift service "cashier-alice" (money 0))
@@ -411,6 +432,7 @@ SQL
           (lambda ()
             (activate-operational-configuration!
              first-connection (snapshot config-json))
+            (enroll-test-operator! first-connection "cashier-alice")
             (define first-service
               (make-service first-connection '(1000) '("shift_reconnect")))
             (define opened
@@ -479,6 +501,7 @@ SQL
        (check-false (register-context-register before))
        (check-false (register-context-active-shift before))
        (activate-operational-configuration! connection (snapshot config-json))
+       (enroll-test-operator! connection "cashier-alice")
        (check-equal?
         (map cashier-identity-cashier-id
              (register-operations-list-active-cashiers service))

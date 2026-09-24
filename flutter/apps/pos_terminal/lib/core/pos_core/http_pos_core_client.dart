@@ -458,6 +458,40 @@ final class HttpPosCoreClient
     );
   }
 
+  @override
+  Future<int> changePin(String currentPin, String newPin) async {
+    final response = await _postJson(
+      baseUri.resolve('/auth/change-pin'),
+      <String, Object?>{'current_pin': currentPin, 'new_pin': newPin},
+    );
+    final body = _decodeObject(response);
+    if (response.statusCode == 200 &&
+        requireJsonBool(body, 'ok', 'PIN change response') &&
+        requireJsonBool(
+          body,
+          'reauthentication_required',
+          'PIN change response',
+        )) {
+      final revision = requireJsonNonnegativeInt(
+        body,
+        'credential_revision',
+        'PIN change response',
+      );
+      if (revision < 2) {
+        throw const PosCoreInvalidResponseFailure(
+          'POS Core PIN change response has an invalid revision.',
+        );
+      }
+      return revision;
+    }
+    if (body.containsKey('error')) {
+      throw _serverFailureFrom(body, response.statusCode);
+    }
+    throw const PosCoreInvalidResponseFailure(
+      'POS Core PIN change response is inconsistent.',
+    );
+  }
+
   void close() {
     if (_ownsHttpClient) {
       _httpClient.close();

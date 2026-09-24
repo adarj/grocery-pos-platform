@@ -106,7 +106,7 @@ but invalidates every register token. `/health` and `/ready` may recover while
 the cashier terminal correctly returns to its lock screen. Do not treat this as
 credential loss or attempt to persist tokens outside the service.
 
-Current v11 startup verifies the full local security audit chain and records a
+Current v12 startup verifies the full local security audit chain and records a
 required `runtime.started` event before serving HTTP. Audit corruption or an
 unwritable required event fails startup closed. Root inspection uses
 `grocery-pos-audit verify` or `grocery-pos-audit list`; see

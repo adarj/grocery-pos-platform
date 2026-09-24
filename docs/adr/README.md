@@ -37,3 +37,4 @@ ADRs document important architectural decisions, their context, and their conseq
 - [ADR-0029: Enforce fixed server-side authorization with ownership and command actors](0029-enforce-fixed-server-side-authorization-with-ownership-and-command-actors.md)
 - [ADR-0030: Require separate scoped approval for whole-sale voids](0030-require-separate-scoped-approval-for-whole-sale-voids.md)
 - [ADR-0031: Keep a separate hash-chained local security audit ledger](0031-keep-a-separate-hash-chained-local-security-audit-ledger.md)
+- [ADR-0032: Rotate local PIN credentials by revision and recover through root administration](0032-rotate-local-pin-credentials-by-revision.md)

@@ -67,7 +67,50 @@
     (check-exn exn:fail?
                (lambda ()
                  (decode-security-audit-event-json
-                  'unknown.security_event "{}"))))
+                 'unknown.security_event "{}"))))
+
+  (test-case "PIN lifecycle revisions round-trip through codec and verified ledger"
+    (with-database
+     (lambda (connection)
+       (for ([entry
+              (in-list
+               (list (cons 'operator.pin_changed
+                           (operator-pin-changed-event "Alice" 4 5))
+                     (cons 'operator.pin_reset
+                           (operator-pin-reset-event "Alice" 5 6))))])
+         (define event-type (car entry))
+         (define event (cdr entry))
+         (define encoded (security-audit-event->json event))
+         (define decoded
+           (decode-security-audit-event-json event-type encoded))
+         (check-equal? (hash-ref decoded 'previous_credential_revision)
+                       (if (eq? event-type 'operator.pin_changed) 4 5))
+         (check-equal? (hash-ref decoded 'new_credential_revision)
+                       (if (eq? event-type 'operator.pin_changed) 5 6))
+         (append-security-audit-event!
+          connection event #:source-kind 'root_cli
+          #:source-instance-id "audit_root_cli_revision_test"
+          #:occurred-at-epoch-ms 1000))
+       (check-true
+        (security-audit-ledger-valid?
+         (verify-security-audit-ledger connection)))
+       (for ([row (in-list
+                   (query-rows connection
+                               "SELECT event_type, event_json FROM security_audit_events ORDER BY sequence"))]
+             [expected (in-list '((4 5) (5 6)))])
+         (define decoded
+           (decode-security-audit-event-json
+            (string->symbol (vector-ref row 0)) (vector-ref row 1)))
+         (check-equal? (hash-ref decoded 'previous_credential_revision)
+                       (first expected))
+         (check-equal? (hash-ref decoded 'new_credential_revision)
+                       (second expected)))
+       (for ([bad (in-list '("5" null 5.0))])
+         (check-exn
+          exn:fail?
+          (lambda ()
+            (security-audit-event->json
+             (operator-pin-changed-event "Alice" bad 6))))))))
 
   (test-case "validated backup preserves the exact audit chain"
     (define directory
@@ -219,10 +262,10 @@
                       (validate-pos-database-schema!
                        connection #:require-current? #t)))))))
 
-  (test-case "v11 starts empty and rejects mutation or out-of-order insert"
+  (test-case "current schema starts with empty audit and rejects mutation or out-of-order insert"
     (with-database
      (lambda (connection)
-       (check-equal? current-pos-database-schema-version 11)
+       (check-equal? current-pos-database-schema-version 12)
        (check-equal?
         (query-value connection "SELECT COUNT(*) FROM security_audit_events")
         0)

@@ -12,6 +12,7 @@
 (provide handle-login-request
          handle-session-request
          handle-logout-request
+         handle-change-pin-request
          authenticate-protected-request)
 
 (define no-store-header (header #"Cache-Control" #"no-store"))
@@ -197,3 +198,50 @@
        [(authentication-session-unavailable? result)
         (authentication-unavailable-response)]
        [else (authentication-required-response)]))))
+
+(define (handle-change-pin-request service principal access-token req)
+  (cond
+    [(not (json-content-type? req))
+     (invalid-login-request-response
+      "unsupported_media_type" "Content-Type must be application/json."
+      415 #"Unsupported Media Type")]
+    [else
+     (define bytes (request-post-data/raw req))
+     (define parsed (and bytes (strict-json-bytes->jsexpr bytes)))
+     (define body (and (strict-json-success? parsed)
+                       (strict-json-success-value parsed)))
+     (cond
+       [(not (and (hash? body)
+                  (= (hash-count body) 2)
+                  (hash-has-key? body 'current_pin)
+                  (hash-has-key? body 'new_pin)
+                  (string? (hash-ref body 'current_pin))
+                  (string? (hash-ref body 'new_pin))))
+        (invalid-login-request-response
+         "invalid_change_pin_request" "PIN change request is invalid."
+         400 #"Bad Request")]
+       [else
+        (define result
+          (authentication-service-change-pin
+           service principal access-token
+           (hash-ref body 'current_pin) (hash-ref body 'new_pin)))
+        (cond
+          [(authentication-pin-change-succeeded? result)
+           (auth-json-response
+            (hasheq 'ok #t
+                    'credential_revision
+                    (authentication-pin-change-succeeded-credential-revision result)
+                    'reauthentication_required #t))]
+          [(authentication-pin-change-policy-rejected? result)
+           (invalid-login-request-response
+            "pin_policy_rejected" "New PIN does not satisfy policy."
+            400 #"Bad Request")]
+          [(authentication-pin-change-failed? result)
+           (invalid-login-request-response
+            "credential_change_failed" "PIN change was not completed."
+            403 #"Forbidden")]
+          [else
+           (invalid-login-request-response
+            "credential_change_unavailable"
+            "PIN change is temporarily unavailable."
+            503 #"Service Unavailable")])])]))

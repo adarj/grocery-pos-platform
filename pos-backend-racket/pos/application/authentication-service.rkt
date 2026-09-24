@@ -26,17 +26,24 @@
          (struct-out authentication-logout-succeeded)
          (struct-out authentication-credential-verification-failed)
          (struct-out authentication-credential-verification-unavailable)
+         (struct-out authentication-pin-change-succeeded)
+         (struct-out authentication-pin-change-policy-rejected)
+         (struct-out authentication-pin-change-failed)
+         (struct-out authentication-pin-change-unavailable)
          authentication-service-with-verified-credential
          authentication-service-login
          authentication-service-authenticate
          authentication-service-logout
+         authentication-service-change-pin
          authentication-service-record-authorization-denial!)
 
 (define dummy-pin "50627184")
 (define default-dummy-password-hash
   (delay (hash-operator-pin dummy-pin)))
 
-(struct authenticated-operator (operator-id display-name role) #:transparent)
+;; The revision is internal authority context, never login/session JSON.
+(struct authenticated-operator
+  (operator-id display-name role credential-revision) #:transparent)
 (struct authentication-login-succeeded
   (access-token principal session-id absolute-expires-at-epoch-ms)
   #:transparent)
@@ -48,16 +55,24 @@
 (struct authentication-logout-succeeded () #:transparent)
 (struct authentication-credential-verification-failed () #:transparent)
 (struct authentication-credential-verification-unavailable () #:transparent)
+(struct authentication-pin-change-succeeded (credential-revision) #:transparent)
+(struct authentication-pin-change-policy-rejected () #:transparent)
+(struct authentication-pin-change-failed () #:transparent)
+(struct authentication-pin-change-unavailable () #:transparent)
 
 (struct authentication-service
   (connection
    session-store
    current-epoch-ms
    verify-pin
+   hash-pin
    dummy-password-hash
    attempt-lock
    after-verification
-   audit-append!)
+   audit-append!
+   audit-source
+   audit-append-in-transaction!
+   invalidate-session!)
   #:transparent)
 
 (define (system-current-epoch-ms)
@@ -77,17 +92,24 @@
          [current-monotonic-ms system-current-monotonic-ms]
          #:current-epoch-ms [current-epoch-ms system-current-epoch-ms]
          #:verify-pin [verify-pin verify-operator-pin]
+         #:hash-pin [hash-pin hash-operator-pin]
          #:dummy-password-hash [dummy-password-hash #f]
          #:after-verification [after-verification void]
          #:audit-source [audit-source #f]
-         #:audit-append! [audit-append! #f])
+         #:audit-append! [audit-append! #f]
+         #:audit-append-in-transaction!
+         [audit-append-in-transaction! #f]
+         #:invalidate-session!
+         [invalidate-session! operator-session-store-invalidate!])
   (define who 'make-authentication-service)
   (unless (db:connection? connection)
     (raise-argument-error who "connection?" connection))
   (check-procedure who current-monotonic-ms 0 "current-monotonic-ms")
   (check-procedure who current-epoch-ms 0 "current-epoch-ms")
   (check-procedure who verify-pin 2 "verify-pin")
+  (check-procedure who hash-pin 1 "hash-pin")
   (check-procedure who after-verification 0 "after-verification")
+  (check-procedure who invalidate-session! 2 "invalidate-session!")
   (define effective-session-store
     (or session-store
         (make-operator-session-store
@@ -115,15 +137,26 @@
           (security-audit-append-required!
            source audit-connection event))))
   (check-procedure who effective-audit-append! 2 "audit-append!")
+  (define effective-audit-append-in-transaction!
+    (or audit-append-in-transaction!
+        (lambda (writer-connection event)
+          (security-audit-append-required!/in-transaction!
+           source writer-connection event))))
+  (check-procedure who effective-audit-append-in-transaction!
+                   2 "audit-append-in-transaction!")
   (authentication-service
    connection
    effective-session-store
    current-epoch-ms
    verify-pin
+   hash-pin
    effective-dummy-hash
    (make-semaphore 1)
    after-verification
-   effective-audit-append!))
+   effective-audit-append!
+   source
+   effective-audit-append-in-transaction!
+   invalidate-session!))
 
 (define (append-auth-audit-best-effort! service event)
   (with-handlers ([exn:fail?
@@ -152,7 +185,8 @@
   (authenticated-operator
    (operator-identity-operator-id operator)
    (operator-identity-display-name operator)
-   (operator-identity-role operator)))
+   (operator-identity-role operator)
+   (operator-identity-credential-revision operator)))
 
 (define (attempt-credential-under-lock service operator-id pin on-verified)
   (define connection (authentication-service-connection service))
@@ -341,3 +375,61 @@
        (operator-session-session-id session)))
      (authentication-logout-succeeded)]
     [else authenticated]))
+
+(define (authentication-service-change-pin
+         service principal access-token current-pin new-pin)
+  (unless (authentication-service? service)
+    (raise-argument-error 'authentication-service-change-pin
+                          "authentication-service?" service))
+  (unless (authenticated-operator? principal)
+    (raise-argument-error 'authentication-service-change-pin
+                          "authenticated-operator?" principal))
+  (cond
+    [(or (not (operator-pin-valid? new-pin))
+         (and (string? current-pin) (string=? current-pin new-pin)))
+     (authentication-pin-change-policy-rejected)]
+    [else
+     (define operator-id (authenticated-operator-operator-id principal))
+     (define result
+       (authentication-service-with-verified-credential
+        service operator-id current-pin
+        (lambda (_operator verified-hash verified-revision)
+          (if (not (= verified-revision
+                      (authenticated-operator-credential-revision principal)))
+              (authentication-pin-change-failed)
+              (let* ([new-hash
+                      ((authentication-service-hash-pin service) new-pin)]
+                     [rotated
+                      (rotate-operator-pin!
+                       (authentication-service-connection service)
+                       operator-id verified-revision new-hash
+                       #:expected-password-hash verified-hash
+                       #:require-active? #t
+                       #:audit-event-maker operator-pin-changed-event
+                       #:audit-append!
+                       (authentication-service-audit-append-in-transaction!
+                        service))])
+                (if (operator-pin-rotation-succeeded? rotated)
+                    (authentication-pin-change-succeeded
+                     (operator-pin-rotation-succeeded-credential-revision
+                      rotated))
+                    (authentication-pin-change-failed)))))))
+     (cond
+       [(authentication-credential-verification-failed? result)
+        (append-auth-audit-best-effort!
+         service (operator-pin-change-failed-event operator-id))
+        (authentication-pin-change-failed)]
+       [(authentication-credential-verification-unavailable? result)
+        (authentication-pin-change-unavailable)]
+       [(authentication-pin-change-succeeded? result)
+        ;; This is after the credential/audit transaction committed. A failed
+        ;; process-local cleanup cannot turn that committed change into the
+        ;; documented no-commit 503: the old session is revision-invalid on
+        ;; its next authoritative check even if it remains in memory briefly.
+        (with-handlers ([exn:fail?
+                         (lambda (_exception)
+                           (eprintf "PIN change session cleanup failed\n"))])
+          ((authentication-service-invalidate-session! service)
+           (authentication-service-session-store service) access-token))
+        result]
+       [else result])]))

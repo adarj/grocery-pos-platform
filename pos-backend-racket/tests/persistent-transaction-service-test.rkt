@@ -1,5 +1,7 @@
 #lang racket
 
+(require "support/seed-authenticated-operator.rkt")
+
 (require (prefix-in db: db)
          rackunit
          "../pos/application/transaction-command-receipt.rkt"
@@ -30,7 +32,7 @@
 (define test-principal
   (authenticated-operator "legacy-service-test-operator"
                           "Legacy service test operator"
-                          'manager))
+                          'manager 1))
 
 (define (transaction-service-execute-command service command)
   (execute-command/authorized
@@ -58,6 +60,8 @@
     void
     (lambda ()
       (migrate-pos-database! connection)
+      (seed-authenticated-test-operator!
+       connection "legacy-service-test-operator" 'manager)
       (procedure connection))
     (lambda () (db:disconnect connection))))
 
@@ -79,7 +83,7 @@
    ;; Legacy business-state tests use synthetic approval evidence. The real
    ;; grant lifecycle and authority checks have their own focused tests.
    #:approval-consumer
-   (lambda (_connection _capability _requester command)
+   (lambda (_connection _capability _requester _revision command)
      (transaction-void-approval-consumed
       (transaction-command-approver-attribution
        (transaction-command-command-id command)

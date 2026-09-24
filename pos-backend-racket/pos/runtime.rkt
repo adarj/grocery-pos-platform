@@ -230,13 +230,14 @@
                 (security-audit-append-required!/in-transaction!
                  audit-source audit-connection event))))
            #:approval-consumer
-           (lambda (connection capability requester command)
+           (lambda (connection capability requester requester-revision command)
              (consume-transaction-void-approval!/in-transaction!
               connection
               capability
               (transaction-void-approval-authority-issuer-instance-id
                approval-authority)
               requester
+              requester-revision
               command
               (current-monotonic-ms)))
            #:current-epoch-ms current-epoch-ms))

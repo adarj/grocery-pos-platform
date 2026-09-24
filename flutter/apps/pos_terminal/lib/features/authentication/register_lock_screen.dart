@@ -137,6 +137,10 @@ final class _OperatorLoginState extends State<_OperatorLogin> {
                     style: Theme.of(context).textTheme.headlineMedium,
                   ),
                   const SizedBox(height: 24),
+                  if (widget.controller.lockMessage case final message?) ...[
+                    Text(message, key: const Key('register-lock-message')),
+                    const SizedBox(height: 16),
+                  ],
                   TextField(
                     key: const Key('operator-id-input'),
                     controller: _operatorId,

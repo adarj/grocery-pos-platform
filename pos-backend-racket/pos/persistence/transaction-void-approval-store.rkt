@@ -12,6 +12,7 @@
          (struct-out transaction-void-approval-grant-stored)
          (struct-out transaction-void-approval-grant-not-stored)
          confirm-and-replace-transaction-void-approval-grant!
+         revoke-transaction-void-approval-grants-for-operator!/in-transaction!
          (struct-out transaction-void-approval-consumed)
          (struct-out transaction-void-approval-rejected)
          consume-transaction-void-approval!/in-transaction!
@@ -60,7 +61,8 @@ SQL
     (db:query-maybe-row
      connection
      #<<SQL
-SELECT requester_operator_id, transaction_id, command_schema_version,
+SELECT requester_operator_id, requester_credential_revision,
+       transaction_id, command_schema_version,
        expected_version
 FROM transaction_void_approval_grants
 WHERE command_id = ?
@@ -73,6 +75,7 @@ SQL
                  existing-scope
                  (vector
                   (transaction-void-approval-grant-requester-operator-id grant)
+                  (transaction-void-approval-grant-requester-credential-revision grant)
                   (transaction-void-approval-grant-transaction-id grant)
                   (transaction-void-approval-grant-command-schema-version grant)
                   (transaction-void-approval-grant-expected-version grant)))))
@@ -87,15 +90,17 @@ SQL
          #<<SQL
 INSERT INTO transaction_void_approval_grants
   (approval_id, token_digest, issuer_instance_id, requester_operator_id,
-   approver_operator_id, approver_credential_revision, command_id,
+   requester_credential_revision, approver_operator_id,
+   approver_credential_revision, command_id,
    transaction_id, command_schema_version, expected_version,
    granted_at_monotonic_ms, expires_at_monotonic_ms, expires_at_epoch_ms)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 SQL
          (transaction-void-approval-grant-approval-id grant)
          (transaction-void-approval-grant-token-digest grant)
          (transaction-void-approval-grant-issuer-instance-id grant)
          (transaction-void-approval-grant-requester-operator-id grant)
+         (transaction-void-approval-grant-requester-credential-revision grant)
          (transaction-void-approval-grant-approver-operator-id grant)
          (transaction-void-approval-grant-approver-credential-revision grant)
          (transaction-void-approval-grant-command-id grant)
@@ -143,7 +148,12 @@ SQL
         expected-password-hash
         (transaction-void-approval-grant-approver-credential-revision grant)))
      (cond
-       [(not row) (transaction-void-approval-grant-not-stored)]
+       [(not (and row
+                  (requester-still-authorized?
+                   connection
+                   (transaction-void-approval-grant-requester-operator-id grant)
+                   (transaction-void-approval-grant-requester-credential-revision grant))))
+        (transaction-void-approval-grant-not-stored)]
        [else
         ;; Correct current credentials clear the normal login throttle even if
         ;; a concurrent role change makes this particular approval ineligible.
@@ -181,6 +191,7 @@ SQL
     connection
     #<<SQL
 SELECT approval_id, token_digest, issuer_instance_id, requester_operator_id,
+       requester_credential_revision,
        approver_operator_id, approver_credential_revision, command_id,
        transaction_id, command_schema_version, expected_version,
        granted_at_monotonic_ms, expires_at_monotonic_ms, expires_at_epoch_ms
@@ -190,12 +201,14 @@ SQL
     token-digest)))
 
 (define (grant-matches-command? grant issuer-instance-id requester-operator-id
-                                command monotonic-now)
+                                requester-credential-revision command monotonic-now)
   (and
    (string=? (transaction-void-approval-grant-issuer-instance-id grant)
              issuer-instance-id)
    (string=? (transaction-void-approval-grant-requester-operator-id grant)
              requester-operator-id)
+   (= (transaction-void-approval-grant-requester-credential-revision grant)
+      requester-credential-revision)
    (not (string=? requester-operator-id
                   (transaction-void-approval-grant-approver-operator-id grant)))
    (void-transaction-command? command)
@@ -231,27 +244,31 @@ SQL
         (string->symbol (vector-ref row 0))
         'approval.transaction_void)))
 
-(define (requester-still-authorized? connection requester-operator-id)
+(define (requester-still-authorized? connection requester-operator-id
+                                     requester-credential-revision)
   (define row
     (db:query-maybe-row
      connection
      #<<SQL
-SELECT assignment.role
+SELECT assignment.role, credential.credential_revision
 FROM operators AS operator
 JOIN operator_roles AS assignment
   ON assignment.operator_id = operator.operator_id
+JOIN operator_pin_credentials AS credential
+  ON credential.operator_id = operator.operator_id
 WHERE operator.operator_id = ?
   AND operator.active = 1
 SQL
      requester-operator-id))
   (and row
+       (= (vector-ref row 1) requester-credential-revision)
        (operator-role-authorized?
         (string->symbol (vector-ref row 0))
         'transaction.operate.own)))
 
 (define (consume-transaction-void-approval!/in-transaction!
          connection capability issuer-instance-id requester-operator-id
-         command monotonic-now)
+         requester-credential-revision command monotonic-now)
   (define who 'consume-transaction-void-approval!/in-transaction!)
   (require-writer-transaction who connection)
   (unless (transaction-void-approval-capability? capability)
@@ -267,8 +284,10 @@ SQL
   (cond
     [(not (and grant
                (grant-matches-command?
-                grant issuer-instance-id requester-operator-id command monotonic-now)
-               (requester-still-authorized? connection requester-operator-id)
+                grant issuer-instance-id requester-operator-id
+                requester-credential-revision command monotonic-now)
+               (requester-still-authorized?
+                connection requester-operator-id requester-credential-revision)
                (approver-still-authorized? connection grant)
                (>= (transaction-void-approval-grant-expires-at-epoch-ms grant)
                    transaction-void-approval-lifetime-ms)))
@@ -289,6 +308,21 @@ SQL
            (- (transaction-void-approval-grant-expires-at-epoch-ms grant)
               transaction-void-approval-lifetime-ms)))
          (transaction-void-approval-rejected))]))
+
+(define (revoke-transaction-void-approval-grants-for-operator!/in-transaction!
+         connection operator-id)
+  (define who 'revoke-transaction-void-approval-grants-for-operator!/in-transaction!)
+  (require-writer-transaction who connection)
+  (unless (and (string? operator-id) (positive? (string-length operator-id)))
+    (raise-argument-error who "non-empty-string?" operator-id))
+  (db:query-exec
+   connection
+   #<<SQL
+DELETE FROM transaction_void_approval_grants
+WHERE requester_operator_id = ? OR approver_operator_id = ?
+SQL
+   operator-id operator-id)
+  (void))
 
 (define (insert-transaction-command-approver-attribution!
          connection attribution)

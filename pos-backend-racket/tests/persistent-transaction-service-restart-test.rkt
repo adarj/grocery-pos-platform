@@ -1,5 +1,7 @@
 #lang racket
 
+(require "support/seed-authenticated-operator.rkt")
+
 (require (prefix-in db: db)
          racket/file
          rackunit
@@ -19,12 +21,18 @@
          "../pos/persistence/sqlite-transaction-event-store.rkt"
          "../pos/persistence/transaction-command-receipt-store.rkt"
          "../pos/persistence/transaction-command-unit-of-work.rkt"
-         "../pos/persistence/pos-database-migrations.rkt")
+         (rename-in "../pos/persistence/pos-database-migrations.rkt"
+                    [migrate-pos-database! migrate-pos-database!/without-actor]))
+
+(define (migrate-pos-database! connection)
+  (migrate-pos-database!/without-actor connection)
+  (seed-authenticated-test-operator!
+   connection "legacy-restart-test-operator" 'manager))
 
 (define test-principal
   (authenticated-operator "legacy-restart-test-operator"
                           "Legacy restart test operator"
-                          'manager))
+                          'manager 1))
 
 (define (transaction-service-execute-command service command)
   (execute-command/authorized service test-principal command))

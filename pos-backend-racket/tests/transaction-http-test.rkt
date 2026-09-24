@@ -165,9 +165,9 @@
          #:load-events load-events
          #:commit-command! commit-command!
          #:approval-consumer
-         (lambda (approval-connection capability requester command)
+         (lambda (approval-connection capability requester revision command)
            (consume-transaction-void-approval!/in-transaction!
-            approval-connection capability "http-test-instance" requester
+            approval-connection capability "http-test-instance" requester revision
             command 2000))))
       (define auth-service (make-test-authentication-service connection))
       (db:query-exec
@@ -277,6 +277,7 @@ SQL
        (transaction-void-approval-capability-token-digest capability)
        "http-test-instance"
        test-operator-id
+       1
        "http-supervisor"
        1
        (transaction-command-command-id command)
@@ -1062,7 +1063,7 @@ SQL
              #:current-epoch-ms (lambda () 1000)
               #:generate-shift-id (lambda () "shift-http"))
              (authenticated-operator
-              "http-cashier" "HTTP Cashier" 'cashier)
+              "http-cashier" "HTTP Cashier" 'cashier 1)
              (money 0)))
           (lambda () (db:disconnect seed-connection)))
         (define runtime-A

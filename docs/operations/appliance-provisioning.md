@@ -62,14 +62,21 @@ It installs the Flatpak system-wide, creates locked non-admin
 `grocery-pos-kiosk`, and prepares `/var/lib/grocery-pos` as mode `0750` owned by
 `grocery-pos:grocery-pos`. It builds the initial database at an unpublished
 same-filesystem path through canonical POS migration/catalog/register code,
-reaches schema v9, performs full current-schema/SQLite/foreign-key validation,
+reaches schema v12, performs full current-schema/SQLite/foreign-key validation,
 and publishes a
 standalone candidate as `pos.db` with no-overwrite atomic rename. The final DB
 is `grocery-pos:grocery-pos`, mode `0640`. Provisioning never overwrites an
 existing canonical DB. Each configured cashier gains a same-ID `cashier`
-operator stub with no credential. Enrollment is not a `/ready` prerequisite,
-but at least one active enrolled operator is required to unlock the Checkpoint
-2 cashier terminal. Use the root-only bootstrap procedure before kiosk handoff.
+operator stub with no credential. Enrollment is not a `/ready` prerequisite.
+Provisioning may finish with the kiosk locked and explicitly requires operator
+credential bootstrap before store handoff. Root-only appliance status reports
+`register_auth_ready` and `approval_auth_ready`; both must be true for handoff.
+The former means at least one active enrolled configured cashier; the latter
+means at least one active enrolled operator with the void-approval permission.
+These aggregate flags do not guarantee an independent approver for every
+requester. At least two approval-capable people are recommended because the
+requesting operator cannot approve their own whole-sale void. No PIN is
+collected or stored by noninteractive provisioning.
 
 Only then does it enable/start `grocery-pos-core.service` and wait up to 30
 seconds for `/ready`. PLM autologin, the kiosk user service, lock/power policy,
@@ -94,6 +101,8 @@ grocery-pos-appliance status
 to inspect sanitized host, provisioning, package/Flatpak, POS Core liveness/
 readiness, kiosk-user, display-manager, and maintenance state. Investigate a
 failure rather than deleting the state marker or authoritative database.
+The root status also reports safe `audit_event_count` for append-only ledger
+growth monitoring. It does not expose audit rows or an operator roster.
 
 ## Final verification
 

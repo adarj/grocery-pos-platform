@@ -16,6 +16,14 @@ enum AuthenticationStatus {
   coreUnavailable,
 }
 
+enum PinChangeOutcome {
+  changed,
+  policyRejected,
+  credentialRejected,
+  unavailable,
+  uncertain,
+}
+
 abstract interface class AuthenticationInactivityScheduler {
   void schedule(Duration duration, void Function() callback);
   void cancel();
@@ -59,13 +67,16 @@ final class AuthenticationController extends ChangeNotifier {
   final AuthenticationInactivityScheduler _inactivityScheduler;
 
   AuthenticationStatus _status = AuthenticationStatus.locked;
+  String? _lockMessage;
   AuthenticationStatus get status => _status;
+  String? get lockMessage => _lockMessage;
   bool get authenticated => _status == AuthenticationStatus.authenticated;
   AuthenticatedOperatorSession? get session => _sessionMemory.session;
 
   Future<void> login(String operatorId, String pin) async {
     if (_status == AuthenticationStatus.authenticating) return;
     _status = AuthenticationStatus.authenticating;
+    _lockMessage = null;
     notifyListeners();
     try {
       final login = await _client.login(operatorId, pin);
@@ -87,6 +98,7 @@ final class AuthenticationController extends ChangeNotifier {
 
   Future<void> lock() async {
     final accessToken = _sessionMemory.accessToken;
+    _lockMessage = null;
     _inactivityScheduler.cancel();
     _status = AuthenticationStatus.locked;
     _sessionMemory.clear();
@@ -98,6 +110,45 @@ final class AuthenticationController extends ChangeNotifier {
       // Local presentation locks immediately. The unretained server token is
       // bounded by server expiry and process-restart invalidation.
     }
+  }
+
+  Future<PinChangeOutcome> changePin(String currentPin, String newPin) async {
+    if (!authenticated) return PinChangeOutcome.uncertain;
+    try {
+      await _client.changePin(currentPin, newPin);
+      // The server invalidates the bearer before returning success. This is
+      // a local presentation reset, not an ordinary logout attempt.
+      _lockMessage = 'PIN changed. Sign in again with your new PIN.';
+      _lockLocally();
+      return PinChangeOutcome.changed;
+    } on PosCoreServerFailure catch (failure) {
+      if (failure.statusCode == 400 &&
+          failure.code == 'pin_policy_rejected') {
+        return PinChangeOutcome.policyRejected;
+      }
+      if (failure.statusCode == 403 &&
+          failure.code == 'credential_change_failed') {
+        return PinChangeOutcome.credentialRejected;
+      }
+      if (failure.statusCode == 503 &&
+          failure.code == 'credential_change_unavailable') {
+        return PinChangeOutcome.unavailable;
+      }
+      _lockLocally();
+      return PinChangeOutcome.uncertain;
+    } on PosCoreFailure {
+      // A lost response may hide a committed change. Never resend blindly.
+      _lockMessage = 'PIN change outcome is uncertain. Sign in again.';
+      _lockLocally();
+      return PinChangeOutcome.uncertain;
+    }
+  }
+
+  void _lockLocally() {
+    _inactivityScheduler.cancel();
+    _status = AuthenticationStatus.locked;
+    _sessionMemory.clear();
+    notifyListeners();
   }
 
   void recordUserActivity() {

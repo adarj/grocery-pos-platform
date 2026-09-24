@@ -106,7 +106,7 @@ verify exact current live source
   -> same-filesystem atomic rename to OUTPUT
 ```
 
-On a current v11 database, schema/application validation also streams and
+On a current v12 database, schema/application validation also streams and
 verifies the complete hash-chained security audit ledger. A broken chain makes
 the candidate invalid; it is not published. The backup contains audit records
 because they are authoritative local evidence, but support bundles never do.
@@ -131,7 +131,7 @@ just db-backup-validate BACKUP
 ```
 
 Validation requires a regular nonempty file, healthy full integrity results,
-zero foreign-key violations, exact current migration history through v9, and
+zero foreign-key violations, exact current migration history through v12, and
 all current Grocery POS schema/application validators. It is strictly
 read-only: no migration, WAL conversion, repair, or restore is attempted.
 

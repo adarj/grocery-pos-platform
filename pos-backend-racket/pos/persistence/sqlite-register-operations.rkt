@@ -241,8 +241,30 @@ SQL
                 ))])
     (cashier-identity (vector-ref row 0) (vector-ref row 1))))
 
+(define (authoritative-shift-permission?
+         connection operator-id credential-revision permission)
+  (define row
+    (db:query-maybe-row
+     connection
+     #<<SQL
+SELECT assignment.role, credential.credential_revision
+FROM operators AS operator
+JOIN operator_roles AS assignment
+  ON assignment.operator_id = operator.operator_id
+JOIN operator_pin_credentials AS credential
+  ON credential.operator_id = operator.operator_id
+WHERE operator.operator_id = ? AND operator.active = 1
+SQL
+     operator-id))
+  (and row
+       (exact-integer? credential-revision)
+       (= (vector-ref row 1) credential-revision)
+       (operator-role-authorized?
+        (string->symbol (vector-ref row 0)) permission)))
+
 (define (open-register-shift!
          connection cashier-id opening-cash current-epoch-ms generate-shift-id
+         #:actor-credential-revision actor-credential-revision
          #:audit-append! audit-append!)
   (define who 'open-register-shift!)
   (check-connection who connection)
@@ -260,8 +282,13 @@ SQL
   (db:call-with-transaction
    connection
    (lambda ()
+     (define (authorized-open?)
+       (authoritative-shift-permission?
+        connection cashier-id actor-credential-revision 'shift.open.own))
      (define context (load-register-context connection))
      (cond
+       [(not (authorized-open?))
+        (register-shift-open-rejected 'authorization-denied)]
        [(not (register-context-configured? context))
         (register-shift-open-rejected 'register-not-configured)]
        [(register-context-active-shift context)
@@ -329,7 +356,7 @@ SQL
 
 (define (close-register-shift!
          connection shift-id counted-cash current-epoch-ms
-         actor-operator-id actor-role
+         actor-operator-id actor-credential-revision
          #:audit-append! audit-append!)
   (define who 'close-register-shift!)
   (check-connection who connection)
@@ -352,25 +379,12 @@ SQL
      (define shift (load-shift-by-id connection shift-id))
      (cond
        [(not shift) (register-shift-close-rejected 'shift-not-found)]
-       [(not
-         (if (operator-owns-resource?
-              actor-operator-id (register-shift-cashier-id shift))
-             (operator-role-authorized? actor-role 'shift.close.own)
-             (and
-              (operator-role-authorized? actor-role 'shift.close.any)
-              (= 1
-                 (db:query-value
-                  connection
-                  #<<SQL
-SELECT COUNT(*)
-FROM operators AS operator
-JOIN operator_roles AS assignment
-  ON assignment.operator_id = operator.operator_id
-WHERE operator.operator_id = ?
-  AND operator.active = 1
-  AND assignment.role = 'manager'
-SQL
-                  actor-operator-id)))))
+       [(not (authoritative-shift-permission?
+              connection actor-operator-id actor-credential-revision
+              (if (operator-owns-resource?
+                   actor-operator-id (register-shift-cashier-id shift))
+                  'shift.close.own
+                  'shift.close.any)))
         (register-shift-close-rejected 'authorization-denied)]
        [(register-shift-closed-at-epoch-ms shift)
         (define summary (load-shift-cash-summary connection shift-id))

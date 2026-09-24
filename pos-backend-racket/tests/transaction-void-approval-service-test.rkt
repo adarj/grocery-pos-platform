@@ -24,7 +24,7 @@
 (define dummy-hash
   "$argon2id$v=19$m=19456,t=2,p=1$ZHVtbXlzYWx0ZHVtbXlzYWx0$ZHVtbXloYXNoZHVtbXloYXNoZHVtbXloYXNoZHVtbXloYXNo")
 (define good-pin "80421637")
-(define alice (authenticated-operator "Alice" "Alice" 'cashier))
+(define alice (authenticated-operator "Alice" "Alice" 'cashier 1))
 
 (define (insert-operator! connection id role [active 1])
   (db:query-exec connection "INSERT INTO operators VALUES (?, ?, ?)" id id active)
@@ -54,6 +54,7 @@
        (open-register-shift!
         connection "Alice" (money 1000) (lambda () 1000)
         (lambda () "shift-alice")
+        #:actor-credential-revision 1
         #:audit-append!
         (lambda (writer event)
           (append-security-audit-event!/in-transaction!
@@ -84,9 +85,9 @@
          connection
          #:catalog-lookup fake-catalog-lookup
          #:approval-consumer
-         (lambda (approval-connection capability requester command)
+         (lambda (approval-connection capability requester revision command)
            (consume-transaction-void-approval!/in-transaction!
-            approval-connection capability "instance-1" requester command
+            approval-connection capability "instance-1" requester revision command
             (unbox now)))
          #:current-epoch-ms (lambda () (unbox now))))
       (check-pred
@@ -115,9 +116,9 @@
           connection
           #:catalog-lookup fake-catalog-lookup
           #:approval-consumer
-          (lambda (writer capability requester target)
+          (lambda (writer capability requester revision target)
             (consume-transaction-void-approval!/in-transaction!
-             writer capability "instance-1" requester target (unbox now)))
+             writer capability "instance-1" requester revision target (unbox now)))
           #:commit-command!
           (lambda (writer plan)
             (commit-transaction-command-outcome!
@@ -253,7 +254,7 @@
        (db:query-exec connection
                       "UPDATE operator_roles SET role = 'manager' WHERE operator_id = 'Alice'")
        (define manager-requester
-         (authenticated-operator "Alice" "Alice" 'manager))
+         (authenticated-operator "Alice" "Alice" 'manager 1))
        (check-pred authentication-login-succeeded?
                    (authentication-service-login auth "Alice" good-pin))
        (define command
@@ -405,4 +406,25 @@
          approvals alice
          (void-transaction-command "cmd-stale" "txn-1" 99)
          "Sam" "80421638"))
-       (check-false (load-operator-login-throttle connection "Sam"))))))
+       (check-false (load-operator-login-throttle connection "Sam")))))
+
+  (test-case "requester credential rotation before grant writer denies stale issuance"
+    (call-with-services
+     (lambda (connection _auth _sessions _transactions approvals _now)
+       (db:query-exec
+        connection
+        "UPDATE operator_pin_credentials SET credential_revision = 2 WHERE operator_id = 'Alice'")
+       (check-pred
+        transaction-void-approval-not-granted?
+        (transaction-void-approval-service-request
+         approvals alice
+         (void-transaction-command "cmd-stale-requester" "txn-1" 1)
+         "Sam" good-pin))
+       (check-equal?
+        (db:query-value connection
+                        "SELECT COUNT(*) FROM transaction_void_approval_grants")
+        0)
+       (check-equal?
+        (db:query-value connection
+                        "SELECT COUNT(*) FROM security_audit_events WHERE event_type = 'approval.granted'")
+        0)))))

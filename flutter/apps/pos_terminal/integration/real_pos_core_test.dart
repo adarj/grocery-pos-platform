@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
 import 'package:pos_terminal/core/pos_core/authentication_client.dart';
 import 'package:pos_terminal/core/pos_core/http_pos_core_client.dart';
 import 'package:pos_terminal/core/pos_core/models/authentication.dart';
@@ -31,6 +32,28 @@ const _developmentCashierName = 'Development Cashier';
 const _developmentOpeningCash = 10000;
 const _developmentOperatorPin = '80421637';
 const _authorizationTestPin = '58310472';
+
+// The real POS Core receives and commits this POST; only its response is
+// withheld from the Flutter client. This models a lost response without
+// inventing a second credential-change request.
+final class _DropChangePinResponseClient extends http.BaseClient {
+  final http.Client _delegate = http.Client();
+  int droppedResponses = 0;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    final response = await _delegate.send(request);
+    if (request.url.path == '/auth/change-pin') {
+      await response.stream.drain<void>();
+      droppedResponses += 1;
+      throw const SocketException('Injected lost change-PIN response.');
+    }
+    return response;
+  }
+
+  @override
+  void close() => _delegate.close();
+}
 
 int _crashCampaignIterations() {
   final configured = Platform.environment['M6_CRASH_ITERATIONS'];
@@ -327,7 +350,7 @@ void main() {
 
       final initiallyReady = await client.fetchReadiness();
       expect(initiallyReady.ready, isTrue);
-      expect(initiallyReady.databaseSchemaVersion, 11);
+      expect(initiallyReady.databaseSchemaVersion, 12);
 
       await File(
         fixture.databasePath,
@@ -987,6 +1010,193 @@ void main() {
       expect((await afterRestart.fetchRegisterContext()).configured, isTrue);
     },
   );
+
+  test(
+    'real PIN change locks, rejects old PIN and preserves Alice sale recovery',
+    () async {
+      final fixture = await _startFixture();
+      final cashier = await _createCashier(fixture, 'pin_change_sale');
+      await cashier.controller.startTransaction();
+      final original = _snapshot(cashier.controller);
+      final oldToken = cashier.client.authenticationSession.accessToken!;
+      final authentication = AuthenticationController(
+        client: cashier.client,
+        sessionMemory: cashier.client.authenticationSession,
+      );
+      addTearDown(authentication.dispose);
+
+      expect(
+        await authentication.changePin('80421637', '48295173'),
+        PinChangeOutcome.changed,
+      );
+      expect(authentication.status, AuthenticationStatus.locked);
+      expect(cashier.client.authenticationSession.accessToken, isNull);
+      await expectLater(
+        cashier.client.login(_developmentCashierId, _developmentOperatorPin),
+        throwsA(
+          isA<PosCoreServerFailure>().having(
+            (failure) => failure.code,
+            'code',
+            'authentication_failed',
+          ),
+        ),
+      );
+      final newLogin = await cashier.client.login(
+        _developmentCashierId,
+        '48295173',
+      );
+      cashier.client.authenticationSession.establish(newLogin);
+      final context = await cashier.client.fetchRegisterContext();
+      expect(context.activeShift?.cashierId, _developmentCashierId);
+      expect(context.activeShift?.activeTransactionId, original.transactionId);
+      await cashier.controller.scanBarcode(_developmentBarcode);
+      expect(
+        _snapshot(cashier.controller).transactionId,
+        original.transactionId,
+      );
+      expect(_snapshot(cashier.controller).version, 2);
+      expect((await cashier.store.load())?.operatorId, _developmentCashierId);
+      final stale = HttpPosCoreClient(baseUri: fixture.baseUri);
+      addTearDown(stale.close);
+      stale.authenticationSession.establish(
+        AuthenticationLogin(accessToken: oldToken, session: newLogin.session),
+      );
+      await expectLater(
+        stale.fetchRegisterContext(),
+        throwsA(
+          isA<PosCoreServerFailure>().having(
+            (failure) => failure.code,
+            'code',
+            'authentication_required',
+          ),
+        ),
+      );
+    },
+  );
+
+  test(
+    'committed change-PIN with lost response locks and preserves recovery',
+    () async {
+      final fixture = await _startFixture();
+      final cashier = await _createCashier(fixture, 'pin_change_lost_response');
+      await cashier.controller.startTransaction();
+      await cashier.controller.scanBarcode(_developmentBarcode);
+      final before = _snapshot(cashier.controller);
+      final recoveryBefore = (await cashier.store.load())!;
+      final droppingTransport = _DropChangePinResponseClient();
+      final changeClient = HttpPosCoreClient(
+        baseUri: fixture.baseUri,
+        httpClient: droppingTransport,
+        authenticationSession: cashier.client.authenticationSession,
+      );
+      addTearDown(changeClient.close);
+      addTearDown(droppingTransport.close);
+      final authentication = AuthenticationController(
+        client: changeClient,
+        sessionMemory: cashier.client.authenticationSession,
+      );
+      addTearDown(authentication.dispose);
+
+      expect(
+        await authentication.changePin('80421637', '48295173'),
+        PinChangeOutcome.uncertain,
+      );
+      expect(droppingTransport.droppedResponses, 1);
+      expect(authentication.status, AuthenticationStatus.locked);
+      expect(cashier.client.authenticationSession.accessToken, isNull);
+      expect((await cashier.store.load())!.toJson(), recoveryBefore.toJson());
+      await expectLater(
+        cashier.client.login(_developmentCashierId, _developmentOperatorPin),
+        throwsA(
+          isA<PosCoreServerFailure>().having(
+            (failure) => failure.code,
+            'code',
+            'authentication_failed',
+          ),
+        ),
+      );
+      final login = await cashier.client.login(
+        _developmentCashierId,
+        '48295173',
+      );
+      cashier.client.authenticationSession.establish(login);
+      final context = await cashier.client.fetchRegisterContext();
+      expect(context.activeShift?.activeTransactionId, before.transactionId);
+      await cashier.controller.scanBarcode(_developmentBarcode);
+      expect(_snapshot(cashier.controller).transactionId, before.transactionId);
+      expect(_snapshot(cashier.controller).version, before.version + 1);
+    },
+  );
+
+  test(
+    'root reset revokes active bearer without losing the open sale',
+    () async {
+      final fixture = await _startFixture();
+      final cashier = await _createCashier(fixture, 'root_reset_sale');
+      await cashier.controller.startTransaction();
+      final original = _snapshot(cashier.controller);
+      await fixture.resetIntegrationOperatorPin(
+        operatorId: _developmentCashierId,
+        newPin: '48295173',
+      );
+      await expectLater(
+        cashier.client.fetchRegisterContext(),
+        throwsA(
+          isA<PosCoreServerFailure>().having(
+            (failure) => failure.code,
+            'code',
+            'authentication_required',
+          ),
+        ),
+      );
+      expect(cashier.client.authenticationSession.authenticated, isFalse);
+      await expectLater(
+        cashier.client.login(_developmentCashierId, _developmentOperatorPin),
+        throwsA(
+          isA<PosCoreServerFailure>().having(
+            (failure) => failure.code,
+            'code',
+            'authentication_failed',
+          ),
+        ),
+      );
+      await _authenticateAs(cashier.client, _developmentCashierId, '48295173');
+      final context = await cashier.client.fetchRegisterContext();
+      expect(context.activeShift?.activeTransactionId, original.transactionId);
+      await cashier.controller.scanBarcode(_developmentBarcode);
+      expect(
+        _snapshot(cashier.controller).transactionId,
+        original.transactionId,
+      );
+      expect(_snapshot(cashier.controller).version, 2);
+    },
+  );
+
+  test('same exact pending command survives root PIN reset', () async {
+    final fixture = await _startFixture();
+    final cashier = await _createCashier(fixture, 'pin_reset_pending');
+    await cashier.controller.startTransaction();
+    final before = _snapshot(cashier.controller);
+    final oldToken = cashier.client.authenticationSession.accessToken!;
+    await cashier.client.logout(oldToken);
+    await cashier.controller.scanBarcode(_developmentBarcode);
+    final pending = cashier.controller.state.pendingCommand!;
+    final persisted = (await cashier.store.load())!;
+    expect(persisted.pendingCommand!.toJson(), pending.toJson());
+    final commandIdCalls = cashier.ids.commandIdCalls;
+
+    await fixture.resetIntegrationOperatorPin(
+      operatorId: _developmentCashierId,
+      newPin: '48295173',
+    );
+    await _authenticateAs(cashier.client, _developmentCashierId, '48295173');
+    await cashier.controller.retryPendingCommand();
+    expect(cashier.ids.commandIdCalls, commandIdCalls);
+    expect(cashier.controller.state.pendingCommand, isNull);
+    expect(_snapshot(cashier.controller).transactionId, before.transactionId);
+    expect(_snapshot(cashier.controller).version, before.version + 1);
+    expect((await cashier.store.load())!.operatorId, _developmentCashierId);
+  });
 
   test(
     '401 before mutation preserves exact command across reauthentication',

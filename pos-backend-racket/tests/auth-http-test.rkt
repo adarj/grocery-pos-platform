@@ -82,7 +82,9 @@
      connection
      #:verify-pin
      (lambda (pin hash)
-       (and (string=? pin "80421637") (string=? hash password-hash)))
+       (or (and (string=? pin "80421637") (string=? hash password-hash))
+           (and (string=? pin "48295173") (string=? hash dummy-hash))))
+     #:hash-pin (lambda (_pin) dummy-hash)
      #:dummy-password-hash dummy-hash))
   (define app
     (make-app
@@ -142,6 +144,7 @@
             (list
              (make-request #"GET" "/auth/session")
              (make-request #"POST" "/auth/logout")
+             (make-request #"POST" "/auth/change-pin" #:body #"{}")
              (make-request #"POST" "/transaction-commands" #:body command-body)
              (make-request #"GET" "/transactions/transaction-1")
              (make-request #"GET" "/receipts/transaction-1")
@@ -231,5 +234,86 @@
                'error
                (hasheq 'code "authentication_failed"
                        'message "Operator sign-in failed.")))))
+
+  (test-case "change-pin is strict, step-up protected and revokes its bearer"
+    (define login
+      (response-json
+       (app (make-request
+             #"POST" "/auth/login"
+             #:body
+             (jsexpr->bytes
+              (hasheq 'operator_id "operator-1" 'pin "80421637"))))))
+    (define token (hash-ref login 'access_token))
+    (define headers (list (bearer-header token)))
+    (define extra
+      (app (make-request
+            #"POST" "/auth/change-pin" #:headers headers
+            #:body
+            (jsexpr->bytes
+             (hasheq 'current_pin "80421637" 'new_pin "48295173"
+                     'operator_id "inactive")))))
+    (check-equal? (response-code extra) 400)
+    (check-equal?
+     (db:query-value connection
+                     "SELECT credential_revision FROM operator_pin_credentials WHERE operator_id = 'operator-1'")
+     1)
+    (define wrong
+      (app (make-request
+            #"POST" "/auth/change-pin" #:headers headers
+            #:body
+            (jsexpr->bytes
+             (hasheq 'current_pin "80421638" 'new_pin "48295173")))))
+    (check-equal? (response-code wrong) 403)
+    (check-equal?
+     (hash-ref (hash-ref (response-json wrong) 'error) 'code)
+     "credential_change_failed")
+    (check-equal?
+     (response-code
+      (app (make-request #"GET" "/auth/session" #:headers headers)))
+     200)
+    (define changed
+      (app (make-request
+            #"POST" "/auth/change-pin" #:headers headers
+            #:body
+            (jsexpr->bytes
+             (hasheq 'current_pin "80421637" 'new_pin "48295173")))))
+    (check-equal? (response-code changed) 200)
+    (check-equal? (response-header changed #"Cache-Control") #"no-store")
+    (check-equal? (hash-ref (response-json changed) 'credential_revision) 2)
+    (check-true (hash-ref (response-json changed) 'reauthentication_required))
+    (check-equal?
+     (response-code
+      (app (make-request #"GET" "/auth/session" #:headers headers)))
+     401)
+    (check-equal?
+     (response-code
+      (app (make-request #"GET" "/register-context" #:headers headers)))
+     401)
+    (check-equal?
+     (response-code
+      (app (make-request #"POST" "/transaction-commands"
+                         #:headers headers #:body command-body)))
+     401)
+    (check-equal?
+     (db:query-value connection "SELECT COUNT(*) FROM transaction_command_receipts")
+     0)
+    (check-equal?
+     (response-code
+      (app (make-request #"POST" "/auth/login"
+                         #:body (jsexpr->bytes
+                                 (hasheq 'operator_id "operator-1"
+                                         'pin "80421637")))))
+     401)
+    (check-equal?
+     (response-code
+      (app (make-request #"POST" "/auth/login"
+                         #:body (jsexpr->bytes
+                                 (hasheq 'operator_id "operator-1"
+                                         'pin "48295173")))))
+     200)
+    (check-equal?
+     (db:query-value connection
+                     "SELECT COUNT(*) FROM security_audit_events WHERE event_type = 'operator.pin_changed'")
+     1))
 
   (db:disconnect connection))

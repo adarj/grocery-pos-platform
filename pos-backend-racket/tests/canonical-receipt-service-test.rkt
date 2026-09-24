@@ -15,7 +15,7 @@
 (define test-principal
   (authenticated-operator "legacy-receipt-test-operator"
                           "Legacy receipt test operator"
-                          'manager))
+                          'manager 1))
 
 (define (transaction-service-load-canonical-receipt service transaction-id)
   (load-canonical-receipt/authorized service test-principal transaction-id))

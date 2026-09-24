@@ -10,6 +10,7 @@
          "../domain/transaction-void-approval.rkt"
          "../domain/transaction-event.rkt"
          "../domain/security-audit-event.rkt"
+         "../security/authorization-policy.rkt"
          "security-audit-store.rkt"
          "sqlite-transaction-event-store.rkt"
          "transaction-command-actor-attribution-store.rkt"
@@ -44,6 +45,7 @@
    [pre-append-effect #:auto #:mutable]
    [post-append-effect #:auto #:mutable]
    [actor-operator-id #:auto #:mutable]
+   [actor-credential-revision #:auto #:mutable]
    [approval-capability #:auto #:mutable]
    [approval-consumer #:auto #:mutable])
   #:auto-value #f
@@ -92,12 +94,17 @@
      (transaction-command-receipt-outcome-code validated-receipt)
      (for/list ([event (in-list events)]) event))))
 
-(define (transaction-command-commit-plan-with-actor plan operator-id)
+(define (transaction-command-commit-plan-with-actor
+         plan operator-id credential-revision)
   (define who 'transaction-command-commit-plan-with-actor)
   (unless (transaction-command-commit-plan? plan)
     (raise-argument-error who "transaction-command-commit-plan?" plan))
   (unless (and (string? operator-id) (positive? (string-length operator-id)))
     (raise-argument-error who "non-empty string?" operator-id))
+  (unless (and (exact-integer? credential-revision)
+               (positive? credential-revision))
+    (raise-argument-error who "positive credential revision?"
+                          credential-revision))
   (define existing
     (transaction-command-commit-plan-actor-operator-id plan))
   (when (and existing (not (string=? existing operator-id)))
@@ -107,6 +114,8 @@
      "requested operator ID" operator-id))
   (set-transaction-command-commit-plan-actor-operator-id!
    plan (string->immutable-string operator-id))
+  (set-transaction-command-commit-plan-actor-credential-revision!
+   plan credential-revision)
   plan)
 
 (define (transaction-command-commit-plan-with-approval
@@ -121,8 +130,8 @@
   (unless capability
     (raise-argument-error who "approval-capability" capability))
   (unless (and (procedure? consume-approval!)
-               (procedure-arity-includes? consume-approval! 4))
-    (raise-argument-error who "four-argument-procedure?" consume-approval!))
+               (procedure-arity-includes? consume-approval! 5))
+    (raise-argument-error who "five-argument-procedure?" consume-approval!))
   (set-transaction-command-commit-plan-approval-capability! plan capability)
   (set-transaction-command-commit-plan-approval-consumer!
    plan consume-approval!)
@@ -277,6 +286,25 @@
     connection receipt actor-operator-id approver-attribution
     insert-receipt! insert-attribution! insert-approver-attribution!)))
 
+(define (fresh-actor-still-authorized? connection operator-id revision)
+  (define row
+    (db:query-maybe-row
+     connection
+     #<<SQL
+SELECT assignment.role, credential.credential_revision
+FROM operators AS operator
+JOIN operator_roles AS assignment
+  ON assignment.operator_id = operator.operator_id
+JOIN operator_pin_credentials AS credential
+  ON credential.operator_id = operator.operator_id
+WHERE operator.operator_id = ? AND operator.active = 1
+SQL
+     operator-id))
+  (and row
+       (= (vector-ref row 1) revision)
+       (operator-role-authorized?
+        (string->symbol (vector-ref row 0)) 'transaction.operate.own)))
+
 (define (resolve-unused-command!
          connection
          plan
@@ -294,6 +322,11 @@
     (transaction-command-commit-plan-decision-stream-version plan))
   (define actor-operator-id
     (transaction-command-commit-plan-actor-operator-id plan))
+  (define actor-credential-revision
+    (transaction-command-commit-plan-actor-credential-revision plan))
+  (unless (fresh-actor-still-authorized?
+           connection actor-operator-id actor-credential-revision)
+    (return (transaction-command-commit-authorization-denied)))
   ;; Approval is checked and consumed before any stream/version decision, but
   ;; inside this same outer writer transaction. Consequently every durable
   ;; void outcome consumes one grant and carries approver evidence, while a
@@ -306,7 +339,8 @@
            [consumer
             (transaction-command-commit-plan-approval-consumer plan)])
        (and capability consumer
-            (consumer connection capability actor-operator-id command)))))
+            (consumer connection capability actor-operator-id
+                      actor-credential-revision command)))))
   (when (and (void-transaction-command? command)
              (not (transaction-void-approval-consumed? approval-result)))
     (return (transaction-command-commit-approval-required)))
@@ -460,6 +494,12 @@
      "commit plan requires an authenticated actor"
      "plan"
      plan))
+  (unless (and (exact-integer?
+                (transaction-command-commit-plan-actor-credential-revision plan))
+               (positive?
+                (transaction-command-commit-plan-actor-credential-revision plan)))
+    (raise-arguments-error
+     who "commit plan requires a bound credential revision" "plan" plan))
   (when (db:in-transaction? connection)
     (raise-arguments-error
      who

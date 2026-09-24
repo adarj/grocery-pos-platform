@@ -11,13 +11,15 @@ collections=/usr/libexec/grocery-pos-core/vendor/racket/collects
 PLTCOLLECTS="$collections:"
 export PLTCOLLECTS
 
-if [ "$#" -eq 3 ] && [ "$1" = operator ] && [ "$2" = enroll-pin ]; then
+if [ "$#" -eq 3 ] && [ "$1" = operator ] &&
+   { [ "$2" = enroll-pin ] || [ "$2" = reset-pin ]; }; then
   if [ ! -t 0 ]; then
-    printf '%s\n' '{"error":{"code":"secure_input_required","message":"PIN enrollment requires an interactive terminal."},"ok":false}' >&2
+    printf '%s\n' '{"error":{"code":"secure_input_required","message":"PIN entry requires an interactive terminal."},"ok":false}' >&2
     exit 1
   fi
   saved_tty=$(/usr/bin/stty -g)
-  trap '/usr/bin/stty "$saved_tty"' EXIT HUP INT TERM
+  trap '/usr/bin/stty "$saved_tty"' EXIT
+  trap 'exit 1' HUP INT TERM
   printf '%s' 'PIN: ' >&2
   /usr/bin/stty -echo
   IFS= read -r first_pin

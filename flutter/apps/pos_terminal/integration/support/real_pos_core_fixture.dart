@@ -201,6 +201,44 @@ final class RealPosCoreFixture {
     await _runOperatorCredentialEnrollment(pin: pin, operators: operators);
   }
 
+  Future<void> resetIntegrationOperatorPin({
+    required String operatorId,
+    required String newPin,
+  }) async {
+    if (_disposed) {
+      throw StateError('A disposed POS Core fixture cannot reset operators.');
+    }
+    final process = await Process.start(
+      'racket',
+      [
+        'tests/support/reset-integration-operator.rkt',
+        databasePath,
+        operatorId,
+      ],
+      workingDirectory: posBackendDirectoryPath,
+      environment: Platform.environment,
+    );
+    process.stdin.writeln(newPin);
+    await process.stdin.close();
+    final stdoutFuture = process.stdout.transform(utf8.decoder).join();
+    final stderrFuture = process.stderr.transform(utf8.decoder).join();
+    final exitCode = await process.exitCode.timeout(
+      _referenceDataActivationTimeout,
+      onTimeout: () {
+        process.kill(ProcessSignal.sigkill);
+        throw TimeoutException('Timed out resetting isolated operator PIN.');
+      },
+    );
+    final output = await stdoutFuture;
+    final errorOutput = await stderrFuture;
+    if (exitCode != 0) {
+      throw StateError(
+        'Isolated operator reset failed with exit code $exitCode.\n'
+        'stdout:\n$output\nstderr:\n$errorOutput',
+      );
+    }
+  }
+
   Future<void> stop() async {
     final process = _process;
     final exitCodeFuture = _exitCodeFuture;

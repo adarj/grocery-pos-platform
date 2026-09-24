@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../core/pos_core/pos_core_client.dart';
 import '../features/cashier/cashier_session_controller.dart';
 import '../features/authentication/authentication_controller.dart';
+import '../features/authentication/change_pin_dialog.dart';
 import '../features/authentication/register_lock_screen.dart';
 
 final class PosTerminalApp extends StatefulWidget {
@@ -106,11 +107,33 @@ final class _PosTerminalAppState extends State<PosTerminalApp> {
                         top: 16,
                         right: 16,
                         child: SafeArea(
-                          child: FilledButton.tonalIcon(
-                            key: const Key('register-lock-button'),
-                            onPressed: widget.authenticationController.lock,
-                            icon: const Icon(Icons.lock),
-                            label: const Text('Lock'),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              FilledButton.tonal(
+                                key: const Key('change-pin-button'),
+                                onPressed: () {
+                                  final routeContext =
+                                      _navigatorKey.currentState?.overlay?.context;
+                                  if (routeContext == null) return;
+                                  showDialog<void>(
+                                    context: routeContext,
+                                    builder: (_) => ChangePinDialog(
+                                      controller:
+                                          widget.authenticationController,
+                                    ),
+                                  );
+                                },
+                                child: const Text('Change PIN'),
+                              ),
+                              const SizedBox(width: 8),
+                              FilledButton.tonalIcon(
+                                key: const Key('register-lock-button'),
+                                onPressed: widget.authenticationController.lock,
+                                icon: const Icon(Icons.lock),
+                                label: const Text('Lock'),
+                              ),
+                            ],
                           ),
                         ),
                       ),

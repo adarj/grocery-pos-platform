@@ -170,6 +170,46 @@ void main() {
     },
   );
 
+  test('change PIN sends only current and new PIN under the bearer', () async {
+    const token =
+        'gpos_s1_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc';
+    final memory = MemoryAuthenticationSession()
+      ..establish(const AuthenticationLogin(
+        accessToken: token,
+        session: AuthenticatedOperatorSession(
+          operatorId: 'operator-1',
+          displayName: 'Operator One',
+          role: 'cashier',
+          idleTimeoutSeconds: 300,
+          absoluteExpiresAtEpochMs: 9999999999999,
+        ),
+      ));
+    final client = HttpPosCoreClient(
+      baseUri: baseUri,
+      authenticationSession: memory,
+      httpClient: MockClient((request) async {
+        expect(request.method, 'POST');
+        expect(request.url.path, '/auth/change-pin');
+        expect(request.headers['authorization'], 'Bearer $token');
+        expect(jsonDecode(request.body), {
+          'current_pin': '80421637',
+          'new_pin': '48295173',
+        });
+        return http.Response(
+          jsonBody({
+            'ok': true,
+            'credential_revision': 2,
+            'reauthentication_required': true,
+          }),
+          200,
+        );
+      }),
+    );
+    expect(await client.changePin('80421637', '48295173'), 2);
+    // The controller, not the transport parser, owns local lock transition.
+    expect(memory.accessToken, token);
+  });
+
   test('protected 401 clears memory bearer while 503 retains it', () async {
     const token =
         'gpos_s1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';

@@ -153,6 +153,9 @@ Verified capabilities currently include:
   with no default identities or credentials;
 * root-only packaged operator bootstrap administration with no-echo PIN entry,
   a fixed canonical database target, and no HTTP enrollment escape hatch;
+* schema v12 credential-revision-bound void grants, authenticated Change PIN,
+  interactive root PIN reset, final-writer stale-credential rejection, and
+  root-only appliance authentication-readiness reporting;
 * migration v8 durable per-known-operator login throttling, process-local
   single-register bearer sessions, five-minute idle/twelve-hour absolute
   expiry, credential-revision binding, and generic anti-enumeration failures;

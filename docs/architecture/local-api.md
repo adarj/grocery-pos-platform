@@ -101,7 +101,7 @@ a control.
 
 The Racket process now constructs its durable transaction service before the
 HTTP listener starts. Startup resolves `SQLITE_DB_PATH`, migrates and validates
-the POS database through schema v11 using a dedicated connection after
+the POS database through schema v12 using a dedicated connection after
 establishing WAL with FULL synchronous durability. Every production connection
 explicitly enables foreign-key enforcement, retains a 1000-page WAL automatic
 checkpoint threshold, and uses the bounded Racket connector busy policy.
@@ -165,6 +165,18 @@ Malformed request JSON remains a distinct 400 validation failure.
 environment variables, and files are not bearer transports. Authentication
 responses use `Cache-Control: no-store`; missing/invalid protected credentials
 return `authentication_required` and a Bearer challenge.
+
+`POST /auth/change-pin` is also bearer-protected. It requires
+`application/json` with exactly `current_pin` and `new_pin` string fields;
+there is no client-supplied operator ID. The current PIN receives normal
+step-up verification and throttle treatment; the new PIN must satisfy the
+strong enrollment policy. Success returns
+`{"ok":true,"credential_revision":N,"reauthentication_required":true}`
+with `Cache-Control: no-store`; the old bearer is already invalidated. A 400
+`pin_policy_rejected` or 403 `credential_change_failed` guarantees no
+credential mutation; a 503 `credential_change_unavailable` means the writer
+rolled back. A transport-lost response is uncertain: the terminal locks and
+requires sign-in rather than blindly retrying the PIN-change POST.
 
 `GET /health`, `GET /ready`, and `POST /auth/login` remain public. Every other
 implemented business or auth-session route is protected. Authentication runs
@@ -535,6 +547,7 @@ GET /ready
 POST /auth/login
 GET /auth/session
 POST /auth/logout
+POST /auth/change-pin
 POST /transaction-commands
 GET /transactions/{transaction_id}
 GET /receipts/{transaction_id}

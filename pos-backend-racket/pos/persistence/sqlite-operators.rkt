@@ -2,7 +2,8 @@
 
 (require (prefix-in db: db)
          "../domain/operator-identity.rkt"
-         "../domain/security-audit-event.rkt")
+         "../domain/security-audit-event.rkt"
+         "transaction-void-approval-store.rkt")
 
 (provide (struct-out operator-create-succeeded)
          (struct-out operator-create-rejected)
@@ -11,13 +12,16 @@
          (struct-out operator-pin-record)
          (struct-out operator-pin-store-succeeded)
          (struct-out operator-pin-store-rejected)
+         (struct-out operator-pin-rotation-succeeded)
+         (struct-out operator-pin-rotation-rejected)
          load-operator
          list-operators
          create-operator!
          set-operator-role!
          set-operator-active!
          load-operator-pin-record
-         store-initial-operator-pin!)
+         store-initial-operator-pin!
+         rotate-operator-pin!)
 
 (struct operator-create-succeeded (operator) #:transparent)
 (struct operator-create-rejected (code) #:transparent)
@@ -28,6 +32,10 @@
 (struct operator-pin-record (password-hash credential-revision) #:transparent)
 (struct operator-pin-store-succeeded (credential-revision) #:transparent)
 (struct operator-pin-store-rejected (code) #:transparent)
+(struct operator-pin-rotation-succeeded (credential-revision) #:transparent)
+(struct operator-pin-rotation-rejected (code) #:transparent)
+
+(define maximum-sqlite-integer 9223372036854775807)
 
 (define (check-connection who connection)
   (unless (db:connection? connection)
@@ -128,7 +136,10 @@ SQL
          (let* ([_updated (update!)]
                 [after (load-operator connection operator-id)]
                 [audit-event (event-maker before after)])
-           (when audit-event (audit-append! connection audit-event))
+           (when audit-event
+             (revoke-transaction-void-approval-grants-for-operator!/in-transaction!
+              connection operator-id)
+             (audit-append! connection audit-event))
            (operator-update-succeeded after))))
    #:option 'immediate))
 
@@ -222,6 +233,80 @@ INSERT INTO operator_pin_credentials
 VALUES (?, ?, 1)
 SQL
          operator-id password-hash)
+        (db:query-exec
+         connection
+         "DELETE FROM operator_login_throttle WHERE operator_id = ?"
+         operator-id)
         (audit-append! connection (operator-pin-enrolled-event operator-id 1))
         (operator-pin-store-succeeded 1)]))
+   #:option 'immediate))
+
+;; Both authenticated self-change and root recovery use this final SQLite
+;; arbiter. Argon2 hashing is performed by their callers before entry.
+(define (rotate-operator-pin!
+         connection operator-id expected-revision new-password-hash
+         #:expected-password-hash [expected-password-hash #f]
+         #:require-active? [require-active? #f]
+         #:audit-event-maker audit-event-maker
+         #:audit-append! audit-append!)
+  (define who 'rotate-operator-pin!)
+  (check-connection who connection)
+  (unless (and (string? operator-id) (positive? (string-length operator-id)))
+    (raise-argument-error who "non-empty-string?" operator-id))
+  (unless (and (exact-integer? expected-revision)
+               (>= expected-revision 1)
+               (<= expected-revision maximum-sqlite-integer))
+    (raise-argument-error who "positive SQLite integer?" expected-revision))
+  (unless (and (string? new-password-hash)
+               (string-prefix? new-password-hash "$argon2id$"))
+    (raise-argument-error who "argon2id-password-hash-string?"
+                          new-password-hash))
+  (when expected-password-hash
+    (unless (string? expected-password-hash)
+      (raise-argument-error who "string?" expected-password-hash)))
+  (unless (boolean? require-active?)
+    (raise-argument-error who "boolean?" require-active?))
+  (db:call-with-transaction
+   connection
+   (lambda ()
+     (define operator (load-operator connection operator-id))
+     (define credential (and operator
+                             (load-operator-pin-record connection operator-id)))
+     (cond
+       [(not operator) (operator-pin-rotation-rejected 'operator-not-found)]
+       [(not credential)
+        (operator-pin-rotation-rejected 'credential-enrollment-required)]
+       [(and require-active? (not (operator-identity-active? operator)))
+        (operator-pin-rotation-rejected 'operator-inactive)]
+       [(or (not (= (operator-pin-record-credential-revision credential)
+                    expected-revision))
+            (and expected-password-hash
+                 (not (string=?
+                       (operator-pin-record-password-hash credential)
+                       expected-password-hash))))
+        (operator-pin-rotation-rejected 'credential-concurrently-changed)]
+       [(= expected-revision maximum-sqlite-integer)
+        (operator-pin-rotation-rejected 'credential-revision-exhausted)]
+       [else
+        (define next-revision (add1 expected-revision))
+        (db:query-exec
+         connection
+         #<<SQL
+UPDATE operator_pin_credentials
+SET password_hash = ?, credential_revision = ?
+WHERE operator_id = ? AND credential_revision = ?
+SQL
+         new-password-hash next-revision operator-id expected-revision)
+        (unless (= (db:query-value connection "SELECT changes()") 1)
+          (error who "credential changed during writer transaction"))
+        (db:query-exec
+         connection
+         "DELETE FROM operator_login_throttle WHERE operator_id = ?"
+         operator-id)
+        (revoke-transaction-void-approval-grants-for-operator!/in-transaction!
+         connection operator-id)
+        (audit-append!
+         connection
+         (audit-event-maker operator-id expected-revision next-revision))
+        (operator-pin-rotation-succeeded next-revision)]))
    #:option 'immediate))

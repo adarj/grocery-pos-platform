@@ -1,5 +1,7 @@
 #lang racket
 
+(require "support/seed-authenticated-operator.rkt")
+
 (require (prefix-in db: db)
          racket/file
          rackunit
@@ -35,7 +37,7 @@
    (string-append "gpos_a1_" (make-string 64 #\b))))
 
 (define cashier-one-principal
-  (authenticated-operator "cashier-one" "Alice" 'cashier))
+  (authenticated-operator "cashier-one" "Alice" 'cashier 1))
 
 (define (transaction-service-execute-command service command)
   (execute-command/authorized
@@ -52,6 +54,7 @@
 
 (define (activate-and-open! connection)
   (activate-operational-configuration! connection (configuration))
+  (seed-authenticated-test-operator! connection "cashier-one" 'cashier)
   (register-operations-open-shift
    (make-register-operations-service
     connection
@@ -74,7 +77,7 @@
    ;; Preserve business/shift coupling coverage with explicit test approval
    ;; evidence; grant validation is covered by the dedicated approval tests.
    #:approval-consumer
-   (lambda (_connection _capability _requester command)
+   (lambda (_connection _capability _requester _revision command)
      (transaction-void-approval-consumed
       (transaction-command-approver-attribution
        (transaction-command-command-id command)

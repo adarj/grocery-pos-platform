@@ -3,11 +3,13 @@
 (require db
          rackunit
          "../pos/application/authentication-service.rkt"
+         "../pos/application/operator-service.rkt"
          "../pos/domain/operator-identity.rkt"
          "../pos/domain/security-audit-event.rkt"
          "../pos/persistence/pos-database-migrations.rkt"
          "../pos/persistence/security-audit-store.rkt"
          "../pos/persistence/sqlite-auth-throttle.rkt"
+         "../pos/persistence/sqlite-operators.rkt"
          "../pos/security/operator-session.rkt")
 
 (define real-hash
@@ -287,6 +289,29 @@
                      "SELECT event_type FROM security_audit_events ORDER BY sequence DESC LIMIT 1")
         "auth.session_invalidated"))))
 
+  (test-case "observed credential rotation invalidates the old session with safe audit reason"
+    (call-with-authentication
+     (lambda (connection service _now _calls)
+       (define login (successful-login service))
+       (query-exec connection
+                   "UPDATE operator_pin_credentials SET credential_revision = 2 WHERE operator_id = 'cashier-1'")
+       (check-pred
+        authentication-session-invalid?
+        (authentication-service-authenticate
+         service (authentication-login-succeeded-access-token login)))
+       (check-false
+        (operator-session-store-current
+         (authentication-service-session-store service)))
+       (check-equal?
+        (query-value connection
+                     "SELECT event_type FROM security_audit_events ORDER BY sequence DESC LIMIT 1")
+        "auth.session_invalidated")
+       (check-true
+        (regexp-match?
+         #rx"credential_changed"
+         (query-value connection
+                      "SELECT event_json FROM security_audit_events ORDER BY sequence DESC LIMIT 1"))))))
+
   (test-case "required login audit failure invalidates newly issued bearer"
     (call-with-authentication
      (lambda (connection _service now _calls)
@@ -512,3 +537,302 @@
                    (authentication-service-authenticate reconstructed token))
        (check-not-false
         (load-operator-login-throttle connection "cashier-1"))))))
+
+(module+ test
+  (test-case "self-change verifies old PIN, rotates revision, audits and locks"
+    (call-with-authentication
+     (lambda (connection _original now _verify-calls)
+       (define sessions
+         (make-operator-session-store
+          #:current-monotonic-ms (lambda () (unbox now))
+          #:current-epoch-ms (lambda () (unbox now))))
+       (define replacement-pin "48295173")
+       (define service
+         (make-authentication-service
+          connection
+          #:session-store sessions
+          #:current-epoch-ms (lambda () (unbox now))
+          #:verify-pin
+          (lambda (pin hash)
+            (or (and (string=? pin good-pin) (string=? hash real-hash))
+                (and (string=? pin replacement-pin)
+                     (string=? hash dummy-hash))))
+          #:hash-pin (lambda (pin)
+                       (check-equal? pin replacement-pin)
+                       dummy-hash)
+          #:dummy-password-hash dummy-hash))
+       (define login (successful-login service))
+       (define token (authentication-login-succeeded-access-token login))
+       (check-pred
+        authentication-pin-change-policy-rejected?
+        (authentication-service-change-pin
+         service (authentication-login-succeeded-principal login)
+         token good-pin "12345678"))
+       (check-pred
+        authentication-pin-change-failed?
+        (authentication-service-change-pin
+         service (authentication-login-succeeded-principal login)
+         token "80421638" replacement-pin))
+       (check-equal?
+        (operator-login-throttle-consecutive-failures
+         (load-operator-login-throttle connection "cashier-1"))
+        1)
+       (define changed
+         (authentication-service-change-pin
+          service (authentication-login-succeeded-principal login)
+          token good-pin replacement-pin))
+       (check-pred authentication-pin-change-succeeded? changed)
+       (check-equal?
+        (authentication-pin-change-succeeded-credential-revision changed) 2)
+       (check-equal?
+        (operator-pin-record-credential-revision
+         (load-operator-pin-record connection "cashier-1")) 2)
+       (check-false (load-operator-login-throttle connection "cashier-1"))
+       (check-pred authentication-session-invalid?
+                   (authentication-service-authenticate service token))
+       (check-pred authentication-login-failed?
+                   (authentication-service-login service "cashier-1" good-pin))
+       (check-pred authentication-login-succeeded?
+                   (authentication-service-login
+                    service "cashier-1" replacement-pin))
+       (check-equal?
+        (query-list
+         connection
+         "SELECT event_type FROM security_audit_events WHERE event_type LIKE 'operator.pin_change%' ORDER BY sequence")
+        '("operator.pin_change_failed" "operator.pin_changed"))))
+
+  (test-case "required self-change audit failure rolls back rotation and leaves bearer valid"
+    (call-with-authentication
+     (lambda (connection _original now _verify-calls)
+       (define service
+         (make-authentication-service
+          connection
+          #:current-epoch-ms (lambda () (unbox now))
+          #:verify-pin (lambda (pin hash)
+                         (and (string=? pin good-pin)
+                              (string=? hash real-hash)))
+          #:hash-pin (lambda (_pin) dummy-hash)
+          #:dummy-password-hash dummy-hash
+          #:audit-append-in-transaction!
+          (lambda (_writer _event)
+            (error 'test "required audit append failed"))))
+       (define login (successful-login service))
+       (define token (authentication-login-succeeded-access-token login))
+       (query-exec
+        connection
+        "INSERT INTO operator_login_throttle VALUES ('cashier-1', 2, 1000, 1000)")
+       (query-exec
+        connection
+        #<<SQL
+INSERT INTO transaction_void_approval_grants
+  (approval_id, token_digest, issuer_instance_id, requester_operator_id,
+   requester_credential_revision, approver_operator_id,
+   approver_credential_revision, command_id, transaction_id,
+   command_schema_version, expected_version, granted_at_monotonic_ms,
+   expires_at_monotonic_ms, expires_at_epoch_ms)
+VALUES ('grant-self-change-rollback', zeroblob(32), 'instance',
+        'cashier-1', 1, 'approver', 1, 'command-self-change-rollback',
+        'transaction', 1, 1, 100, 190, 1000)
+SQL
+        )
+       (check-pred
+        authentication-pin-change-unavailable?
+        (authentication-service-change-pin
+         service (authentication-login-succeeded-principal login)
+         token good-pin "48295173"))
+       (check-equal?
+        (operator-pin-record-credential-revision
+         (load-operator-pin-record connection "cashier-1")) 1)
+       (check-equal?
+        (operator-pin-record-password-hash
+         (load-operator-pin-record connection "cashier-1")) real-hash)
+       (check-equal?
+        (operator-login-throttle-consecutive-failures
+         (load-operator-login-throttle connection "cashier-1")) 2)
+       (check-equal?
+        (query-value connection
+                     "SELECT COUNT(*) FROM transaction_void_approval_grants WHERE approval_id = 'grant-self-change-rollback'")
+        1)
+       (check-pred authentication-session-authenticated?
+                   (authentication-service-authenticate service token))
+       (check-pred authentication-login-succeeded?
+                   (authentication-service-login service "cashier-1" good-pin))
+       (check-pred authentication-login-failed?
+                   (authentication-service-login service "cashier-1" "48295173"))
+       (check-equal?
+        (query-value connection
+                     "SELECT COUNT(*) FROM security_audit_events WHERE event_type = 'operator.pin_changed'")
+        0))))))
+
+(module+ test
+  (test-case "post-commit session cleanup failure cannot report no-commit 503"
+    (call-with-authentication
+     (lambda (connection _original now _calls)
+       (define new-pin "48295173")
+       (define service
+         (make-authentication-service
+          connection
+          #:current-epoch-ms (lambda () (unbox now))
+          #:verify-pin
+          (lambda (pin hash)
+            (or (and (string=? pin good-pin) (string=? hash real-hash))
+                (and (string=? pin new-pin) (string=? hash dummy-hash))))
+          #:hash-pin (lambda (_pin) dummy-hash)
+          #:dummy-password-hash dummy-hash
+          #:invalidate-session!
+          (lambda (_store _token)
+            (error 'test "injected post-commit session cleanup failure"))))
+       (define login (successful-login service))
+       (define token (authentication-login-succeeded-access-token login))
+       (check-pred
+        authentication-pin-change-succeeded?
+        (authentication-service-change-pin
+         service (authentication-login-succeeded-principal login)
+         token good-pin new-pin))
+       (check-equal?
+        (operator-pin-record-credential-revision
+         (load-operator-pin-record connection "cashier-1")) 2)
+       (check-pred authentication-session-invalid?
+                   (authentication-service-authenticate service token))
+       (check-pred authentication-login-failed?
+                   (authentication-service-login service "cashier-1" good-pin))
+       (check-pred authentication-login-succeeded?
+                   (authentication-service-login service "cashier-1" new-pin)))))
+
+  (test-case "root reset winning during self-change hashing rejects stale self-change"
+    (call-with-authentication
+     (lambda (connection _original now _calls)
+       (define root-reset-count (box 0))
+       (define service
+         (make-authentication-service
+          connection
+          #:current-epoch-ms (lambda () (unbox now))
+          #:verify-pin
+          (lambda (pin hash)
+            (and (string=? pin good-pin) (string=? hash real-hash)))
+          #:hash-pin
+          (lambda (_pin)
+            (set-box! root-reset-count (add1 (unbox root-reset-count)))
+            (check-pred
+             operator-pin-reset-succeeded?
+             (operator-service-reset-pin
+              (make-operator-service
+               connection #:hash-pin (lambda (_pin) dummy-hash))
+              "cashier-1" "58310472"))
+            real-hash)
+          #:dummy-password-hash dummy-hash))
+       (define login (successful-login service))
+       (check-pred
+        authentication-pin-change-failed?
+        (authentication-service-change-pin
+         service (authentication-login-succeeded-principal login)
+         (authentication-login-succeeded-access-token login)
+         good-pin "48295173"))
+       (check-equal? (unbox root-reset-count) 1)
+       (define credential (load-operator-pin-record connection "cashier-1"))
+       (check-equal? (operator-pin-record-credential-revision credential) 2)
+       (check-equal? (operator-pin-record-password-hash credential) dummy-hash)
+       (check-equal?
+        (query-list connection
+                    "SELECT event_type FROM security_audit_events WHERE event_type IN ('operator.pin_changed', 'operator.pin_reset')")
+        '("operator.pin_reset")))))
+
+  (test-case "self-change winning during root hashing rejects stale root reset"
+    (call-with-authentication
+     (lambda (connection _original now _calls)
+       (define service
+         (make-authentication-service
+          connection
+          #:current-epoch-ms (lambda () (unbox now))
+          #:verify-pin
+          (lambda (pin hash)
+            (and (string=? pin good-pin) (string=? hash real-hash)))
+          #:hash-pin (lambda (_pin) dummy-hash)
+          #:dummy-password-hash dummy-hash))
+       (define login (successful-login service))
+       (define nested-change-count (box 0))
+       (define root
+         (make-operator-service
+          connection
+          #:hash-pin
+          (lambda (_pin)
+            (set-box! nested-change-count (add1 (unbox nested-change-count)))
+            (check-pred
+             authentication-pin-change-succeeded?
+             (authentication-service-change-pin
+              service (authentication-login-succeeded-principal login)
+              (authentication-login-succeeded-access-token login)
+              good-pin "48295173"))
+            real-hash)))
+       (define reset (operator-service-reset-pin root "cashier-1" "58310472"))
+       (check-pred operator-pin-reset-rejected? reset)
+       (check-equal? (operator-pin-reset-rejected-code reset)
+                     'credential-concurrently-changed)
+       (check-equal? (unbox nested-change-count) 1)
+       (define credential (load-operator-pin-record connection "cashier-1"))
+       (check-equal? (operator-pin-record-credential-revision credential) 2)
+       (check-equal? (operator-pin-record-password-hash credential) dummy-hash)
+       (check-equal?
+        (query-list connection
+                    "SELECT event_type FROM security_audit_events WHERE event_type IN ('operator.pin_changed', 'operator.pin_reset')")
+        '("operator.pin_changed")))))
+
+  (test-case "one self-change wins when two verified changes share a revision"
+    (call-with-authentication
+     (lambda (connection _original now _calls)
+       (define (service-with-hash hash-pin)
+         (make-authentication-service
+          connection
+          #:current-epoch-ms (lambda () (unbox now))
+          #:verify-pin
+          (lambda (pin hash)
+            (and (string=? pin good-pin) (string=? hash real-hash)))
+          #:hash-pin hash-pin
+          #:dummy-password-hash dummy-hash))
+       (define inner (service-with-hash (lambda (_pin) dummy-hash)))
+       (define login (successful-login inner))
+       (define principal (authentication-login-succeeded-principal login))
+       (define token (authentication-login-succeeded-access-token login))
+       (define outer
+         (service-with-hash
+          (lambda (_pin)
+            (check-pred authentication-pin-change-succeeded?
+                        (authentication-service-change-pin
+                         inner principal token good-pin "48295173"))
+            real-hash)))
+       (check-pred authentication-pin-change-failed?
+                   (authentication-service-change-pin
+                    outer principal token good-pin "58310472"))
+       (define credential (load-operator-pin-record connection "cashier-1"))
+       (check-equal? (operator-pin-record-credential-revision credential) 2)
+       (check-equal? (operator-pin-record-password-hash credential) dummy-hash)
+       (check-equal?
+        (query-value connection
+                     "SELECT COUNT(*) FROM security_audit_events WHERE event_type = 'operator.pin_changed'")
+        1)))))
+
+(module+ test
+  (test-case "a live bearer does not bypass credential verification throttle"
+    (call-with-authentication
+     (lambda (connection service now _calls)
+       (define login (successful-login service))
+       (query-exec
+        connection
+        "INSERT INTO operator_login_throttle VALUES ('cashier-1', 4, 1000, 6000)")
+       (check-pred
+        authentication-pin-change-failed?
+        (authentication-service-change-pin
+         service (authentication-login-succeeded-principal login)
+         (authentication-login-succeeded-access-token login)
+         good-pin "48295173"))
+       (check-equal?
+        (operator-pin-record-credential-revision
+         (load-operator-pin-record connection "cashier-1")) 1)
+       (check-true
+        (operator-login-throttle-blocked?
+         (load-operator-login-throttle connection "cashier-1")
+         (unbox now)))
+       (check-equal?
+        (query-list connection
+                    "SELECT event_type FROM security_audit_events WHERE event_type LIKE 'operator.pin_change%'")
+        '("operator.pin_change_failed"))))))

@@ -4,6 +4,8 @@
          file/sha1
          racket/random
          "../domain/operator-identity.rkt"
+         "../domain/security-audit-event.rkt"
+         "../security/authorization-policy.rkt"
          "security-audit-service.rkt"
          "../persistence/sqlite-operators.rkt"
          "../security/operator-pin.rkt")
@@ -12,13 +14,17 @@
          operator-service?
          operator-service-load
          operator-service-list
+         operator-service-auth-status
          operator-service-create
          operator-service-set-role
          operator-service-set-active
          (struct-out operator-pin-enrollment-succeeded)
          (struct-out operator-pin-enrollment-rejected)
          (struct-out operator-pin-verification)
+         (struct-out operator-pin-reset-succeeded)
+         (struct-out operator-pin-reset-rejected)
          operator-service-enroll-pin
+         operator-service-reset-pin
          operator-service-verify-pin)
 
 (struct operator-service (connection hash-pin verify-pin-provider audit-append!)
@@ -28,6 +34,9 @@
 (struct operator-pin-enrollment-rejected (code) #:transparent)
 (struct operator-pin-verification (verified? code credential-revision)
   #:transparent)
+(struct operator-pin-reset-succeeded (operator-id credential-revision)
+  #:transparent)
+(struct operator-pin-reset-rejected (code) #:transparent)
 
 (define (check-provider who provider arity name)
   (unless (and (procedure? provider)
@@ -74,6 +83,44 @@
 (define (operator-service-list service)
   (check-service 'operator-service-list service)
   (list-operators (operator-service-connection service)))
+
+(define (operator-service-auth-status service)
+  (check-service 'operator-service-auth-status service)
+  (define connection (operator-service-connection service))
+  (define operators (list-operators connection))
+  (define active-cashier-ids
+    (db:query-list connection
+                   "SELECT cashier_id FROM cashiers WHERE active = 1"))
+  (define (enrolled-active? operator)
+    (and (operator-identity-active? operator)
+         (eq? (operator-identity-credential-state operator) 'enrolled)))
+  (define register-ready-count
+    (count (lambda (operator)
+             (and (enrolled-active? operator)
+                  (member (operator-identity-operator-id operator)
+                          active-cashier-ids)))
+           operators))
+  (define approval-ready-count
+    (count (lambda (operator)
+             (and (enrolled-active? operator)
+                  (operator-role-authorized?
+                   (operator-identity-role operator)
+                   'approval.transaction_void)))
+           operators))
+  (hasheq
+   'operator_count (length operators)
+   'active_operator_count (count operator-identity-active? operators)
+   'credential_enrolled_count
+   (count (lambda (operator)
+            (eq? (operator-identity-credential-state operator) 'enrolled))
+          operators)
+   'active_enrolled_operator_count (count enrolled-active? operators)
+   'register_operator_ready_count register-ready-count
+   'approval_operator_ready_count approval-ready-count
+   'register_auth_ready (positive? register-ready-count)
+   'approval_auth_ready (positive? approval-ready-count)
+   'audit_event_count
+   (db:query-value connection "SELECT COUNT(*) FROM security_audit_events")))
 
 (define (operator-service-create service operator-id display-name role)
   (check-service 'operator-service-create service)
@@ -144,3 +191,30 @@
          (and verified? #t)
          (if verified? 'verified 'invalid-credential)
          (operator-pin-record-credential-revision credential))])]))
+
+(define (operator-service-reset-pin service operator-id new-pin)
+  (check-service 'operator-service-reset-pin service)
+  (define connection (operator-service-connection service))
+  (cond
+    [(not (operator-pin-valid? new-pin))
+     (operator-pin-reset-rejected 'pin-policy-rejected)]
+    [(not (load-operator connection operator-id))
+     (operator-pin-reset-rejected 'operator-not-found)]
+    [else
+     (define credential (load-operator-pin-record connection operator-id))
+     (if (not credential)
+         (operator-pin-reset-rejected 'credential-enrollment-required)
+         (let* ([new-hash ((operator-service-hash-pin service) new-pin)]
+                [result
+                 (rotate-operator-pin!
+                  connection operator-id
+                  (operator-pin-record-credential-revision credential)
+                  new-hash
+                  #:audit-event-maker operator-pin-reset-event
+                  #:audit-append! (operator-service-audit-append! service))])
+           (if (operator-pin-rotation-succeeded? result)
+               (operator-pin-reset-succeeded
+                operator-id
+                (operator-pin-rotation-succeeded-credential-revision result))
+               (operator-pin-reset-rejected
+                (operator-pin-rotation-rejected-code result)))))]))

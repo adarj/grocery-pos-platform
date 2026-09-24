@@ -6,6 +6,8 @@ abstract interface class PosAuthenticationClient {
   Future<AuthenticatedOperatorSession> fetchAuthenticatedSession();
 
   Future<void> logout(String accessToken);
+
+  Future<int> changePin(String currentPin, String newPin);
 }
 
 final class MemoryAuthenticationSession {

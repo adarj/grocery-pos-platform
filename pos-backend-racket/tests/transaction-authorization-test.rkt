@@ -24,11 +24,11 @@
          "../pos/persistence/transaction-void-approval-store.rkt"
          "../pos/security/transaction-void-approval.rkt")
 
-(define alice (authenticated-operator "Alice" "Alice" 'cashier))
-(define alice-as-manager (authenticated-operator "Alice" "Alice" 'manager))
-(define bob (authenticated-operator "Bob" "Bob" 'cashier))
-(define sam (authenticated-operator "Sam" "Sam" 'supervisor))
-(define morgan (authenticated-operator "Morgan" "Morgan" 'manager))
+(define alice (authenticated-operator "Alice" "Alice" 'cashier 1))
+(define alice-as-manager (authenticated-operator "Alice" "Alice" 'manager 1))
+(define bob (authenticated-operator "Bob" "Bob" 'cashier 1))
+(define sam (authenticated-operator "Sam" "Sam" 'supervisor 1))
+(define morgan (authenticated-operator "Morgan" "Morgan" 'manager 1))
 (define approval-token
   (string-append "gpos_a1_" (make-string 64 #\a)))
 (define approval-capability
@@ -45,6 +45,7 @@
        (transaction-void-approval-capability-token-digest approval-capability)
        "instance-test"
        "Alice"
+       1
        "Sam"
        1
        (transaction-command-command-id command)
@@ -93,6 +94,7 @@
        (open-register-shift!
         connection "Alice" (money 1000) (lambda () 1000)
         (lambda () "shift-alice")
+        #:actor-credential-revision 1
         #:audit-append!
         (lambda (writer event)
           (append-security-audit-event!/in-transaction!
@@ -107,9 +109,9 @@
              #:commit-command! commit-command!
              #:audit-source audit-source
              #:approval-consumer
-             (lambda (approval-connection capability requester command)
+             (lambda (approval-connection capability requester revision command)
                (consume-transaction-void-approval!/in-transaction!
-                approval-connection capability "instance-test" requester
+                approval-connection capability "instance-test" requester revision
                 command (approval-now)))
              #:current-epoch-ms (lambda () 2000))))
     (lambda () (db:disconnect connection))))
@@ -342,8 +344,11 @@
                                       "UPDATE operators SET active = 0 WHERE operator_id = 'Alice'")]))
                   #:option 'immediate)
                  (check-not-false (sync/timeout 5 worker))
-                 (check-pred transaction-service-approval-required?
-                             (unbox result))
+                 (check-pred
+                  (if (eq? scenario 'requester-disabled)
+                      transaction-service-authorization-denied?
+                      transaction-service-approval-required?)
+                  (unbox result))
                  (for ([table (in-list
                                '("transaction_command_receipts"
                                  "transaction_command_actor_attributions"
@@ -474,6 +479,8 @@
   (test-case "legacy unattributed exact receipt remains recoverable without attribution"
     (call-with-service
      (lambda (connection service)
+       (db:query-exec connection
+                      "DELETE FROM pos_schema_migrations WHERE version = 12")
        (db:query-exec connection "DROP TRIGGER security_audit_events_no_update")
        (db:query-exec connection "DROP TRIGGER security_audit_events_no_delete")
        (db:query-exec connection "DROP TRIGGER security_audit_events_append_order")

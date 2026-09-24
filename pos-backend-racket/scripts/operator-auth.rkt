@@ -22,7 +22,8 @@
    "  grocery-pos-auth operator set-role OPERATOR_ID ROLE\n"
    "  grocery-pos-auth operator enable OPERATOR_ID\n"
    "  grocery-pos-auth operator disable OPERATOR_ID\n"
-   "  grocery-pos-auth operator enroll-pin OPERATOR_ID\n"))
+   "  grocery-pos-auth operator enroll-pin OPERATOR_ID\n"
+   "  grocery-pos-auth operator reset-pin OPERATOR_ID\n"))
 
 (define system-geteuid
   (get-ffi-obj "geteuid" (ffi-lib #f) (_fun -> _uint)))
@@ -73,6 +74,8 @@
      (operator-update-rejected-code result)]
     [(operator-pin-enrollment-rejected? result)
      (operator-pin-enrollment-rejected-code result)]
+    [(operator-pin-reset-rejected? result)
+     (operator-pin-reset-rejected-code result)]
     [else 'operation-rejected]))
 
 (define (write-operator-result operation result output-port error-port)
@@ -104,6 +107,14 @@
        (operator-pin-enrollment-succeeded-credential-revision result))
       output-port)
      0]
+    [(operator-pin-reset-succeeded? result)
+     (write-json-line
+      (hasheq 'ok #t 'operation operation
+              'operator_id (operator-pin-reset-succeeded-operator-id result)
+              'credential_revision
+              (operator-pin-reset-succeeded-credential-revision result))
+      output-port)
+     0]
     [else
      (write-failure
       (symbol->string (result-code result))
@@ -113,19 +124,13 @@
 (define (dispatch service arguments input-port output-port error-port)
   (match arguments
     [(list "status")
-     (define operators (operator-service-list service))
+     (define counts (operator-service-auth-status service))
      (write-json-line
-      (hasheq
-       'ok #t
-       'operation "status"
-       'schema_version current-pos-database-schema-version
-       'operator_count (length operators)
-       'active_operator_count
-       (count operator-identity-active? operators)
-       'credential_enrolled_count
-       (count (lambda (operator)
-                (eq? (operator-identity-credential-state operator) 'enrolled))
-              operators))
+      (hash-set
+       (hash-set
+        (hash-set counts 'ok #t)
+        'operation "status")
+       'schema_version current-pos-database-schema-version)
       output-port)
      0]
     [(list "operator" "list")
@@ -179,6 +184,17 @@
          (write-operator-result
           "operator_enroll_pin"
           (operator-service-enroll-pin service operator-id pin)
+          output-port
+          error-port))]
+    [(list "operator" "reset-pin" operator-id)
+     (define pin (read-line input-port 'any))
+     (if (eof-object? pin)
+         (write-failure
+          "pin_input_unavailable" "Secure PIN input was unavailable."
+          error-port)
+         (write-operator-result
+          "operator_reset_pin"
+          (operator-service-reset-pin service operator-id pin)
           output-port
           error-port))]
     [_

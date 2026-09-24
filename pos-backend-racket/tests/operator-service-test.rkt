@@ -35,6 +35,150 @@
     (lambda () (db:disconnect connection))))
 
 (module+ test
+  (test-case "enrollment clears pre-credential throttle and reset rotates revision atomically"
+    (call-with-operator-service
+     (lambda (connection service)
+       (operator-service-create service "Alice" "Alice" 'cashier)
+       (db:query-exec
+        connection
+        "INSERT INTO operator_login_throttle VALUES ('Alice', 7, 1000, 60000)")
+       (check-pred operator-pin-enrollment-succeeded?
+                   (operator-service-enroll-pin service "Alice" "80421637"))
+       (check-equal? (db:query-value connection
+                                     "SELECT COUNT(*) FROM operator_login_throttle")
+                     0)
+       (db:query-exec
+        connection
+        "INSERT INTO operator_login_throttle VALUES ('Alice', 5, 2000, 15000)")
+       (db:query-exec
+        connection
+        #<<SQL
+INSERT INTO transaction_void_approval_grants
+  (approval_id, token_digest, issuer_instance_id, requester_operator_id,
+   requester_credential_revision, approver_operator_id,
+   approver_credential_revision, command_id, transaction_id,
+   command_schema_version, expected_version, granted_at_monotonic_ms,
+   expires_at_monotonic_ms, expires_at_epoch_ms)
+VALUES ('grant-before-reset', zeroblob(32), 'instance', 'Alice', 1,
+        'Morgan', 1, 'command-before-reset', 'transaction', 1, 1,
+        100, 190, 1000)
+SQL
+        )
+       (define result
+         (operator-service-reset-pin service "Alice" "48295173"))
+       (check-pred operator-pin-reset-succeeded? result)
+       (check-equal? (operator-pin-reset-succeeded-credential-revision result) 2)
+       (check-equal? (operator-pin-record-credential-revision
+                      (load-operator-pin-record connection "Alice"))
+                     2)
+       (check-equal? (db:query-value connection
+                                     "SELECT COUNT(*) FROM operator_login_throttle")
+                     0)
+       (check-equal? (db:query-value connection
+                                     "SELECT COUNT(*) FROM transaction_void_approval_grants")
+                     0)
+       (check-equal?
+        (db:query-list connection
+                       "SELECT event_type FROM security_audit_events ORDER BY sequence")
+        '("operator.created" "operator.pin_enrolled" "operator.pin_reset")))))
+
+  (test-case "reset audit failure rolls back revision, throttle and approval revocation"
+    (call-with-operator-service
+     (lambda (connection service)
+       (operator-service-create service "Alice" "Alice" 'cashier)
+       (operator-service-enroll-pin service "Alice" "80421637")
+       (db:query-exec connection
+                      "INSERT INTO operator_login_throttle VALUES ('Alice', 4, 1000, 6000)")
+       (db:query-exec
+        connection
+        #<<SQL
+INSERT INTO transaction_void_approval_grants
+  (approval_id, token_digest, issuer_instance_id, requester_operator_id,
+   requester_credential_revision, approver_operator_id,
+   approver_credential_revision, command_id, transaction_id,
+   command_schema_version, expected_version, granted_at_monotonic_ms,
+   expires_at_monotonic_ms, expires_at_epoch_ms)
+VALUES ('grant-rollback', zeroblob(32), 'instance', 'Alice', 1,
+        'Morgan', 1, 'command-rollback', 'transaction', 1, 1,
+        100, 190, 1000)
+SQL
+        )
+       (define before-audit
+         (db:query-value connection "SELECT COUNT(*) FROM security_audit_events"))
+       (define before-hash
+         (operator-pin-record-password-hash
+          (load-operator-pin-record connection "Alice")))
+       (define failing
+         (make-operator-service
+          connection
+          #:hash-pin (lambda (_pin) fake-hash)
+          #:audit-append! (lambda (_writer _event)
+                            (error 'test "required audit failure"))))
+       (check-exn exn:fail?
+                  (lambda ()
+                    (operator-service-reset-pin failing "Alice" "48295173")))
+       (check-equal? (operator-pin-record-credential-revision
+                      (load-operator-pin-record connection "Alice")) 1)
+       (check-equal?
+        (operator-pin-record-password-hash
+         (load-operator-pin-record connection "Alice")) before-hash)
+       (check-equal? (db:query-value connection
+                                     "SELECT COUNT(*) FROM operator_login_throttle") 1)
+       (check-equal? (db:query-value connection
+                                     "SELECT COUNT(*) FROM transaction_void_approval_grants") 1)
+       (check-equal? (db:query-value connection
+                                     "SELECT COUNT(*) FROM security_audit_events")
+                     before-audit))))
+
+  (test-case "actual role or active change revokes grants; no-op changes do not"
+    (call-with-operator-service
+     (lambda (connection service)
+       (operator-service-create service "Alice" "Alice" 'cashier)
+       (operator-service-create service "Sam" "Sam" 'supervisor)
+       (operator-service-enroll-pin service "Alice" "80421637")
+       (operator-service-enroll-pin service "Sam" "80421637")
+       (define (insert-grant! id)
+         (db:query-exec
+          connection
+          #<<SQL
+INSERT INTO transaction_void_approval_grants
+  (approval_id, token_digest, issuer_instance_id, requester_operator_id,
+   requester_credential_revision, approver_operator_id,
+   approver_credential_revision, command_id, transaction_id,
+   command_schema_version, expected_version, granted_at_monotonic_ms,
+   expires_at_monotonic_ms, expires_at_epoch_ms)
+VALUES (?, zeroblob(32), 'instance', 'Alice', 1,
+        'Sam', 1, ?, 'transaction', 1, 1, 100, 190, 1000)
+SQL
+          id id))
+       (define (grant-count)
+         (db:query-value
+          connection "SELECT COUNT(*) FROM transaction_void_approval_grants"))
+       (insert-grant! "grant-role")
+       (operator-service-set-role service "Sam" 'supervisor)
+       (check-equal? (grant-count) 1)
+       (operator-service-set-role service "Sam" 'cashier)
+       (check-equal? (grant-count) 0)
+       (insert-grant! "grant-active-approver")
+       (operator-service-set-active service "Sam" #t)
+       (check-equal? (grant-count) 1)
+       (operator-service-set-active service "Sam" #f)
+       (check-equal? (grant-count) 0)
+       (operator-service-set-active service "Sam" #t)
+       (check-equal? (grant-count) 0)
+       (insert-grant! "grant-active-requester")
+       (operator-service-set-active service "Alice" #f)
+       (check-equal? (grant-count) 0)
+       (operator-service-set-active service "Alice" #t)
+       (check-equal? (grant-count) 0)
+       (check-equal?
+        (db:query-list
+         connection
+         "SELECT event_type FROM security_audit_events WHERE event_type IN ('operator.role_changed', 'operator.active_changed') ORDER BY sequence")
+        '("operator.role_changed" "operator.active_changed"
+          "operator.active_changed" "operator.active_changed"
+          "operator.active_changed")))))
+
   (test-case "failure after required operator audit insert rolls back row and sequence"
     (call-with-operator-service
      (lambda (connection ordinary)
@@ -227,6 +371,75 @@
         (db:disconnect second-connection)
         (db:disconnect first-connection)
         (delete-directory/files directory))))
+
+  (test-case "two root resets based on one revision have one winner without hashing under writer"
+    (define directory
+      (make-temporary-file "operator-reset-race-~a" 'directory))
+    (dynamic-wind
+      void
+      (lambda ()
+        (define path (build-path directory "pos.db"))
+        (define first (open-pos-sqlite-connection path 'create))
+        (define second (open-pos-sqlite-connection path 'read/write))
+        (dynamic-wind
+          void
+          (lambda ()
+            (migrate-pos-database! first)
+            (define initial
+              (make-operator-service
+               first #:hash-pin (lambda (_pin) fake-hash)))
+            (operator-service-create initial "Alice" "Alice" 'cashier)
+            (operator-service-enroll-pin initial "Alice" "80421637")
+            (define lock (make-semaphore 1))
+            (define gate (make-semaphore 0))
+            (define arrived 0)
+            (define hashed-under-writer? (box #f))
+            (define (blocking-hash connection)
+              (lambda (_pin)
+                (when (db:in-transaction? connection)
+                  (set-box! hashed-under-writer? #t))
+                (call-with-semaphore
+                 lock
+                 (lambda ()
+                   (set! arrived (add1 arrived))
+                   (when (= arrived 2)
+                     (semaphore-post gate)
+                     (semaphore-post gate))))
+                (semaphore-wait gate)
+                fake-hash))
+            (define results (make-channel))
+            (for ([connection (in-list (list first second))]
+                  [pin (in-list '("48295173" "58310472"))])
+              (thread
+               (lambda ()
+                 (channel-put
+                  results
+                  (with-handlers ([exn:fail? values])
+                    (operator-service-reset-pin
+                     (make-operator-service
+                      connection #:hash-pin (blocking-hash connection))
+                     "Alice" pin))))))
+            (define outcomes (list (channel-get results)
+                                   (channel-get results)))
+            (check-false (ormap exn:fail? outcomes))
+            (check-false (unbox hashed-under-writer?))
+            (check-equal? (count operator-pin-reset-succeeded? outcomes) 1)
+            (check-equal? (count operator-pin-reset-rejected? outcomes) 1)
+            (check-eq?
+             (operator-pin-reset-rejected-code
+              (findf operator-pin-reset-rejected? outcomes))
+             'credential-concurrently-changed)
+            (check-equal?
+             (operator-pin-record-credential-revision
+              (load-operator-pin-record first "Alice")) 2)
+            (check-equal?
+             (db:query-value first
+                             "SELECT COUNT(*) FROM security_audit_events WHERE event_type = 'operator.pin_reset'")
+             1))
+          (lambda ()
+            (db:disconnect second)
+            (db:disconnect first))))
+      (lambda () (delete-directory/files directory))))
 
   (test-case "concurrent initial enrollment has one winner"
     (define directory

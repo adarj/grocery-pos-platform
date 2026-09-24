@@ -141,6 +141,7 @@
          (issued-transaction-void-approval-capability issued))
         (transaction-void-approval-authority-issuer-instance-id authority)
         requester-id
+        (authenticated-operator-credential-revision requester)
         approver-id
         credential-revision
         (transaction-command-command-id command)

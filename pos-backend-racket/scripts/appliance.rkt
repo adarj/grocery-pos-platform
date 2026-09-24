@@ -1,17 +1,20 @@
 #lang racket
 
-(require json
+(require (prefix-in db: db)
+         json
          net/http-client
          racket/file
          racket/port
          racket/string
+         "../pos/application/operator-service.rkt"
          "../pos/persistence/atomic-file.rkt"
+         "../pos/persistence/pos-database-migrations.rkt"
          "../pos/support/appliance-provisioning.rkt"
          "../pos/support/appliance-recovery.rkt"
          "catalog.rkt"
          "register-configuration.rkt")
 
-(provide run-appliance-cli)
+(provide run-appliance-cli appliance-auth-status)
 
 (define canonical-database (string->path "/var/lib/grocery-pos/pos.db"))
 (define provisioning-state-directory
@@ -387,8 +390,26 @@
         (symbol->string (appliance-provisioning-state-phase state))
         "not_started")))
 
+(define (appliance-auth-status [database-path canonical-database])
+  ;; Root-only status opens the current database without creating or migrating
+  ;; it. Failure is reported as unavailable readiness, never as a roster.
+  (with-handlers ([exn:fail?
+                   (lambda (_exception)
+                     (hasheq 'register_auth_ready #f
+                             'approval_auth_ready #f
+                             'audit_event_count (json-null)))])
+    (define connection
+      (db:sqlite3-connect #:database database-path #:mode 'read-only))
+    (dynamic-wind
+      void
+      (lambda ()
+        (validate-pos-database-schema! connection #:require-current? #t)
+        (operator-service-auth-status (make-operator-service connection)))
+      (lambda () (db:disconnect connection)))))
+
 (define (run-status output)
   (require-root!)
+  (define auth-status (appliance-auth-status))
   (define supported?
     (with-handlers ([exn:fail? (lambda (_exception) #f)])
       (validate-kinoite-host! (current-host-profile))
@@ -397,6 +418,9 @@
    (hasheq
     'ok #t
     'operation "status"
+    'register_auth_ready (hash-ref auth-status 'register_auth_ready)
+    'approval_auth_ready (hash-ref auth-status 'approval_auth_ready)
+    'audit_event_count (hash-ref auth-status 'audit_event_count)
     'supported_reference_host supported?
     'ostree_booted (appliance-host-profile-ostree-booted?
                     (current-host-profile))

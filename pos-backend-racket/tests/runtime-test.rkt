@@ -25,10 +25,11 @@
          "../pos/persistence/sqlite-register-operations.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt"
          "../pos/security/operator-pin.rkt"
-         "../pos/security/transaction-void-approval.rkt")
+         "../pos/security/transaction-void-approval.rkt"
+         "support/seed-authenticated-operator.rkt")
 
 (define runtime-principal
-  (authenticated-operator "runtime-cashier" "Runtime Cashier" 'cashier))
+  (authenticated-operator "runtime-cashier" "Runtime Cashier" 'cashier 1))
 (define runtime-approver-pin "80421637")
 (define runtime-approver-hash (delay (hash-operator-pin runtime-approver-pin)))
 
@@ -112,6 +113,8 @@
      (activate-operational-configuration!
       connection
      (operational-configuration-decode-success-snapshot decoded))
+     (db:query-exec connection
+                    "INSERT OR IGNORE INTO operator_pin_credentials VALUES ('runtime-cashier', '$argon2id$fixture', 1)")
      (db:query-exec connection
                     "INSERT OR IGNORE INTO operators VALUES ('runtime-supervisor', 'Runtime Supervisor', 1)")
      (db:query-exec connection
@@ -287,7 +290,8 @@
                   (vector 8 "create_operator_login_throttle")
                   (vector 9 "create_transaction_command_actor_attributions")
                   (vector 10 "create_transaction_void_approvals")
-                  (vector 11 "create_security_audit_ledger")))
+                  (vector 11 "create_security_audit_ledger")
+                  (vector 12 "bind_transaction_void_approvals_to_requester_credentials")))
            (with-connection
             database-path
             (lambda (connection)
@@ -319,6 +323,12 @@ SQL
                  "catalog_items"
                  "transaction_command_receipts"
                  "transaction_events"))))
+
+           (with-connection
+            database-path
+            (lambda (connection)
+              (seed-authenticated-test-operator!
+               connection "runtime-cashier" 'cashier)))
 
            (define receipt
              (resolved-receipt
@@ -571,7 +581,8 @@ SQL
                   (vector 8 "create_operator_login_throttle")
                   (vector 9 "create_transaction_command_actor_attributions")
                   (vector 10 "create_transaction_void_approvals")
-                  (vector 11 "create_security_audit_ledger")))
+                  (vector 11 "create_security_audit_ledger")
+                  (vector 12 "bind_transaction_void_approvals_to_requester_credentials")))
            (define service
              (pos-runtime-transaction-service runtime-B))
            (define retry-receipt

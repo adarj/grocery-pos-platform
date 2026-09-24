@@ -1,5 +1,7 @@
 #lang racket
 
+(require "support/seed-authenticated-operator.rkt")
+
 (require (prefix-in db: db)
          racket/file
          rackunit
@@ -22,7 +24,7 @@
 
 (define acceptance-principal
   (authenticated-operator
-   "acceptance-cashier" "Acceptance Cashier" 'cashier))
+   "acceptance-cashier" "Acceptance Cashier" 'cashier 1))
 
 (define configuration-json
   "{\"schema_version\":1,\"register\":{\"register_id\":\"acceptance-register\",\"display_name\":\"Acceptance Register\"},\"cashiers\":[{\"cashier_id\":\"acceptance-cashier\",\"display_name\":\"Acceptance Cashier\",\"active\":true}]}")
@@ -67,6 +69,8 @@
 
 (define (open-acceptance-shift! connection clock)
   (activate-operational-configuration! connection (configuration))
+  (seed-authenticated-test-operator!
+   connection "acceptance-cashier" 'cashier)
   (define result
     (register-operations-open-shift
      (make-register-operations-service

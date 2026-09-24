@@ -32,7 +32,7 @@ fi
   fail "unexpected RPM package name"
 [[ "$(rpm -qp --queryformat '%{VERSION}' "$rpm_path")" == "0.0.0" ]] ||
   fail "unexpected internal RPM version"
-[[ "$(rpm -qp --queryformat '%{RELEASE}' "$rpm_path")" == "0.8.dev" ]] ||
+[[ "$(rpm -qp --queryformat '%{RELEASE}' "$rpm_path")" == "0.9.dev" ]] ||
   fail "unexpected internal RPM release"
 [[ "$(rpm -qp --queryformat '%{ARCH}' "$rpm_path")" == "noarch" ]] ||
   fail "RPM architecture is not noarch"
@@ -308,6 +308,8 @@ grep -Fq '$(/usr/bin/id -u)' "$auth_launcher" ||
   fail "auth launcher does not enforce the root boundary"
 grep -Fq '/usr/bin/stty -echo' "$auth_launcher" ||
   fail "auth launcher does not disable terminal echo for PIN entry"
+grep -Fq '[ "$2" = reset-pin ]' "$auth_launcher" ||
+  fail "auth launcher does not require secure PIN entry for reset"
 if grep -Eq -- '--pin|SQLITE_DB_PATH|[[:space:]]PIN([[:space:]]|=)' "$auth_launcher"; then
   fail "auth launcher exposes a PIN argv or database override surface"
 fi

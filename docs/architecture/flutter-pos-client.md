@@ -584,8 +584,13 @@ date/recent-sale search, drawer hardware, cash drops, paid-outs, refunds, or
 general accounting reports. Fixed endpoint/resource authorization and command
 actor attribution are implemented in Racket; Flutter only consumes the
 server-computed permission list. Scoped whole-sale void approval is implemented;
-approval for other actions, credential reset, the general security audit
-ledger, and variance approval remain deferred.
+approval for other actions and variance approval remain deferred. The terminal
+now offers self-service Change PIN through the bearer-protected Core endpoint.
+Current/new/confirmation fields are obscured and cleared after submission;
+only current/new are sent. Success or transport uncertainty disposes protected
+navigation and locks without deleting operator-bound transaction recovery.
+Root credential reset and the separate audit ledger live only in POS Core; the
+terminal has no manager credential-administration or audit viewer.
 Current recovery payloads may contain an opaque barcode, integer cash amount,
 or nonnegative removal line index; void and lifecycle commands have empty
 payloads. The recovery record is never logged.

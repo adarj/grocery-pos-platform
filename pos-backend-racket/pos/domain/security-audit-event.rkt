@@ -22,6 +22,9 @@
          operator-role-changed-event
          operator-active-changed-event
          operator-pin-enrolled-event
+         operator-pin-changed-event
+         operator-pin-change-failed-event
+         operator-pin-reset-event
          audit-accessed-event)
 
 (struct security-audit-event (type fields))
@@ -113,6 +116,21 @@
   (event 'operator.pin_enrolled
          (hash 'operator_id operator-id
                'credential_revision credential-revision)))
+
+(define (operator-pin-changed-event operator-id previous-revision new-revision)
+  (event 'operator.pin_changed
+         (hash 'operator_id operator-id
+               'previous_credential_revision previous-revision
+               'new_credential_revision new-revision)))
+
+(define (operator-pin-change-failed-event operator-id)
+  (event 'operator.pin_change_failed (hash 'operator_id operator-id)))
+
+(define (operator-pin-reset-event operator-id previous-revision new-revision)
+  (event 'operator.pin_reset
+         (hash 'operator_id operator-id
+               'previous_credential_revision previous-revision
+               'new_credential_revision new-revision)))
 
 (define (audit-accessed-event operation after-sequence limit)
   (event 'audit.accessed

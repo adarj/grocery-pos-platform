@@ -44,6 +44,7 @@
 (define (grant #:approval-id [approval-id "approval-1"]
                #:issuer [issuer "instance-1"]
                #:requester [requester "Alice"]
+               #:requester-revision [requester-revision 1]
                #:approver [approver "Sam"]
                #:revision [revision 1]
                #:command-id [command-id "cmd-void"]
@@ -57,6 +58,7 @@
    (transaction-void-approval-capability-token-digest capability)
    issuer
    requester
+   requester-revision
    approver
    revision
    command-id
@@ -82,13 +84,15 @@
                   #:capability [provided capability]
                   #:issuer [issuer "instance-1"]
                   #:requester [requester "Alice"]
+                  #:requester-revision [requester-revision 1]
                   #:provided-command [provided-command command]
                   #:now [now 2000])
   (call-with-transaction
    connection
    (lambda ()
      (consume-transaction-void-approval!/in-transaction!
-      connection provided issuer requester provided-command now))
+      connection provided issuer requester requester-revision
+      provided-command now))
    #:option 'immediate))
 
 (module+ test
@@ -147,6 +151,8 @@
                           (grant #:approval-id "approval-2"
                                  #:expected-version 4)
                           (grant #:approval-id "approval-2"
+                                 #:requester-revision 2)
+                          (grant #:approval-id "approval-2"
                                  #:requester "Morgan")))])
       (call-with-database
        (lambda (connection)
@@ -178,6 +184,23 @@
           (query-value connection
                        "SELECT COUNT(*) FROM transaction_void_approval_grants")
           1)))))
+
+  (test-case "requester grant revision must match both session and current credential"
+    (call-with-database
+     (lambda (connection)
+       (replace-grant! connection (grant))
+       (check-pred transaction-void-approval-rejected?
+                   (consume! connection #:requester-revision 2))
+       (query-exec connection
+                   "UPDATE operator_pin_credentials SET credential_revision = 2 WHERE operator_id = 'Alice'")
+       (check-pred transaction-void-approval-rejected?
+                   (consume! connection #:requester-revision 1))
+       (check-pred transaction-void-approval-rejected?
+                   (consume! connection #:requester-revision 2))
+       (check-equal?
+        (query-value connection
+                     "SELECT COUNT(*) FROM transaction_void_approval_grants")
+        1))))
 
   (test-case "grant scope, monotonic expiry, process instance, and live privilege fail closed"
     (for ([mutate (in-list

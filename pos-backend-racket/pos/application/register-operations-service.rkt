@@ -109,6 +109,8 @@
        opening-cash
        (register-operations-service-current-epoch-ms service)
        (register-operations-service-generate-shift-id service)
+       #:actor-credential-revision
+       (authenticated-operator-credential-revision principal)
        #:audit-append!
        (register-operations-service-audit-append! service))
       (begin
@@ -125,7 +127,7 @@
      counted-cash
      (register-operations-service-current-epoch-ms service)
      (authenticated-operator-operator-id principal)
-     (authenticated-operator-role principal)
+     (authenticated-operator-credential-revision principal)
      #:audit-append!
      (register-operations-service-audit-append! service)))
   (when (and (register-shift-close-rejected? result)

@@ -1,5 +1,7 @@
 #lang racket
 
+(require "support/seed-authenticated-operator.rkt")
+
 (require (prefix-in db: db)
          rackunit
          "../pos/application/authentication-service.rkt"
@@ -14,7 +16,7 @@
          "../pos/persistence/sqlite-register-operations.rkt")
 
 (define cashier-one-principal
-  (authenticated-operator "cashier-one" "Alice" 'cashier))
+  (authenticated-operator "cashier-one" "Alice" 'cashier 1))
 
 (define (register-operations-open-shift service _cashier-id opening-cash)
   (open-shift/authorized service cashier-one-principal opening-cash))
@@ -35,7 +37,8 @@
   (dynamic-wind
     (lambda ()
       (migrate-pos-database! connection)
-      (activate-operational-configuration! connection (configuration)))
+      (activate-operational-configuration! connection (configuration))
+      (seed-authenticated-test-operator! connection "cashier-one" 'cashier))
     (lambda () (procedure connection))
     (lambda () (db:disconnect connection))))
 

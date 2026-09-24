@@ -9,12 +9,12 @@
          "../pos/domain/shift-cash-accountability.rkt"
          "../pos/persistence/pos-database-migrations.rkt")
 
-(define alice (authenticated-operator "Alice" "Alice" 'cashier))
-(define bob (authenticated-operator "Bob" "Bob" 'cashier))
-(define sam (authenticated-operator "Sam" "Sam" 'supervisor))
-(define morgan (authenticated-operator "Morgan" "Morgan" 'manager))
+(define alice (authenticated-operator "Alice" "Alice" 'cashier 1))
+(define bob (authenticated-operator "Bob" "Bob" 'cashier 1))
+(define sam (authenticated-operator "Sam" "Sam" 'supervisor 1))
+(define morgan (authenticated-operator "Morgan" "Morgan" 'manager 1))
 (define unconfigured-manager
-  (authenticated-operator "Manager-Only" "Manager Only" 'manager))
+  (authenticated-operator "Manager-Only" "Manager Only" 'manager 1))
 
 (define (call-with-service proc)
   (define connection (db:sqlite3-connect #:database 'memory))
@@ -34,7 +34,10 @@
         (db:query-exec connection "INSERT INTO operators VALUES (?, ?, 1)"
                        (first entry) (second entry))
         (db:query-exec connection "INSERT INTO operator_roles VALUES (?, ?)"
-                       (first entry) (third entry)))
+                       (first entry) (third entry))
+        (db:query-exec connection
+                       "INSERT INTO operator_pin_credentials VALUES (?, '$argon2id$fixture', 1)"
+                       (first entry)))
       (for ([entry (in-list '(("Alice" "Alice")
                               ("Bob" "Bob")
                               ("Sam" "Sam")
@@ -102,6 +105,60 @@
         (register-shift-cashier-id (register-shift-opened-shift opened))
         "Alice")
        )))
+
+  (test-case "shift open, open recovery, and close reject a stale credential revision"
+    (call-with-service
+     (lambda (connection service)
+       (db:query-exec
+        connection
+        "UPDATE operator_pin_credentials SET credential_revision = 2 WHERE operator_id = 'Alice'")
+       (define stale-open
+         (register-operations-open-shift service alice (money 1000)))
+       (check-pred register-shift-open-rejected? stale-open)
+       (check-equal? (register-shift-open-rejected-code stale-open)
+                     'authorization-denied)
+       (check-equal?
+        (db:query-value connection "SELECT COUNT(*) FROM register_shifts") 0)
+       (define alice-current
+         (authenticated-operator "Alice" "Alice" 'cashier 2))
+       (check-pred register-shift-opened?
+                   (register-operations-open-shift
+                    service alice-current (money 1000)))
+       (check-equal?
+        (register-shift-open-rejected-code
+         (register-operations-open-shift service alice (money 1000)))
+        'authorization-denied)
+       (define stale-close
+         (register-operations-close-shift
+          service alice "shift-1" (money 1000)))
+       (check-pred register-shift-close-rejected? stale-close)
+       (check-equal? (register-shift-close-rejected-code stale-close)
+                     'authorization-denied)
+       (check-equal?
+        (db:query-value connection
+                        "SELECT COUNT(*) FROM shift_cash_reconciliations") 0)
+       (check-pred register-shift-closed?
+                   (register-operations-close-shift
+                    service alice-current "shift-1" (money 1000))))))
+
+  (test-case "foreign manager close checks final current credential revision"
+    (call-with-service
+     (lambda (connection service)
+       (register-operations-open-shift service alice (money 1000))
+       (db:query-exec
+        connection
+        "UPDATE operator_pin_credentials SET credential_revision = 2 WHERE operator_id = 'Morgan'")
+       (define stale
+         (register-operations-close-shift
+          service morgan "shift-1" (money 1000)))
+       (check-pred register-shift-close-rejected? stale)
+       (check-equal? (register-shift-close-rejected-code stale)
+                     'authorization-denied)
+       (check-pred register-shift-closed?
+                   (register-operations-close-shift
+                    service
+                    (authenticated-operator "Morgan" "Morgan" 'manager 2)
+                    "shift-1" (money 1000))))))
 
   (test-case "only manager may close another operator shift"
     (for ([principal (in-list (list bob sam))])

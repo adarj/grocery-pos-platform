@@ -82,10 +82,92 @@ SQL
         #(8 "create_operator_login_throttle")
         #(9 "create_transaction_command_actor_attributions")
         #(10 "create_transaction_void_approvals")
-        #(11 "create_security_audit_ledger")))
+        #(11 "create_security_audit_ledger")
+        #(12 "bind_transaction_void_approvals_to_requester_credentials")))
+
+;; This is the v10/v11 grant DDL, intentionally frozen in the upgrade fixture.
+;; A v12 grant is not copied into the old shape: v11 grants are ephemeral.
+(define frozen-v11-approval-grants-table-sql
+  #<<SQL
+CREATE TABLE transaction_void_approval_grants (
+  approval_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(approval_id) = 'text'
+      AND length(approval_id) > 0
+    ),
+  token_digest BLOB NOT NULL UNIQUE
+    CHECK (
+      typeof(token_digest) = 'blob'
+      AND length(token_digest) = 32
+    ),
+  issuer_instance_id TEXT NOT NULL
+    CHECK (
+      typeof(issuer_instance_id) = 'text'
+      AND length(issuer_instance_id) > 0
+    ),
+  requester_operator_id TEXT NOT NULL
+    CHECK (
+      typeof(requester_operator_id) = 'text'
+      AND length(requester_operator_id) > 0
+    ),
+  approver_operator_id TEXT NOT NULL
+    CHECK (
+      typeof(approver_operator_id) = 'text'
+      AND length(approver_operator_id) > 0
+    ),
+  approver_credential_revision INTEGER NOT NULL
+    CHECK (
+      typeof(approver_credential_revision) = 'integer'
+      AND approver_credential_revision >= 1
+    ),
+  command_id TEXT NOT NULL UNIQUE
+    CHECK (
+      typeof(command_id) = 'text'
+      AND length(command_id) > 0
+    ),
+  transaction_id TEXT NOT NULL
+    CHECK (
+      typeof(transaction_id) = 'text'
+      AND length(transaction_id) > 0
+    ),
+  command_schema_version INTEGER NOT NULL
+    CHECK (
+      typeof(command_schema_version) = 'integer'
+      AND command_schema_version = 1
+    ),
+  expected_version INTEGER NOT NULL
+    CHECK (
+      typeof(expected_version) = 'integer'
+      AND expected_version >= 0
+    ),
+  granted_at_monotonic_ms INTEGER NOT NULL
+    CHECK (
+      typeof(granted_at_monotonic_ms) = 'integer'
+      AND granted_at_monotonic_ms >= 0
+    ),
+  expires_at_monotonic_ms INTEGER NOT NULL
+    CHECK (
+      typeof(expires_at_monotonic_ms) = 'integer'
+      AND expires_at_monotonic_ms > granted_at_monotonic_ms
+    ),
+  expires_at_epoch_ms INTEGER NOT NULL
+    CHECK (
+      typeof(expires_at_epoch_ms) = 'integer'
+      AND expires_at_epoch_ms >= 0
+    ),
+  CHECK (requester_operator_id <> approver_operator_id)
+)
+SQL
+  )
+
+(define (rewind-current-fixture-to-v11! connection)
+  (migrate-pos-database! connection)
+  (query-exec connection "DROP TABLE transaction_void_approval_grants")
+  (query-exec connection frozen-v11-approval-grants-table-sql)
+  (query-exec connection "DELETE FROM pos_schema_migrations WHERE version = 12"))
 
 (define (rewind-current-fixture-to-v10! connection)
-  (migrate-pos-database! connection)
+  (rewind-current-fixture-to-v11! connection)
   (query-exec connection "DROP TRIGGER security_audit_events_no_update")
   (query-exec connection "DROP TRIGGER security_audit_events_no_delete")
   (query-exec connection "DROP TRIGGER security_audit_events_append_order")
@@ -231,6 +313,83 @@ SQL
    ))
 
 (module+ test
+  (test-case "v11 to v12 revokes only unconsumed grants and binds new grants to requester revision"
+    (call-with-test-database
+     (lambda (connection)
+       (rewind-current-fixture-to-v11! connection)
+       (query-exec connection
+                   "INSERT INTO operators VALUES ('Alice', 'Alice', 1), ('Morgan', 'Morgan', 1)")
+       (query-exec connection
+                   "INSERT INTO operator_roles VALUES ('Alice', 'cashier'), ('Morgan', 'manager')")
+       (query-exec connection
+                   "INSERT INTO operator_pin_credentials VALUES ('Alice', '$argon2id$alice', 3), ('Morgan', '$argon2id$morgan', 2)")
+       (query-exec connection
+                   "INSERT INTO operator_login_throttle VALUES ('Alice', 4, 1000, 6000)")
+       (query-exec connection
+                   #<<SQL
+INSERT INTO transaction_command_receipts
+  (command_id, transaction_id, command_schema_version, command_type,
+   expected_version, command_json, outcome_kind, outcome_code,
+   outcome_stream_version)
+VALUES ('completed-void', 'txn-1', 1, 'void_transaction', 1,
+        '{"schema_version":1,"command_id":"completed-void","transaction_id":"txn-1","expected_version":1,"command_type":"void_transaction","payload":{}}',
+        'accepted', 'accepted', 2)
+SQL
+                   )
+       (query-exec connection
+                   "INSERT INTO transaction_command_actor_attributions VALUES ('completed-void', 'Alice')")
+       (query-exec connection
+                   "INSERT INTO transaction_command_approver_attributions VALUES ('completed-void', 'approval-completed', 'Morgan', 2, 2000)")
+       (query-exec connection
+                   #<<SQL
+INSERT INTO transaction_void_approval_grants
+  (approval_id, token_digest, issuer_instance_id, requester_operator_id,
+   approver_operator_id, approver_credential_revision, command_id,
+   transaction_id, command_schema_version, expected_version,
+   granted_at_monotonic_ms, expires_at_monotonic_ms, expires_at_epoch_ms)
+VALUES ('stale-grant', zeroblob(32), 'old-instance', 'Alice',
+        'Morgan', 2, 'pending-void', 'txn-2', 1, 3,
+        100, 190, 3000)
+SQL
+                   )
+       (append-security-audit-event!
+        connection (runtime-started-event)
+        #:source-kind 'pos_core
+        #:source-instance-id "audit_runtime_before_v12"
+        #:occurred-at-epoch-ms 2000)
+       (define preserved-tables
+         '(operators operator_roles operator_pin_credentials
+           operator_login_throttle transaction_command_receipts
+           transaction_command_actor_attributions
+           transaction_command_approver_attributions
+           transaction_command_legacy_unapproved_void_receipts
+           security_audit_events))
+       (define before
+         (for/hash ([table (in-list preserved-tables)])
+           (values table
+                   (query-rows connection (format "SELECT * FROM ~a" table)))))
+       (migrate-pos-database! connection)
+       (check-equal? (read-pos-database-migration-history connection)
+                     expected-migration-history)
+       (check-equal? (query-value connection
+                                  "SELECT COUNT(*) FROM transaction_void_approval_grants")
+                     0)
+       (check-not-false
+        (member "requester_credential_revision"
+                (for/list ([row (in-list
+                                  (query-rows connection
+                                              "PRAGMA table_info('transaction_void_approval_grants')"))])
+                  (vector-ref row 1))))
+       (for ([table (in-list preserved-tables)])
+         (check-equal? (query-rows connection (format "SELECT * FROM ~a" table))
+                       (hash-ref before table)))
+       (check-true
+        (security-audit-ledger-valid?
+         (verify-security-audit-ledger connection)))
+       (check-not-exn
+        (lambda ()
+          (validate-pos-database-schema! connection #:require-current? #t))))))
+
   (test-case "populated v10 migrates to an empty v11 ledger without changing prior rows"
     (call-with-test-database
      (lambda (connection)
@@ -299,7 +458,7 @@ SQL
      (lambda (connection)
        (install-frozen-v1! connection)
 
-       (check-equal? current-pos-database-schema-version 11)
+       (check-equal? current-pos-database-schema-version 12)
        (check-equal?
         (read-pos-database-migration-history connection)
         (list #(1 "create_transaction_events")))
@@ -353,7 +512,7 @@ SQL
 
        (query-exec
         connection
-        "INSERT INTO pos_schema_migrations (version, name) VALUES (12, 'unknown')")
+        "INSERT INTO pos_schema_migrations (version, name) VALUES (13, 'unknown')")
        (define unsupported-history
          (read-pos-database-migration-history connection))
        (check-equal?
@@ -363,7 +522,7 @@ SQL
         exn:fail?
         (lambda () (validate-pos-database-schema! connection))))))
 
-  (test-case "fresh database migrates through versions 1 through 11"
+  (test-case "fresh database migrates through versions 1 through 12"
     (call-with-test-database
      (lambda (connection)
        (migrate-pos-database! connection)
@@ -855,7 +1014,7 @@ SQL
        (migrate-pos-database! connection)
        (query-exec
         connection
-        "INSERT INTO pos_schema_migrations (version, name) VALUES (12, 'unknown')")
+        "INSERT INTO pos_schema_migrations (version, name) VALUES (13, 'unknown')")
        (check-exn exn:fail?
                   (lambda () (migrate-pos-database! connection)))))
 

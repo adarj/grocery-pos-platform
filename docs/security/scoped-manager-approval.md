@@ -26,6 +26,15 @@ cannot be used after POS Core restart. SQLite stores only a digest and
 non-secret scope/evidence, not the raw token or PIN. The response is
 `Cache-Control: no-store`.
 
+Schema v12 additionally binds the requester's authenticated credential
+revision into every new grant. The final command writer requires grant,
+request, and current authoritative requester revisions to agree. PIN rotation
+or actual role/active change atomically deletes unconsumed grants involving
+that operator as requester or approver; disable/re-enable and demote/re-promote
+cannot revive an old capability. Migration from v11 deliberately discards
+unconsumed, already process-invalid grants while preserving completed command
+attributions. See [Credential Lifecycle and Recovery](credential-lifecycle-and-recovery.md).
+
 Flutter keeps the token only long enough to POST the exact command with
 `X-Grocery-POS-Approval`. The command is written to local recovery storage
 *before* this business POST. The token, PIN, role and bearer never enter that

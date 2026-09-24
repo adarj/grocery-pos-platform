@@ -158,7 +158,7 @@
   (check-procedure who legacy-unapproved-void? "legacy-unapproved-void?")
   (when approval-consumer
     (unless (and (procedure? approval-consumer)
-                 (procedure-arity-includes? approval-consumer 4))
+             (procedure-arity-includes? approval-consumer 5))
       (raise-arguments-error
        who "expected a four-argument approval consumer"
        "approval-consumer" approval-consumer)))
@@ -430,7 +430,8 @@
     (transaction-command-commit-plan-command plan))
   (define actor-bound
     (transaction-command-commit-plan-with-actor
-     plan (authenticated-operator-operator-id principal)))
+     plan (authenticated-operator-operator-id principal)
+     (authenticated-operator-credential-revision principal)))
   (define approval-bound
     (if (and approval-capability
              (void-transaction-command? command)

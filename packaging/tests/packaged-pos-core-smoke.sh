@@ -116,7 +116,7 @@ start_core() {
       fail "packaged POS Core exited before readiness"
     fi
     if readiness="$(curl --silent --show-error --max-time 1 "$base_url/ready" 2>/dev/null)" &&
-      jq -e '.ok == true and .status == "ready" and .database_schema_version == 11' \
+      jq -e '.ok == true and .status == "ready" and .database_schema_version == 12' \
         <<<"$readiness" >/dev/null; then
       return
     fi
@@ -256,7 +256,7 @@ run_packaged_script catalog.rkt activate \
   "$restore_target_path" >/dev/null
 restore_result="$(run_packaged_script database-recovery.rkt restore-offline \
   "$backup_path" "$restore_target_path")"
-jq -e '.ok == true and .operation == "restore_offline" and .restored_schema_version == 11' \
+jq -e '.ok == true and .operation == "restore_offline" and .restored_schema_version == 12' \
   <<<"$restore_result" >/dev/null ||
   fail "packaged offline restore failed"
 recovery_directory="$(jq -r '.recovery_evidence_directory' <<<"$restore_result")"
@@ -273,6 +273,31 @@ jq -e '.ok == true and .transaction.status == "open" and .transaction.version ==
   <<<"$restored_transaction" >/dev/null ||
   fail "packaged POS Core did not recover restored durable state"
 stop_core_with_sigterm
+
+auth_status="$(TEST_DB_PATH="$database_path" TEST_PAYLOAD_ROOT="$payload_root" racket -e \
+  '(define script (build-path (string->path (getenv "TEST_PAYLOAD_ROOT"))
+                              "scripts/operator-auth.rkt"))
+   (define run-auth (dynamic-require script (quote run-operator-auth-cli)))
+   (unless (zero? (run-auth (vector "status")
+                            #:database-path (getenv "TEST_DB_PATH")
+                            #:effective-user-id (lambda () 0)))
+     (exit 1))')"
+jq -e '.ok == true and .schema_version == 12 and
+  .register_operator_ready_count >= 1 and .audit_event_count >= 1' \
+  <<<"$auth_status" >/dev/null ||
+  fail "packaged root authentication status failed"
+
+reset_result="$(TEST_DB_PATH="$database_path" TEST_PAYLOAD_ROOT="$payload_root" racket -e \
+  '(define script (build-path (string->path (getenv "TEST_PAYLOAD_ROOT"))
+                              "scripts/operator-auth.rkt"))
+   (define run-auth (dynamic-require script (quote run-operator-auth-cli)))
+   (unless (zero? (run-auth (vector "operator" "reset-pin" "cashier-development-01")
+                            #:database-path (getenv "TEST_DB_PATH")
+                            #:effective-user-id (lambda () 0)))
+     (exit 1))' <<<"48295173")"
+jq -e '.ok == true and .operation == "operator_reset_pin" and
+  .credential_revision == 2' <<<"$reset_result" >/dev/null ||
+  fail "packaged root PIN reset failed"
 
 support_result="$(run_packaged_script support-diagnostics.rkt collect \
   "$database_path" "$support_bundle_path")"

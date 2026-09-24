@@ -133,14 +133,29 @@ grocery-pos-auth operator enable OPERATOR_ID
 grocery-pos-auth operator disable OPERATOR_ID
 ```
 
-There is no delete or credential-reset operation and no implicit manager. Root
-is only the current OS administration boundary; application-level technician
-authentication remains later work. Checkpoint 5 now records successful root
+There is no operator or credential deletion and no implicit manager. CP6 adds
+interactive root recovery for an already-enrolled credential:
+
+```text
+sudo grocery-pos-auth operator reset-pin OPERATOR_ID
+```
+
+`reset-pin` advances the revision; `enroll-pin` is still only for an
+unenrolled operator. A reset may target a disabled operator without enabling
+it. The installed wrapper requires a TTY and asks twice with echo disabled;
+there is no PIN argv or environment override. Root is only the OS recovery
+boundary, not a POS manager. The security ledger records successful root
 operator mutations in the separate
 [security audit ledger](security-audit-ledger.md). Successful operational-
 configuration activation also records `operator.created` for each genuinely
 new cashier/operator stub inside its configuration transaction; existing
 operator security state is neither rewritten nor logged as a new principal.
+
+Operators may change their own PIN through the authenticated terminal. The
+current PIN is reverified, the new PIN follows enrollment policy, and success
+increments the revision, clears throttle, revokes unconsumed void grants, and
+locks the register for reauthentication. See
+[Credential Lifecycle and Recovery](credential-lifecycle-and-recovery.md).
 
 ## Backup, restore, readiness, and diagnostics
 

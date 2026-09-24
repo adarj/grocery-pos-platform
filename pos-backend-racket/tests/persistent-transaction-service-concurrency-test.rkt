@@ -1,5 +1,7 @@
 #lang racket
 
+(require "support/seed-authenticated-operator.rkt")
+
 (require (prefix-in db: db)
          racket/file
          rackunit
@@ -24,7 +26,7 @@
 (define test-principal
   (authenticated-operator "legacy-concurrency-test-operator"
                           "Legacy concurrency test operator"
-                          'manager))
+                          'manager 1))
 
 (define (transaction-service-execute-command service command)
   (execute-command/authorized service test-principal command))
@@ -62,6 +64,8 @@
              #:database database-path
              #:mode 'create))
       (migrate-pos-database! connection-A)
+      (seed-authenticated-test-operator!
+       connection-A "legacy-concurrency-test-operator" 'manager)
       (set! connection-B
             (db:sqlite3-connect
              #:database database-path

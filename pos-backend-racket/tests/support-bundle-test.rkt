@@ -106,10 +106,11 @@ SQL
        #<<SQL
 INSERT INTO transaction_void_approval_grants
   (approval_id, token_digest, issuer_instance_id, requester_operator_id,
-   approver_operator_id, approver_credential_revision, command_id,
+   requester_credential_revision, approver_operator_id,
+   approver_credential_revision, command_id,
    transaction_id, command_schema_version, expected_version,
    granted_at_monotonic_ms, expires_at_monotonic_ms, expires_at_epoch_ms)
-VALUES (?, ?, 'support-instance', 'support-requester', ?, 1,
+VALUES (?, ?, 'support-instance', 'support-requester', 1, ?, 1,
         'support-pending-void', ?, 1, 1, 1000, 91000, 91000)
 SQL
        approval-id-sentinel
@@ -261,7 +262,7 @@ SQL
          (call-with-input-file
           (build-path extraction-path "database.json") read-json))
        (check-equal? (hash-ref database 'migration_status) "current")
-       (check-equal? (hash-ref database 'current_supported_migration_version) 11)
+       (check-equal? (hash-ref database 'current_supported_migration_version) 12)
        (check-false (hash-has-key? database 'path))
        (check-false (hash-has-key? database 'diagnostic))
 

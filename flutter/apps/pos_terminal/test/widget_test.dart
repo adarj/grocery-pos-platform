@@ -139,8 +139,12 @@ final class FakeAuthenticationClient implements PosAuthenticationClient {
 
   Object? loginFailure;
   Object? logoutFailure;
+  Object? changePinFailure;
   AuthenticationLogin? loginResult;
   int logoutRequests = 0;
+  int changePinRequests = 0;
+  String? submittedCurrentPin;
+  String? submittedNewPin;
   String? logoutToken;
 
   static const session = AuthenticatedOperatorSession(
@@ -171,6 +175,15 @@ final class FakeAuthenticationClient implements PosAuthenticationClient {
     logoutRequests += 1;
     logoutToken = accessToken;
     if (logoutFailure case final failure?) throw failure;
+  }
+
+  @override
+  Future<int> changePin(String currentPin, String newPin) async {
+    changePinRequests += 1;
+    submittedCurrentPin = currentPin;
+    submittedNewPin = newPin;
+    if (changePinFailure case final failure?) throw failure;
+    return 2;
   }
 }
 
@@ -300,6 +313,131 @@ void main() {
     expect(client.registerContextRequests, 1);
     expect(find.byKey(const Key('operator-pin-input')), findsNothing);
   });
+
+  testWidgets(
+    'PIN change clears fields, locks without logout, and keeps recovery',
+    (tester) async {
+      final client = FakeConnectedPosCoreClient();
+      final memory = MemoryAuthenticationSession();
+      final authentication = FakeAuthenticationClient();
+      final cashierStore = MemoryCashierSessionStore()
+        ..persisted = PersistedCashierSession(
+          operatorId: 'operator-test',
+          activeTransactionId: 'txn-pin-change',
+          pendingCommand: ScanBarcodeCommand(
+            commandId: 'cmd-pin-change',
+            transactionId: 'txn-pin-change',
+            expectedVersion: 1,
+            barcode: '049000001234',
+          ),
+        );
+      await tester.pumpWidget(
+        testApp(
+          client,
+          authenticated: true,
+          authenticationClient: authentication,
+          memory: memory,
+          cashierStore: cashierStore,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('change-pin-button')));
+      await tester.pumpAndSettle();
+      expect(find.text('Change PIN'), findsWidgets);
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const Key('current-pin-input')))
+            .obscureText,
+        isTrue,
+      );
+      await tester.enterText(
+        find.byKey(const Key('current-pin-input')),
+        '80421637',
+      );
+      await tester.enterText(
+        find.byKey(const Key('new-pin-input')),
+        '48295173',
+      );
+      await tester.enterText(
+        find.byKey(const Key('confirm-new-pin-input')),
+        '48295173',
+      );
+      await tester.tap(find.byKey(const Key('change-pin-submit')));
+      await tester.pumpAndSettle();
+
+      expect(authentication.changePinRequests, 1);
+      expect(authentication.submittedCurrentPin, '80421637');
+      expect(authentication.submittedNewPin, '48295173');
+      expect(authentication.logoutRequests, 0);
+      expect(memory.accessToken, isNull);
+      expect(find.text('Register Locked'), findsOneWidget);
+      expect(find.byKey(const Key('register-lock-message')), findsOneWidget);
+      expect(find.byKey(const Key('current-pin-input')), findsNothing);
+      expect(
+        cashierStore.persisted!.pendingCommand!.commandId,
+        'cmd-pin-change',
+      );
+    },
+  );
+
+  testWidgets(
+    'lost PIN-change response clears dialog and locks without retry',
+    (tester) async {
+      final client = FakeConnectedPosCoreClient();
+      final memory = MemoryAuthenticationSession();
+      final authentication = FakeAuthenticationClient()
+        ..changePinFailure = const PosCoreTransportFailure('Lost response.');
+      final cashierStore = MemoryCashierSessionStore()
+        ..persisted = PersistedCashierSession(
+          operatorId: 'operator-test',
+          activeTransactionId: 'txn-pin-uncertain',
+          pendingCommand: ScanBarcodeCommand(
+            commandId: 'cmd-pin-uncertain',
+            transactionId: 'txn-pin-uncertain',
+            expectedVersion: 1,
+            barcode: '049000001234',
+          ),
+        );
+      await tester.pumpWidget(
+        testApp(
+          client,
+          authenticated: true,
+          authenticationClient: authentication,
+          memory: memory,
+          cashierStore: cashierStore,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('change-pin-button')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('current-pin-input')),
+        '80421637',
+      );
+      await tester.enterText(
+        find.byKey(const Key('new-pin-input')),
+        '48295173',
+      );
+      await tester.enterText(
+        find.byKey(const Key('confirm-new-pin-input')),
+        '48295173',
+      );
+      await tester.tap(find.byKey(const Key('change-pin-submit')));
+      await tester.pumpAndSettle();
+
+      expect(authentication.changePinRequests, 1);
+      expect(authentication.logoutRequests, 0);
+      expect(memory.accessToken, isNull);
+      expect(find.text('Register Locked'), findsOneWidget);
+      expect(find.byKey(const Key('current-pin-input')), findsNothing);
+      expect(find.byKey(const Key('new-pin-input')), findsNothing);
+      expect(find.byKey(const Key('confirm-new-pin-input')), findsNothing);
+      expect(
+        cashierStore.persisted!.pendingCommand!.commandId,
+        'cmd-pin-uncertain',
+      );
+    },
+  );
 
   testWidgets('generic login failure remains locked and clears PIN input', (
     tester,

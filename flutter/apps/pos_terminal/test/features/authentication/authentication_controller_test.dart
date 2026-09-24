@@ -19,6 +19,10 @@ const testSession = AuthenticatedOperatorSession(
 final class FakeAuthClient implements PosAuthenticationClient {
   Object? loginFailure;
   Object? logoutFailure;
+  Object? changePinFailure;
+  int changePinCalls = 0;
+  String? submittedCurrentPin;
+  String? submittedNewPin;
   final Completer<void>? logoutCompleter;
   int loginCalls = 0;
   int logoutCalls = 0;
@@ -49,6 +53,16 @@ final class FakeAuthClient implements PosAuthenticationClient {
     final failure = logoutFailure;
     if (failure != null) throw failure;
   }
+
+  @override
+  Future<int> changePin(String currentPin, String newPin) async {
+    changePinCalls += 1;
+    submittedCurrentPin = currentPin;
+    submittedNewPin = newPin;
+    final failure = changePinFailure;
+    if (failure != null) throw failure;
+    return 2;
+  }
 }
 
 final class FakeScheduler implements AuthenticationInactivityScheduler {
@@ -78,6 +92,47 @@ final class FakeScheduler implements AuthenticationInactivityScheduler {
 }
 
 void main() {
+  test('successful PIN change locks locally without logout or recovery mutation', () async {
+    final client = FakeAuthClient();
+    final memory = MemoryAuthenticationSession();
+    final controller = AuthenticationController(
+      client: client,
+      sessionMemory: memory,
+      inactivityScheduler: FakeScheduler(),
+    );
+    await controller.login('operator-1', '80421637');
+
+    expect(await controller.changePin('80421637', '48295173'),
+        PinChangeOutcome.changed);
+    expect(client.changePinCalls, 1);
+    expect(client.logoutCalls, 0);
+    expect(controller.status, AuthenticationStatus.locked);
+    expect(memory.accessToken, isNull);
+  });
+
+  test('definitive PIN rejection keeps session; uncertain transport locks', () async {
+    final client = FakeAuthClient();
+    final memory = MemoryAuthenticationSession();
+    final controller = AuthenticationController(
+      client: client,
+      sessionMemory: memory,
+      inactivityScheduler: FakeScheduler(),
+    );
+    await controller.login('operator-1', '80421637');
+    client.changePinFailure = const PosCoreServerFailure(
+      code: 'credential_change_failed',
+      message: 'PIN change was not completed.',
+      statusCode: 403,
+    );
+    expect(await controller.changePin('wrong', '48295173'),
+        PinChangeOutcome.credentialRejected);
+    expect(memory.accessToken, testToken);
+    client.changePinFailure = const PosCoreTransportFailure('Lost response.');
+    expect(await controller.changePin('80421637', '48295173'),
+        PinChangeOutcome.uncertain);
+    expect(memory.accessToken, isNull);
+    expect(controller.status, AuthenticationStatus.locked);
+  });
   test(
     'login keeps the bearer only in process memory and schedules five minutes',
     () async {

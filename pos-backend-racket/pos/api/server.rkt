@@ -177,6 +177,17 @@
              (handle-logout-request authentication-service req)
              (method-not-allowed-response #"POST"))]
 
+        [(equal? path '("auth" "change-pin"))
+         (if (equal? method #"POST")
+             (authenticate-protected-request
+              authentication-service req
+              (lambda (token authenticated)
+                (handle-change-pin-request
+                 authentication-service
+                 (authenticated-principal authenticated)
+                 token req)))
+             (method-not-allowed-response #"POST"))]
+
         [(equal? path '("transaction-commands"))
          (if (equal? method #"POST")
              (authenticate-protected-request

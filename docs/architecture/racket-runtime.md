@@ -84,7 +84,7 @@ succeeded:
 open dedicated SQLite connection in create mode
   -> establish and verify WAL
   -> establish and verify per-connection durability policy
-  -> run and validate POS database migrations through v11 and the audit chain
+  -> run and validate POS database migrations through v12 and the audit chain
   -> disconnect dedicated startup connection
   -> append required runtime.started before accepting HTTP requests
   -> construct request-time database resources
@@ -382,7 +382,7 @@ Focused file-backed tests establish:
   transaction-history loss;
 - normal `read/write` production opening rejecting a non-WAL database;
 - policy failure disconnecting the newly opened connection;
-- fresh runtime migration through schema v11;
+- fresh runtime migration through schema v12;
 - an empty persistent catalog rejecting the former development barcode rather
   than falling back to a fake;
 - active/inactive/unknown persistent catalog lookup behavior and exact

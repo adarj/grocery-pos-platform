@@ -48,6 +48,13 @@
                               (new_active . boolean))
    'operator.pin_enrolled '((operator_id . id)
                             (credential_revision . positive))
+   'operator.pin_changed '((operator_id . id)
+                           (previous_credential_revision . positive)
+                           (new_credential_revision . positive))
+   'operator.pin_change_failed '((operator_id . id))
+   'operator.pin_reset '((operator_id . id)
+                         (previous_credential_revision . positive)
+                         (new_credential_revision . positive))
    'audit.accessed '((operation . audit-operation)
                      (after_sequence . nonnegative) (limit . positive))))
 

@@ -1,5 +1,7 @@
 #lang racket
 
+(require "support/seed-authenticated-operator.rkt")
+
 (require (prefix-in db: db)
          json
          rackunit
@@ -27,7 +29,7 @@
 (define test-principal
   (authenticated-operator "legacy-catalog-test-operator"
                           "Legacy catalog test operator"
-                          'manager))
+                          'manager 1))
 
 (define (transaction-service-execute-command service command)
   (execute-command/authorized service test-principal command))
@@ -75,6 +77,8 @@
     void
     (lambda ()
       (migrate-pos-database! connection)
+      (seed-authenticated-test-operator!
+       connection "legacy-catalog-test-operator" 'manager)
       (activate-catalog-snapshot! connection snapshot-a)
       (procedure connection))
     (lambda () (db:disconnect connection))))
