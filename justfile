@@ -81,6 +81,20 @@ crash-m6 ITERATIONS="100":
 qualify-m6-kinoite:
     packaging/acceptance/qualify-kinoite.sh
 
+# Deterministic M7 security acceptance; external appliance/hardware evidence
+# remains separately recorded and cannot be inferred from this runner.
+accept-m7:
+    bash scripts/acceptance/accept-m7.sh
+
+acceptance-report-m7:
+    racket scripts/acceptance/m7-report.rkt .local/acceptance/m7/run-summary.json docs/acceptance/m7/acceptance-results.json
+
+stress-m7 EVENTS="10000":
+    racket scripts/acceptance/m7-security-stress.rkt {{quote(EVENTS)}}
+
+qualify-m7-kinoite:
+    bash packaging/acceptance/qualify-m7-kinoite.sh
+
 catalog-validate FILE:
     racket pos-backend-racket/scripts/catalog.rkt validate {{quote(FILE)}}
 

@@ -215,6 +215,13 @@ status are documented under [`docs/acceptance/m6`](docs/acceptance/m6/README.md)
 Repository-side green tests do not by themselves qualify a booted appliance or
 physical power-loss behavior.
 
+Milestone 7 security acceptance has a separate [requirements and evidence
+record](docs/acceptance/m7/README.md). `just accept-m7` runs deterministic
+repository qualification and records the tested uncommitted worktree; booted
+x86_64 Kinoite, selected kiosk hardware, and abrupt physical interruption
+still require their own observed evidence before the milestone can be called
+fully qualified.
+
 ## Development Environment
 
 The current primary environment is:

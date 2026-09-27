@@ -66,6 +66,7 @@ TEST_DB_PATH="$database_path" TEST_PAYLOAD_ROOT="$payload_root" racket -e \
    (define open-pos (dynamic-require sqlite-module (quote open-pos-sqlite-connection)))
    (define validate (dynamic-require migration-module (quote validate-pos-database-schema!)))
    (define make-service (dynamic-require operator-module (quote make-operator-service)))
+   (define create (dynamic-require operator-module (quote operator-service-create)))
    (define enroll (dynamic-require operator-module (quote operator-service-enroll-pin)))
    (define succeeded? (dynamic-require operator-module (quote operator-pin-enrollment-succeeded?)))
    (define pin (read-line))
@@ -74,19 +75,29 @@ TEST_DB_PATH="$database_path" TEST_PAYLOAD_ROOT="$payload_root" racket -e \
      void
      (lambda ()
        (validate connection #:require-current? #t)
-       (unless (succeeded? (enroll (make-service connection) "cashier-development-01" pin))
-         (error (quote packaged-auth-smoke) "credential enrollment failed")))
+       (define service (make-service connection))
+       (unless (succeeded? (enroll service "cashier-development-01" pin))
+         (error (quote packaged-auth-smoke) "cashier credential enrollment failed"))
+       (create service "package-supervisor" "Package Supervisor" (quote supervisor))
+       (unless (succeeded? (enroll service "package-supervisor" pin))
+         (error (quote packaged-auth-smoke) "supervisor credential enrollment failed")))
      (lambda () (disconnect connection)))' <<<"$test_operator_pin"
 
 PIN_MODULE="$payload_root/pos/security/operator-pin.rkt" racket -e \
   '(define module-path (string->path (getenv "PIN_MODULE")))
    (define hash-pin (dynamic-require module-path (quote hash-operator-pin)))
    (define verify-pin (dynamic-require module-path (quote verify-operator-pin)))
-   (define verifier (hash-pin "80421637"))
+   (define pin (read-line))
+   (define verifier (hash-pin pin))
+   (define wrong-pin
+     (string-append (substring pin 0 (sub1 (string-length pin)))
+                    (if (char=? (string-ref pin (sub1 (string-length pin))) #\0)
+                        "1" "0")))
    (unless (and (string-prefix? verifier "$argon2id$")
-                (verify-pin "80421637" verifier)
-                (not (verify-pin "80421638" verifier)))
-     (error (quote packaged-auth-smoke) "Argon2id credential round trip failed"))'
+                (verify-pin pin verifier)
+                (not (verify-pin wrong-pin verifier)))
+     (error (quote packaged-auth-smoke) "Argon2id credential round trip failed"))' \
+  <<<"$test_operator_pin"
 
 allocate_port() {
   racket -e \
@@ -150,23 +161,27 @@ stop_core_with_sigterm() {
   fail "packaged POS Core did not terminate within 10 seconds of SIGTERM"
 }
 
+auth_curl() {
+  local token="$1"
+  shift
+  curl --config <(printf 'header = "Authorization: Bearer %s"\n' "$token") "$@"
+}
+
 post_json() {
-  curl --silent --show-error --fail-with-body \
-    --header "Authorization: Bearer $access_token" \
+  auth_curl "$access_token" --silent --show-error --fail-with-body \
     --header 'Content-Type: application/json' \
-    --data "$2" \
-    "$base_url$1"
+    --data-binary @- \
+    "$base_url$1" <<<"$2"
 }
 
 login_core() {
   local login
   login="$(curl --silent --show-error --fail-with-body \
     --header 'Content-Type: application/json' \
-    --data "$(jq -cn \
-      --arg operator_id "$test_operator_id" \
-      --arg pin "$test_operator_pin" \
-      '{operator_id: $operator_id, pin: $pin}')" \
-    "$base_url/auth/login")"
+    --data-binary @- \
+    "$base_url/auth/login" \
+    <<<"$(printf '{\"operator_id\":\"%s\",\"pin\":\"%s\"}' \
+           "$test_operator_id" "$test_operator_pin")")"
   jq -e '.ok == true and .token_type == "Bearer" and
     .session.operator_id == "cashier-development-01"' \
     <<<"$login" >/dev/null || fail "packaged authentication failed"
@@ -202,8 +217,7 @@ old_access_token="$access_token"
 start_core
 
 stale_response="$work_root/stale-session.json"
-stale_status="$(curl --silent --output "$stale_response" --write-out '%{http_code}' \
-  --header "Authorization: Bearer $old_access_token" \
+stale_status="$(auth_curl "$old_access_token" --silent --output "$stale_response" --write-out '%{http_code}' \
   "$base_url/transactions/txn-package-restart")"
 [[ "$stale_status" == '401' ]] &&
   jq -e '.ok == false and .error.code == "authentication_required"' \
@@ -211,12 +225,44 @@ stale_status="$(curl --silent --output "$stale_response" --write-out '%{http_cod
   fail "packaged POS Core restart did not invalidate the old session"
 login_core
 
-recovered="$(curl --silent --show-error --fail \
-  --header "Authorization: Bearer $access_token" \
+recovered="$(auth_curl "$access_token" --silent --show-error --fail \
   "$base_url/transactions/txn-package-restart")"
 jq -e '.ok == true and .transaction.status == "open" and .transaction.version == 2 and (.transaction.line_items | length) == 1 and .transaction.total_minor_units == 219' \
   <<<"$recovered" >/dev/null ||
   fail "durable packaged transaction was not recovered after restart"
+
+tendered="$(post_json '/transaction-commands' '{"schema_version":1,"command_id":"cmd-package-tender","transaction_id":"txn-package-restart","expected_version":2,"command_type":"tender_cash","payload":{"amount_minor_units":500}}')"
+jq -e '.ok == true and .command_result.outcome_kind == "accepted"' <<<"$tendered" >/dev/null ||
+  fail "packaged cash tender failed"
+completed="$(post_json '/transaction-commands' '{"schema_version":1,"command_id":"cmd-package-complete","transaction_id":"txn-package-restart","expected_version":3,"command_type":"complete_transaction","payload":{}}')"
+jq -e '.ok == true and .command_result.outcome_kind == "accepted"' <<<"$completed" >/dev/null ||
+  fail "packaged sale completion failed"
+
+void_start="$(post_json '/transaction-commands' '{"schema_version":1,"command_id":"cmd-package-void-start","transaction_id":"txn-package-void","expected_version":0,"command_type":"start_transaction","payload":{}}')"
+jq -e '.ok == true and .command_result.outcome_kind == "accepted"' <<<"$void_start" >/dev/null ||
+  fail "packaged void-sale start failed"
+void_scan="$(post_json '/transaction-commands' '{"schema_version":1,"command_id":"cmd-package-void-scan","transaction_id":"txn-package-void","expected_version":1,"command_type":"scan_barcode","payload":{"barcode":"049000001234"}}')"
+jq -e '.ok == true and .command_result.outcome_kind == "accepted"' <<<"$void_scan" >/dev/null ||
+  fail "packaged void-sale scan failed"
+void_command='{"schema_version":1,"command_id":"cmd-package-void","transaction_id":"txn-package-void","expected_version":2,"command_type":"void_transaction","payload":{}}'
+approval="$(post_json '/approvals/transaction-void' \
+  "$(printf '{\"command\":%s,\"approver_operator_id\":\"package-supervisor\",\"approver_pin\":\"%s\"}' \
+           "$void_command" "$test_operator_pin")")"
+jq -e '.ok == true and .approval.approver_operator_id == "package-supervisor" and (.approval.approval_token | startswith("gpos_a1_"))' \
+  <<<"$approval" >/dev/null || fail "packaged scoped approval failed"
+approval_token="$(jq -r '.approval.approval_token' <<<"$approval")"
+unset approval
+approved_void="$(curl --silent --show-error --fail-with-body \
+  --config <(printf 'header = "Authorization: Bearer %s"\nheader = "X-Grocery-POS-Approval: %s"\n' \
+                    "$access_token" "$approval_token") \
+  --header 'Content-Type: application/json' \
+  --data-binary "$void_command" "$base_url/transaction-commands")"
+unset approval_token
+jq -e '.ok == true and .command_result.outcome_kind == "accepted"' \
+  <<<"$approved_void" >/dev/null || fail "packaged approved void failed"
+void_retry="$(post_json '/transaction-commands' "$void_command")"
+jq -e '.ok == true and .command_result.outcome_kind == "accepted"' \
+  <<<"$void_retry" >/dev/null || fail "packaged exact void retry required new approval"
 
 stop_core_with_sigterm
 
@@ -266,10 +312,9 @@ recovery_directory="$(jq -r '.recovery_evidence_directory' <<<"$restore_result")
 database_path="$restore_target_path"
 start_core
 login_core
-restored_transaction="$(curl --silent --show-error --fail \
-  --header "Authorization: Bearer $access_token" \
+restored_transaction="$(auth_curl "$access_token" --silent --show-error --fail \
   "$base_url/transactions/txn-package-restart")"
-jq -e '.ok == true and .transaction.status == "open" and .transaction.version == 2' \
+jq -e '.ok == true and .transaction.status == "completed" and .transaction.version == 4' \
   <<<"$restored_transaction" >/dev/null ||
   fail "packaged POS Core did not recover restored durable state"
 stop_core_with_sigterm

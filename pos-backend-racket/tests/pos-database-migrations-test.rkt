@@ -215,6 +215,31 @@ SQL
   (query-exec connection "DROP TABLE operators")
   (query-exec connection "DELETE FROM pos_schema_migrations WHERE version >= 7"))
 
+(define (rewind-current-fixture-to-v5! connection)
+  (rewind-current-fixture-to-v6! connection)
+  (query-exec connection "DROP TABLE shift_cash_reconciliations")
+  (query-exec connection "DROP TABLE shift_cash_movements")
+  (query-exec connection "DELETE FROM pos_schema_migrations WHERE version >= 6"))
+
+(define (rewind-current-fixture-to-v4! connection)
+  (rewind-current-fixture-to-v5! connection)
+  (query-exec connection "DROP TABLE register_shifts")
+  (query-exec connection "DROP TABLE cashiers")
+  (query-exec connection "DROP TABLE register_configuration")
+  (query-exec connection "DELETE FROM pos_schema_migrations WHERE version >= 5"))
+
+(define (rewind-current-fixture-to-v3! connection)
+  (rewind-current-fixture-to-v4! connection)
+  (query-exec connection "DROP TABLE catalog_item_tax_categories")
+  (query-exec connection "DROP TABLE tax_categories")
+  (query-exec connection "DELETE FROM pos_schema_migrations WHERE version >= 4"))
+
+(define (rewind-current-fixture-to-v2! connection)
+  (rewind-current-fixture-to-v3! connection)
+  (query-exec connection "DROP TABLE catalog_barcodes")
+  (query-exec connection "DROP TABLE catalog_items")
+  (query-exec connection "DELETE FROM pos_schema_migrations WHERE version >= 3"))
+
 (define m6-business-tables
   '(transaction_events
     transaction_command_receipts
@@ -521,6 +546,33 @@ SQL
        (check-exn
         exn:fail?
         (lambda () (validate-pos-database-schema! connection))))))
+
+  (test-case "every supported historical schema prefix upgrades to exact v12"
+    (for ([prefix (in-range 1 12)])
+      (call-with-test-database
+       (lambda (connection)
+         (case prefix
+           [(1) (install-frozen-v1! connection)]
+           [(2) (rewind-current-fixture-to-v2! connection)]
+           [(3) (rewind-current-fixture-to-v3! connection)]
+           [(4) (rewind-current-fixture-to-v4! connection)]
+           [(5) (rewind-current-fixture-to-v5! connection)]
+           [(6) (rewind-current-fixture-to-v6! connection)]
+           [(7) (rewind-current-fixture-to-v7! connection)]
+           [(8) (rewind-current-fixture-to-v8! connection)]
+           [(9) (rewind-current-fixture-to-v9! connection)]
+           [(10) (rewind-current-fixture-to-v10! connection)]
+           [(11) (rewind-current-fixture-to-v11! connection)])
+         (check-equal?
+          (query-rows connection
+                      "SELECT version, name FROM pos_schema_migrations ORDER BY version")
+          (take expected-migration-history prefix))
+         (migrate-pos-database! connection)
+         (check-equal?
+          (query-rows connection
+                      "SELECT version, name FROM pos_schema_migrations ORDER BY version")
+          expected-migration-history)
+         (check-not-exn (lambda () (validate-pos-database-schema! connection)))))))
 
   (test-case "fresh database migrates through versions 1 through 12"
     (call-with-test-database

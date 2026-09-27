@@ -1,0 +1,490 @@
+{
+  "generated_at": "2026-09-27T00:06:06Z",
+  "milestone": 7,
+  "overall_status": "conditional",
+  "reference_commit": "1168436c1acff461ca90ca05a01b0b4eb54d188a",
+  "repository_tier_a_environment": "fedora 44; aarch64; kernel 7.2.7-200.fc44.aarch64",
+  "schema_version": 1,
+  "test_groups": [
+    {
+      "blocking_issue": null,
+      "command": "just test-racket",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.7-200.fc44.aarch64",
+      "evidence_references": [
+        "pos-backend-racket/tests",
+        ".local/acceptance/m7/racket.log"
+      ],
+      "execution_timestamp": "2026-09-26T23:06:12Z",
+      "id": "M7-A-001",
+      "notes": "Existing focused tests include migration, provenance, session, approval, audit, lifecycle, and backup boundaries.",
+      "requirements": [
+        "M7-CP1-001",
+        "M7-CP1-002",
+        "M7-CP1-003",
+        "M7-CP1-004",
+        "M7-CP2-001",
+        "M7-CP2-002",
+        "M7-CP2-003",
+        "M7-CP3-001",
+        "M7-CP3-002",
+        "M7-CP3-003",
+        "M7-CP3-004",
+        "M7-CP3-005",
+        "M7-CP4-001",
+        "M7-CP4-002",
+        "M7-CP4-003",
+        "M7-CP4-004",
+        "M7-CP4-005",
+        "M7-CP5-001",
+        "M7-CP5-002",
+        "M7-CP5-003",
+        "M7-CP5-004",
+        "M7-CP5-005",
+        "M7-CP5-006",
+        "M7-CP5-007",
+        "M7-CP6-001",
+        "M7-CP6-002",
+        "M7-CP6-003",
+        "M7-CP6-004",
+        "M7-CP6-005",
+        "M7-CP6-006",
+        "M7-CP6-007"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Racket security and persistence regressions"
+    },
+    {
+      "blocking_issue": null,
+      "command": "just test-flutter",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.7-200.fc44.aarch64",
+      "evidence_references": [
+        "flutter/apps/pos_terminal/test",
+        ".local/acceptance/m7/flutter.log"
+      ],
+      "execution_timestamp": "2026-09-26T23:11:51Z",
+      "id": "M7-A-002",
+      "notes": "Presentation tests do not constitute server authorization evidence.",
+      "requirements": [
+        "M7-CP2-004",
+        "M7-CP3-001",
+        "M7-CP4-001",
+        "M7-CP6-003"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Flutter recovery and credential UI regressions"
+    },
+    {
+      "blocking_issue": null,
+      "command": "just test-pos-integration",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.7-200.fc44.aarch64",
+      "evidence_references": [
+        "flutter/apps/pos_terminal/integration/real_pos_core_test.dart",
+        ".local/acceptance/m7/integration.log"
+      ],
+      "execution_timestamp": "2026-09-26T23:12:01Z",
+      "id": "M7-A-003",
+      "notes": "Real-process integration; not booted appliance evidence.",
+      "requirements": [
+        "M7-CP2-001",
+        "M7-CP3-002",
+        "M7-CP4-002",
+        "M7-CP6-001",
+        "M7-CP7-002"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Real Flutter/Core/SQLite integration"
+    },
+    {
+      "blocking_issue": null,
+      "command": "just check",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.7-200.fc44.aarch64",
+      "evidence_references": [
+        "justfile",
+        ".local/acceptance/m7/check.log"
+      ],
+      "execution_timestamp": "2026-09-26T23:31:39Z",
+      "id": "M7-A-004",
+      "notes": "Includes analysis and repeats component tests by project convention.",
+      "requirements": [
+        "M7-CP7-001"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Complete local quality gate"
+    },
+    {
+      "blocking_issue": null,
+      "command": "just check-pos-core-package",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.7-200.fc44.aarch64",
+      "evidence_references": [
+        "packaging/tests/check-pos-core-package.sh",
+        ".local/acceptance/m7/core-package.log"
+      ],
+      "execution_timestamp": "2026-09-26T23:57:19Z",
+      "id": "M7-A-005",
+      "notes": "Installed RPM contract, not a production boot.",
+      "requirements": [
+        "M7-CP7-004"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "POS Core packaged contract"
+    },
+    {
+      "blocking_issue": null,
+      "command": "just check-pos-appliance",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.7-200.fc44.aarch64",
+      "evidence_references": [
+        "packaging/tests/check-pos-appliance-package.sh",
+        ".local/acceptance/m7/appliance-package.log"
+      ],
+      "execution_timestamp": "2026-09-26T23:59:33Z",
+      "id": "M7-A-006",
+      "notes": "Rootless package contract.",
+      "requirements": [
+        "M7-CP7-004"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Appliance packaged contract"
+    },
+    {
+      "blocking_issue": null,
+      "command": "nix build --no-link path:.#pos-core-rpm",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.7-200.fc44.aarch64",
+      "evidence_references": [
+        "packaging/fedora/grocery-pos-core.spec",
+        ".local/acceptance/m7/core-rpm.log"
+      ],
+      "execution_timestamp": "2026-09-26T23:59:45Z",
+      "id": "M7-A-007",
+      "notes": "Nix builds uncommitted source via path:.",
+      "requirements": [
+        "M7-CP7-004"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "POS Core RPM derivation"
+    },
+    {
+      "blocking_issue": null,
+      "command": "nix build --no-link path:.#pos-appliance-rpm",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.7-200.fc44.aarch64",
+      "evidence_references": [
+        "packaging/fedora/grocery-pos-appliance.spec",
+        ".local/acceptance/m7/appliance-rpm.log"
+      ],
+      "execution_timestamp": "2026-09-26T23:59:53Z",
+      "id": "M7-A-008",
+      "notes": "Nix builds uncommitted source via path:.",
+      "requirements": [
+        "M7-CP7-004"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Appliance RPM derivation"
+    },
+    {
+      "blocking_issue": null,
+      "command": "nix flake check path:. --print-build-logs",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.7-200.fc44.aarch64",
+      "evidence_references": [
+        "flake.nix",
+        ".local/acceptance/m7/flake.log"
+      ],
+      "execution_timestamp": "2026-09-26T23:59:54Z",
+      "id": "M7-A-009",
+      "notes": "Host-compatible outputs only.",
+      "requirements": [
+        "M7-CP7-004"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Native flake checks"
+    },
+    {
+      "blocking_issue": null,
+      "command": "bash scripts/acceptance/check-m7-static.sh",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.7-200.fc44.aarch64",
+      "evidence_references": [
+        "scripts/acceptance/check-m7-static.sh",
+        ".local/acceptance/m7/static.log"
+      ],
+      "execution_timestamp": "2026-09-27T00:00:27Z",
+      "id": "M7-A-010",
+      "notes": "A source-boundary screen, not proof of runtime behavior.",
+      "requirements": [
+        "M7-CP7-009"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Whole-M7 static security boundary"
+    },
+    {
+      "blocking_issue": null,
+      "command": "racket scripts/acceptance/m7-security-stress.rkt 10000",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.7-200.fc44.aarch64",
+      "evidence_references": [
+        "scripts/acceptance/m7-security-stress.rkt",
+        ".local/acceptance/m7/stress.log"
+      ],
+      "execution_timestamp": "2026-09-27T00:00:44Z",
+      "id": "M7-A-011",
+      "notes": "Metrics are host-specific, not universal performance guarantees.",
+      "requirements": [
+        "M7-CP7-003"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Bounded 10000-event security ledger stress"
+    },
+    {
+      "blocking_issue": null,
+      "command": "bash scripts/acceptance/check-nix-source-filter.sh",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.7-200.fc44.aarch64",
+      "evidence_references": [
+        "scripts/acceptance/check-nix-source-filter.sh",
+        ".local/acceptance/m7/source-isolation.log"
+      ],
+      "execution_timestamp": "2026-09-27T00:00:52Z",
+      "id": "M7-A-012",
+      "notes": "Ignored local evidence must not enter artifacts.",
+      "requirements": [
+        "M7-CP7-004"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Nix deployable source isolation"
+    },
+    {
+      "blocking_issue": null,
+      "command": "env M6_CRASH_ITERATIONS=25 bash -c cd\\ flutter/apps/pos_terminal\\ \\&\\&\\ flutter\\ test\\ --concurrency=1\\ --timeout=10m\\ integration/real_pos_core_test.dart\\ --plain-name\\ \\\"repeated\\ accepted\\ commands\\ survive\\ abrupt\\ POS\\ Core\\ process\\ death\\\"",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.7-200.fc44.aarch64",
+      "evidence_references": [
+        "flutter/apps/pos_terminal/integration/real_pos_core_test.dart",
+        ".local/acceptance/m7/crash.log"
+      ],
+      "execution_timestamp": "2026-09-27T00:01:03Z",
+      "id": "M7-A-013",
+      "notes": "SIGKILL is process-crash evidence, not power-loss evidence.",
+      "requirements": [
+        "M7-CP7-002"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Controlled process-death recovery"
+    },
+    {
+      "blocking_issue": null,
+      "command": "bash -c bash\\ scripts/acceptance/m6-enospc.sh\\ \\&\\&\\ bash\\ scripts/acceptance/m7-enospc.sh",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.7-200.fc44.aarch64",
+      "evidence_references": [
+        "scripts/acceptance/m6-enospc.sh",
+        "scripts/acceptance/m7-enospc.sh",
+        ".local/acceptance/m7/enospc.log"
+      ],
+      "execution_timestamp": "2026-09-27T00:05:00Z",
+      "id": "M7-A-014",
+      "notes": "Bounded private tmpfs checks include required credential/audit rollback and best-effort login denial.",
+      "requirements": [
+        "M7-CP5-003",
+        "M7-CP7-002"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "Isolated disk-full failure"
+    },
+    {
+      "blocking_issue": null,
+      "command": "nix build --no-link --print-build-logs --extra-platforms x86_64-linux path:.#checks.x86_64-linux.pos-terminal-flatpak path:.#checks.x86_64-linux.appliance-bundle",
+      "environment_description": "fedora 44; aarch64; kernel 7.2.7-200.fc44.aarch64",
+      "evidence_references": [
+        "flake.nix",
+        ".local/acceptance/m7/x86-artifacts.log"
+      ],
+      "execution_timestamp": "2026-09-27T00:05:16Z",
+      "id": "M7-A-015",
+      "notes": "Cross/emulated artifact success is not booted Tier B evidence.",
+      "requirements": [
+        "M7-CP7-005"
+      ],
+      "status": "passed",
+      "tier": "A",
+      "title": "x86_64 terminal and appliance derivations"
+    },
+    {
+      "blocking_issue": "Mandatory evidence has not been executed",
+      "command": null,
+      "environment_description": "Not supplied",
+      "evidence_references": [
+        "docs/acceptance/m7/appliance-qualification.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M7-B-001",
+      "notes": "Requires actual execution on a disposable booted Fedora Kinoite 44 x86_64 appliance.",
+      "requirements": [
+        "M7-CP7-006"
+      ],
+      "status": "not_run",
+      "tier": "B",
+      "title": "Booted Kinoite platform observation and provisioning baseline"
+    },
+    {
+      "blocking_issue": "Mandatory evidence has not been executed",
+      "command": null,
+      "environment_description": "Not supplied",
+      "evidence_references": [
+        "docs/acceptance/m7/appliance-qualification.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M7-B-002",
+      "notes": "Requires actual execution on a disposable booted Fedora Kinoite 44 x86_64 appliance.",
+      "requirements": [
+        "M7-CP7-006"
+      ],
+      "status": "not_run",
+      "tier": "B",
+      "title": "Credential bootstrap, authorization, approval, and lifecycle"
+    },
+    {
+      "blocking_issue": "Mandatory evidence has not been executed",
+      "command": null,
+      "environment_description": "Not supplied",
+      "evidence_references": [
+        "docs/acceptance/m7/appliance-qualification.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M7-B-003",
+      "notes": "Requires actual execution on a disposable booted Fedora Kinoite 44 x86_64 appliance.",
+      "requirements": [
+        "M7-CP7-006"
+      ],
+      "status": "not_run",
+      "tier": "B",
+      "title": "Offline checkout, restart, support, backup, and older-backup restore"
+    },
+    {
+      "blocking_issue": "Mandatory evidence has not been executed",
+      "command": null,
+      "environment_description": "Not supplied",
+      "evidence_references": [
+        "docs/acceptance/m7/appliance-qualification.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M7-B-004",
+      "notes": "Requires actual execution on a disposable booted Fedora Kinoite 44 x86_64 appliance.",
+      "requirements": [
+        "M7-CP7-006"
+      ],
+      "status": "not_run",
+      "tier": "B",
+      "title": "Ten normal reboot security cycles"
+    },
+    {
+      "blocking_issue": "Mandatory evidence has not been executed",
+      "command": null,
+      "environment_description": "Not supplied",
+      "evidence_references": [
+        "docs/acceptance/m7/appliance-qualification.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M7-B-005",
+      "notes": "Requires actual execution on a disposable booted Fedora Kinoite 44 x86_64 appliance.",
+      "requirements": [
+        "M7-CP7-006"
+      ],
+      "status": "not_run",
+      "tier": "B",
+      "title": "rpm-ostree upgrade/rollback versus forward-only database schema"
+    },
+    {
+      "blocking_issue": "Mandatory evidence has not been executed",
+      "command": null,
+      "environment_description": "Not supplied",
+      "evidence_references": [
+        "docs/acceptance/m7/reference-hardware.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M7-C-001",
+      "notes": "Requires selected physical register hardware.",
+      "requirements": [
+        "M7-CP7-007"
+      ],
+      "status": "not_run",
+      "tier": "C",
+      "title": "Locked startup and masked touchscreen PIN"
+    },
+    {
+      "blocking_issue": "Mandatory evidence has not been executed",
+      "command": null,
+      "environment_description": "Not supplied",
+      "evidence_references": [
+        "docs/acceptance/m7/reference-hardware.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M7-C-002",
+      "notes": "Requires selected physical register hardware.",
+      "requirements": [
+        "M7-CP7-007"
+      ],
+      "status": "not_run",
+      "tier": "C",
+      "title": "Inactivity lock, Alice-to-Bob isolation, and approval ceremony"
+    },
+    {
+      "blocking_issue": "Mandatory evidence has not been executed",
+      "command": null,
+      "environment_description": "Not supplied",
+      "evidence_references": [
+        "docs/acceptance/m7/reference-hardware.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M7-C-003",
+      "notes": "Requires selected physical register hardware.",
+      "requirements": [
+        "M7-CP7-007"
+      ],
+      "status": "not_run",
+      "tier": "C",
+      "title": "PIN-change lock and active-sale recovery"
+    },
+    {
+      "blocking_issue": "Mandatory evidence has not been executed",
+      "command": null,
+      "environment_description": "Not supplied",
+      "evidence_references": [
+        "docs/acceptance/m7/reference-hardware.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M7-C-004",
+      "notes": "Requires selected physical register hardware.",
+      "requirements": [
+        "M7-CP7-007"
+      ],
+      "status": "not_run",
+      "tier": "C",
+      "title": "Display, touch, reconnect, technician VT, and kiosk OS boundary"
+    },
+    {
+      "blocking_issue": "Mandatory evidence has not been executed",
+      "command": null,
+      "environment_description": "Not supplied",
+      "evidence_references": [
+        "docs/acceptance/m7/power-interruption-security.md"
+      ],
+      "execution_timestamp": null,
+      "id": "M7-D-001",
+      "notes": "Requires controlled interruption of a disposable physical appliance.",
+      "requirements": [
+        "M7-CP7-008"
+      ],
+      "status": "not_run",
+      "tier": "D",
+      "title": "Twenty-five-cycle abrupt physical interruption campaign"
+    }
+  ],
+  "tested_worktree_state": "uncommitted_cp7"
+}
