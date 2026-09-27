@@ -29,19 +29,23 @@
       "problemMatcher": []
     },
     {
-      "label": "test:rust",
-      "type": "shell",
-      "command": "just test-rust",
-      "group": "test",
-      "problemMatcher": [
-        "$rustc"
-      ]
-    },
-    {
       "label": "test:flutter",
       "type": "shell",
       "command": "just test-flutter",
       "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "test:integration",
+      "type": "shell",
+      "command": "just test-pos-integration",
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "analyze:flutter",
+      "type": "shell",
+      "command": "just analyze-flutter",
       "problemMatcher": []
     },
     {
@@ -55,24 +59,6 @@
       "label": "run:pos",
       "type": "shell",
       "command": "just run-pos",
-      "problemMatcher": []
-    },
-    {
-      "label": "supabase:start",
-      "type": "shell",
-      "command": "just supabase-start",
-      "problemMatcher": []
-    },
-    {
-      "label": "supabase:stop",
-      "type": "shell",
-      "command": "just supabase-stop",
-      "problemMatcher": []
-    },
-    {
-      "label": "format",
-      "type": "shell",
-      "command": "just fmt",
       "problemMatcher": []
     }
   ]

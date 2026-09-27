@@ -245,7 +245,7 @@ production SQLite boundary. A ready response is HTTP 200:
 
 ```json
 {
-  "database_schema_version": 9,
+  "database_schema_version": 12,
   "ok": true,
   "service": "grocery-pos-core",
   "status": "ready"
