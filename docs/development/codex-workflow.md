@@ -1,288 +1,305 @@
 # Codex development workflow
 
 This is conditional workflow context behind [AGENTS.md](../../AGENTS.md), not
-an instruction to load every linked document for every task. The root file
-carries the always-relevant constitution; read the sections here that help the
-current work. This document changes guidance, not runtime or tool configuration.
+an instruction to load every linked document. The root constitution carries
+universal safety rules; consult only the sections relevant to the task. This
+policy does not change tool configuration or product behavior.
 
 ## Cheapest trustworthy path
 
-Choose the cheapest trustworthy context/tool path that can resolve the task.
-Minimize unnecessary context, file reads, calls, duplicated analysis, test
-executions, and polling while preserving correctness, security, source
-verification, and human understanding. Fewest tokens or fastest output alone
-is not the objective. Never invent token measurements or trade away verification
-to improve counts.
+Choose the cheapest trustworthy context/tool path: minimize unnecessary reads,
+calls, duplicated analysis, tests, and polling without sacrificing correctness,
+security, source verification, or human understanding. Before invoking another
+specialist, state the distinct unresolved question it will answer. If there is
+none, do not call it. Fewest calls regardless of evidence quality is not success.
 
-For a small local change, `rg` → targeted source read → focused test is often
-enough. A specialist tool is useful only if it resolves a real uncertainty or
-narrows work that would otherwise be expensive.
-
-## Context funnel
-
-1. Identify the goal, scope, dangerous invariant, and expected area. If the
-   relevant source is already obvious, inspect it and nearby tests/contracts.
-2. Otherwise use narrow repository search or structural discovery to identify
-   likely files/symbols. Prefer `rg`/`rg --files`; do not browse the whole tree.
-3. Inspect authoritative source and relevant tests. Load architecture/ADR routes
-   only when that boundary or decision is involved.
-4. Use semantic/runtime tooling or external documentation only when it adds
-   evidence the local inspection cannot provide. Do not invoke a provider merely
-   because it exists.
-5. Stop expanding context when the evidence resolves the task. Report conflicting
-   or missing evidence instead of hiding it behind more tool output.
+Stop gathering context when authoritative evidence resolves the task with
+confidence appropriate to its risk. Do not preload every ADR or security document
+or keep browsing merely because related material exists. Use call/file/time
+counts for requested evaluations or workflow investigations, not every edit.
+There are no hard per-task call/file quotas. Never fabricate token measurements
+or infer token savings from lines, bytes, timing, or call counts.
 
 ## Authority and evidence
 
-Start with actual source and durable project contracts, then language/runtime
-tooling, structural indexes, and external documentation as needed. These answer
-different questions, not a universal ranking that lets one erase another:
+| Evidence | What it establishes / limit |
+| --- | --- |
+| Actual source | Grocery POS implementation; inspect the relevant authoritative path |
+| Tests | Expected/protected behavior; reading a test is not running it |
+| ADRs | Accepted architectural rationale; consult the [index](../adr/README.md) before changing a boundary |
+| Acceptance ledgers | What actually ran and passed, on which tier/environment—not everything in a plan |
+| Language/runtime tooling | Semantic diagnostics or observed execution; analyzer success alone does not prove behavior |
+| Structural graph | Candidate topology/impact, not security guarantees or completeness; verify source/tests |
+| External documentation | Upstream behavior, not Grocery POS behavior or necessarily a pinned-version contract |
 
-- Source establishes Grocery POS implementation behavior.
-- Tests establish expected/protected behavior; reading a test is not running it.
-- ADRs establish accepted architectural rationale. Consult the
-  [ADR index](../adr/README.md) before changing an architectural boundary.
-- Acceptance ledgers establish what was actually qualified, on which tier and
-  environment—not every behavior mentioned in a test plan.
-- Language/runtime tools give semantic and execution evidence.
-- Structural indexes locate dependencies and impact; verify their results in
-  source, especially when stale or incomplete.
-- External documentation establishes upstream behavior, not Grocery POS truth.
+Source, tests, ADRs, and acceptance records answer different questions. Investigate
+source/documentation conflicts rather than silently choosing the convenient answer.
+Structured tool output is evidence to assess, not authority by itself. DCM metrics
+are not correctness tests; graph results are not tests; upstream docs are not
+runtime evidence. Do not use static success to skip required behavioral coverage.
 
-When source and documentation disagree, investigate and report the discrepancy.
-Do not silently choose whichever makes the change easiest. Update affected
-documentation with authorized behavior changes; record unrelated drift for its
-own checkpoint. Structured tool output is still evidence to assess, not authority.
+## Context routes: source first, specialists when justified
 
-## Repository questions versus upstream questions
+Native Codex + shell + `just` are the default substrate. The four optional
+specialists are qualified in the user work profile, not a mandatory pipeline:
+[Dart/DCM qualification](dart-flutter-agent-tooling.md) and
+[repository-context qualification](repository-context-agent-tooling.md) describe
+their actual capabilities, mutation boundaries, and limitations. No fifth MCP
+is part of this policy.
 
-Resolve locally: where login throttling is stored, who authorizes shift close,
-how command idempotency works, and who owns transaction totals. Begin with the
-root context routes, targeted source, tests, and contracts.
+| Route | Trigger and action | Non-trigger / authority limit | Fallback |
+| --- | --- | --- | --- |
+| 0 — Known source | Known file/symbol → read relevant source and nearby tests/contracts if needed → stop | Do not search or invoke a specialist just to reconfirm a known location | Narrow search if the location proves wrong |
+| 1 — Lexical discovery | Unknown location, searchable name/error/route/event/config/test description → `rg` / `rg --files` → source/tests | Prefer one or two narrow searches when likely sufficient; avoid whole-tree browsing | Structural discovery if hits remain ambiguous |
+| 2 — codebase-memory | Genuinely unclear location, cross-cutting relationships, ambiguous lexical hits, or impact topology → verify root/relevant coverage → graph narrows → source confirms | Not required for every Racket task; missing graph callers do not prove no callers exist | `rg` + source when unavailable, stale, or incomplete |
+| 3 — Dart MCP | Unresolved symbol/type/overload/signature/hover, analyzer, package-URI, or explicitly needed runtime question | Not automatic for Dart/Flutter tasks or simple textual relationships; runtime capabilities exposed but not smoke-qualified | Source + canonical Flutter/Dart analyzer/tests when semantic evidence is needed |
+| 4 — DCM Free | Explicit complexity, coupling, nesting, maintainability, or qualified structural-quality question | Optional quality lens, not analyzer/test replacement, correctness proof, project gate, or post-edit ritual | Free CLI for qualified capabilities; defer metrics if unavailable, continue ordinary correctness work |
+| 5 — Context7 | Genuine current upstream/version-sensitive question not already answered by installed help/source → minimal generic query | Not Grocery POS discovery; latest material is not exact pinned-version evidence | Installed/versioned upstream source/help or official documentation |
 
-Use current official upstream documentation when version sensitivity matters:
-what the pinned Flutter SDK supports, whether a package API changed, or what
-systemd/Nix/Flutter requires. Establish the relevant pinned version first.
-Installed help and local runtime evidence can clarify the exact environment.
-Do not send Grocery POS source to a documentation service merely to ask an
-upstream question, regardless of whether the repository is public or private.
-
+Repository questions—login throttling storage, shift-close authorization, command
+idempotency, transaction totals—stay local. For an upstream question such as
+current Flutter/Nix/systemd behavior, first establish the installed/pinned version.
 Before changing the Flutter ↔ Racket boundary, read the
 [local API](../architecture/local-api.md). Prefer explicit commands and structured
-errors; do not expose raw exceptions, duplicate backend semantics in Flutter,
-or create a broad speculative API ahead of tested domain requirements.
+errors; do not invent speculative APIs, duplicate backend semantics in Flutter,
+or expose raw backend exceptions.
 
-## Specialist routing and qualification
+### Evidence behind the routes
 
-CP7.5.4 qualified the SDK-shipped Dart/Flutter MCP in the user work profile only.
-DCM 1.39.2 is privately activated as Free and qualified for targeted CLI and MCP
-quality/metrics reads. Its work-only MCP uses a verified roots fallback; no exact
-licensing LOC figure was exposed. See [Dart/Flutter agent tooling](dart-flutter-agent-tooling.md)
-for exact capabilities, mutation boundaries, setup and limitations.
-CP7.5.5 qualified codebase-memory 0.11.0 for local structural narrowing and
-Context7's hosted OAuth documentation tools, also work-only. See
-[repository context tooling](repository-context-agent-tooling.md) for index
-freshness, language gaps, privacy/version limits and exact configuration.
+The [CP1 baseline](m7-5-baseline.md) answered SQLite policy with 3 files/2
+shell-search calls, Flutter 401 recovery with 11/4, and reset/durable retry with
+10/5, without MCPs or tests. CP4's related Dart trace used 19 MCP calls, 14 shell
+calls, and 14 manually inspected files versus CP1 B's 0/4/11. These were not
+identical tasks or a formal regression benchmark; they demonstrate that MCP
+availability does not automatically reduce exploration cost.
 
-| Substrate/provider | Responsibility / qualification state |
-| --- | --- |
-| Native Codex + shell + `just` | Default repository exploration, edits, and project validation |
-| Dart/Flutter MCP | Qualified local analyzer/symbol/package-source assistance; runtime capabilities exposed but not smoke-tested |
-| DCM MCP + Free CLI | Qualified targeted Free metrics/quality lens; CLI provides structure and other observed checks |
-| codebase-memory | Qualified local structural discovery/topology; verify index freshness and source, especially Racket coverage gaps |
-| Context7 | Qualified public upstream documentation retrieval; exact version coverage is not guaranteed |
+DCM supplied complexity, coupling, widget-nesting, and structural metrics not
+provided by a clean analyzer result. Its extra value was that distinct quality
+dimension, not simply more warnings. CP5 indexed 164 Racket files but observed
+partial parses, three essentially unusable test parses, and some callers only
+at file/module granularity. Temporal/database writer guarantees still required
+source inspection: the graph locates and narrows; it does not prove security.
 
-No fifth MCP is proposed. Optional tooling must not become a prerequisite for a
-simple local question that existing tools can answer.
+### Task-driven graph freshness
 
-Do not ask several tools the same question without a reason:
+Watchers and auto-indexing remain disabled. Before materially depending on a
+graph, confirm the repository root and ask whether relevant source/test content
+has changed since the index used for the query. If yes or uncertain, use qualified
+read-only status/coverage tools, notably selected-path `check_index_coverage`,
+and inspect local changes. If relevant coverage is stale, refresh explicitly
+using the qualified CLI procedure in the repository-context tooling document,
+with the same root/cache/name, then source-verify the narrowed results.
 
-- “Where does this behavior live?” → direct source/search when obvious; otherwise
-  codebase-memory for unclear locations or cross-cut impact, then source verification.
-- “What does this Dart symbol mean?” → source and, if useful, qualified Dart MCP.
-- “Is this Flutter code unusually complex?” → qualified DCM Free metrics/structure
-  when that dimension adds useful evidence; no automatic source fixes.
-- “What does current upstream documentation say?” → Context7 for genuinely
-  version-sensitive external questions; reuse IDs, verify version match and fall
-  back to official pinned docs/source. Never send Grocery POS source or private
-  context. Context7 is not required when direct official documentation suffices.
+`ready` is not fresh: CP5's renamed fixture still returned the old symbol while
+status said ready; coverage detected `metadata_changed`, and explicit re-indexing
+restored the result. Even fresh coverage is best-effort, not completeness proof.
+Read parse gaps directly; never infer absent callers from absent graph edges,
+especially in Racket. Git HEAD alone does not identify an uncommitted indexed tree.
 
-Cross-tool checks are justified by different dimensions or conflicting evidence,
-not by automatically querying every provider after each answer.
+Do not re-index because unrelated documentation changed or merely after every
+edit. After source edits, refresh only if another structural query depends on
+those edits. If a generic freshness difference is unrelated to the queried area,
+verify that area rather than reflexively rebuilding the whole index. Do not
+enable background watchers as an incidental repair.
 
-Dart MCP's exposed test/fix/format/pub/app tools are not blanket mutation
-authority. `just` remains the project validation interface despite tool-level
-instructions preferring MCP test execution; dependency/source/runtime mutations
-require explicit task scope. No specialist is a required project gate. These
-four are alternative specialists, not a pipeline to run on every task. A graph's
-`ready` status is not proof of freshness: inspect relevant coverage/local changes
-and manually refresh derived state when needed, then verify actual source.
+### External versions and quota
 
-Specialist semantic tooling should resolve semantic uncertainty or avoid expensive
-exploration—not mechanically precede ordinary source/search. The first Dart
-trial used 19 MCP calls, 14 shell calls and 14 manually inspected repository
-files, versus CP1 Scenario B's 0 MCP calls, 4 shell/search calls and 11 files.
-Those tasks were not perfectly identical and are not a formal benchmark, but
-MCP availability plainly does not guarantee lower exploration cost. Preserve
-this routing consideration for CP7.5.6; do not rerun it for prettier numbers.
+Context7's qualified Free allowance is 1,000 calls/month; CP5 used three calls.
+Determine the local version first, resolve a library once, reuse its ID, and ask
+one focused public upstream question. Check the returned version/source. CP5
+found no exact `package:http 1.6.0` corpus and received `/latest/` material;
+installed pinned source supplied exact-version truth.
 
-## Small checkpoints and learning-first collaboration
+If exact material is unavailable, stop paraphrasing duplicate queries to coerce
+a version match. Fall back to installed help/source, official versioned docs,
+or other appropriate official upstream evidence. Do not query usage repeatedly
+or use Context7 when installed evidence already answers the question. Necessary
+current-doc retrieval is legitimate; intentional use is not quota hoarding.
 
-Prefer pair-programming and teaching to wholesale subsystem generation. For
-consequential or unfamiliar work, briefly explain:
+### Combination, duplication, and mutation
 
-- the affected invariant and important language/architecture concept;
-- the main design choice and meaningful tradeoff/security implication;
-- expected files and the smallest independently testable checkpoint;
-- planned focused validation.
+Normally combine specialists only for different dimensions: codebase-memory
+may locate a controller, then Dart MCP resolve an ambiguous type; analyzer validity
+and a separately requested DCM complexity assessment are different questions.
+The ritual `rg → graph → Dart → DCM → Context7` for one local question is not.
 
-Then implement only the agreed scope. Explain why a new Racket, Dart/Flutter,
-Rust, SQL, Nix, security, networking, or distributed-systems concept fits the
-problem. Keep the developer able to explain important code and decisions.
+A second provider may answer substantially the same question for ambiguity,
+known incomplete coverage, conflicting evidence, safety-critical independent
+verification, or a different evidence class. Explain the reason when consequential;
+do not automatically cross-check every answer with every tool.
 
-For familiar local work, a short explanation is enough. Avoid ritual architecture
-recaps, repetitive descriptions of established patterns, and unrelated tutorials.
-The learning goal is understanding consequential decisions, not maximizing prose.
-Keep each slice small enough for meaningful human review.
+Dart MCP test/fix/format/pub/app tools and DCM fix/format/baseline tools are not
+blanket mutation authority. No automatic source fixes. Dependency, source, or
+runtime mutations require explicit task scope. `just` remains the normal project
+validation interface despite provider instructions preferring MCP tests. Optional
+MCP failure must not block a simple local edit; use the fallbacks above.
 
-## TDD and proportional validation
+## Validation: start with the changed invariant
 
-For domain behavior, use TDD where practical:
-
-1. Identify the expected invariant; write or update the smallest relevant test.
-2. Observe the appropriate failure when useful, then implement the smallest
-   correct behavior.
-3. Run the focused test; refactor only once behavior is protected.
-4. Widen validation according to blast radius and remaining uncertainty.
-
-Use existing `just` recipes as the normal interface; `just --list` is the current
-inventory, not a static command list in guidance. If a recipe exists, prefer it
-to an equivalent undocumented command. Narrow test selection within a recipe's
-underlying runner is appropriate when no recipe exposes that focus; explain the
-selection rather than creating a parallel command surface.
-
-The validation ladder is:
+Use TDD where practical, especially for domain behavior: identify the invariant,
+write the smallest protecting test, observe the appropriate failure, implement
+the smallest correction, and refactor with protection. Validation follows
+behavioral blast radius, not merely file extension:
 
 ```text
-edit
-  → smallest focused relevant test/check
-  → relevant subsystem tests
-  → cross-process/integration tests when the boundary warrants them
-  → just check when broadly ready
-  → acceptance/qualification only when the task warrants that evidence
+changed invariant → smallest test/check that can falsify the change
+  → relevant subsystem coverage
+  → real-process integration when the affected boundary warrants it
+  → just check when the coherent change is broadly ready and scope warrants it
+  → acceptance only when qualification concerns require fresh evidence
 ```
 
-Tests expand with blast radius and confidence. Focused checks are development
-evidence; `just check` is the broad readiness gate, unless scope-specific
-documentation supplies a justified different or stronger gate. Documentation-only
-checkpoints can use whitespace, link/path, privacy, and semantic checks when
-their scope explicitly permits it. Do not run broad suites repeatedly between
-tiny edits without a reason. Report unavailable validation and its consequence.
+Use existing `just` recipes; `just --list` is the current inventory, not another
+static catalog here. A narrow underlying runner invocation is appropriate when
+no recipe exposes the required focus. Do not create a parallel command surface.
 
-Understand a legitimate failing test: never weaken, delete, skip, or rewrite it
-solely to pass. Do not add timeouts/retries to hide deterministic failures. If
-the timeout itself is defective, preserve the narrower correctness bound: the
-post-M7 crash-campaign fix enlarged only the outer campaign budget while keeping
-each POS Core startup's 30-second readiness contract. See the
-[integration guide](integration-testing.md) for the real-process boundary.
+| Changed concern | Proportional validation |
+| --- | --- |
+| Read-only research | No product tests merely for inspecting source. Execute a runtime test only if runtime evidence is needed to answer the question |
+| Documentation / non-product agent configuration | Whitespace, links, privacy/path checks; parsing/startup smoke if configuration changed. Verify source/tests behind runtime claims; no ceremonial full product suite |
+| Narrow Racket/domain behavior | Focused RackUnit protection → relevant subsystem → `just test-racket` when the slice is ready. Widen for HTTP/Flutter/persistence/process/packaging effects, not automatic Flutter testing |
+| Isolated Flutter model/controller/widget | Focused Flutter tests → relevant analysis → broader Flutter suite when ready. Real-process integration if Core-boundary or recovery/auth/session semantics depend on it |
+| Flutter ↔ Racket API, serialization, session, command/retry/recovery | Focused backend/client tests → subsystem suites → relevant real-process integration → `just check` when broadly ready. Mocks alone cannot establish actual HTTP/process/SQLite composition |
+| Persistence/migration, journal/receipts, durability, backup/restore | Focused persistence/domain tests plus relevant real-process evidence; normally `just check` before handoff of a coherent change. Acceptance remains a separate decision |
+| Credentials, session validity, authorization, approval, audit, ownership | Focused security tests plus relevant HTTP/integration coverage → `just check` when broadly ready; analyzer/DCM success is insufficient |
+| Packaging/appliance/reliability | Narrow relevant package/appliance checks → wider validation as warranted. Qualification only for affected evidence concerns; no inference of physical success |
 
-## Acceptance is evidence, not just a larger test suite
+See the [integration guide](integration-testing.md) for the real-process boundary.
+Report checks actually run, unavailable validation, and its consequence.
 
-`just accept-m6` and `just accept-m7` are qualification/evidence campaigns, not
-ordinary “more thorough” development commands. They publish execution evidence
-and should run only when a task changes or qualifies those concerns. Preserve
-historical records; do not regenerate them merely for unrelated edits.
+### Broad readiness versus acceptance
 
-Distinguish focused development tests, broad repository validation, deterministic
-acceptance, booted-appliance qualification, physical hardware qualification, and
-destructive/power evidence. A specification is not proof of execution. Never
-turn `blocked`/`not_run` into `passed`, or infer booted/physical qualification
-from emulated artifacts, widget tests, or process SIGKILL.
+Run `just check` once the coherent change is broadly ready, not after every tiny
+edit: focused edit/test cycles precede subsystem and warranted broad validation.
+It is normally the readiness gate for cross-boundary, persistence, and security
+changes, unless scope-specific documentation supplies a justified different or
+stronger gate. It is not required for a research answer or documentation-only
+correction. On failure, investigate causality, fix or report it; do not rerun
+an unchanged failing command hoping for green. Identify flaky-test investigation
+explicitly rather than hiding it in retries.
 
-Use the [M6](../acceptance/m6/README.md) and
-[M7](../acceptance/m7/README.md) records for their evidence doctrine and actual
-qualification state. Destructive work requires explicit scope, suitable
-disposable hardware, and its documented procedure—not a general test request.
+Development validation is not milestone acceptance. `just accept-m6` and
+`just accept-m7` produce qualification evidence, not generic “extra thorough”
+testing. Run them when the task changes the acceptance contract, changes a concern
+explicitly qualified by the campaign, or prepares milestone/release qualification
+needing fresh evidence—not automatically for every security edit. Do not regenerate
+historical ledgers merely for unrelated changes.
 
-## Long-running commands and progress
+Distinguish focused tests, broad repository validation, deterministic acceptance,
+booted-appliance qualification, physical hardware, and destructive/power evidence.
+A specification is not execution; never turn `blocked`/`not_run` into `passed`
+or infer booted/physical qualification from emulation, widget tests, or SIGKILL.
+The [M6](../acceptance/m6/README.md) and [M7](../acceptance/m7/README.md) records
+establish actual qualification state. Destructive testing needs explicit scope,
+disposable hardware, and its documented procedure, not a general test request.
 
-Start a known deterministic long-running command once. Observe it at a coarse
-interval appropriate to expected duration and the active tool/session limits.
-Do not restart a quiet job without evidence of failure or repeatedly announce
-unchanged state. Preserve diagnostics and bounded failure contracts.
+## Failure, rerun, and timeout discipline
 
-Meaningful observation/reporting triggers include completion, new diagnostic or
-evidence, materially exceeded expected duration, required interaction, or failure.
-Keep required user progress communication concise and substantive; do not narrate
-every search/read/call or repeatedly restate the architecture.
+Preserve the first useful error, relevant test/process identity, and bounded
+stdout/stderr diagnostics before rerunning. Determine whether implementation,
+expectation, environment, or orchestration is wrong; make the smallest justified
+correction. A rerun must answer a specific diagnostic question or validate a
+corrective change. Do not delete/skip/rewrite legitimate tests solely to pass,
+casually relax an invariant, add retries until green, or inflate a correctness
+deadline to hide a deterministic failure.
 
-CP1 Scenario E already used one poll, zero unchanged “still running” messages,
-and zero unnecessary restarts. This is policy to preserve/generalize, not a
-proven current polling defect. The
-[historical baseline](m7-5-baseline.md) and
-[evaluation corpus](m7-5-evaluation-corpus.md) remain unchanged for later comparison.
-No shell polling wrappers, artificial sleep loops, or Codex polling settings are
-introduced by this checkpoint.
+Distinguish product/test correctness deadlines from outer orchestration/session
+budgets. The post-M7 crash-recovery fix enlarged only the outer campaign budget;
+each POS Core startup retained its 30-second readiness bound. If a healthy test
+exceeds an execution wrapper's budget, adjust orchestration, not that narrower
+correctness contract. A session yield is not necessarily termination: retain and
+observe the existing process rather than starting another copy.
 
-## Tool-output and security discipline
+## Long jobs: start once, observe meaningfully
 
-Use narrow searches and supported output filters/ranges rather than large
-catalogs or entire files when only one symbol/section is needed. Summarize large
-outputs instead of echoing them back. CP1's unexpected oversized plugin catalog
-illustrates the risk; it is not a reason to avoid necessary discovery.
+Short commands normally run foreground to completion; do not create polling loops.
+For deterministic integration, Nix builds, acceptance, or crash/soak campaigns,
+start once and observe coarsely according to expected behavior and session limits:
+one observation near a known one-minute completion window may suffice; multi-minute
+builds warrant meaningfully spaced observations; interactive jobs need observation
+when input is required. There is no global “poll every N seconds” timer. Do not
+poll every second/few seconds simply because a tool permits it.
 
-Credentials never belong in prompts, committed configs, logs, agent output, or
-baseline evidence. Do not expose PINs, password/credential verifiers, private
-keys, bearer/approval capabilities or digests, prohibited payment data, raw
-request bodies, or unsanitized secret-bearing device/exception output. Synthetic
-privacy-sentinel tests may use deliberately fake values in isolated fixtures;
-never derive such fixtures from production secrets or copy their payloads into
-ordinary diagnostics or external queries.
+Observe/report completion, new diagnostics, materially exceeded expected duration,
+required interaction, failure, or evidence of a stall. An unchanged “still running”
+message is not ordinarily useful. Keep required progress communication substantive.
+Silence, an unchanged spinner, or a pause between test names is not failure. If
+duration materially exceeds expectation, make one targeted diagnostic check—process
+status, bounded tail, or harness state—and reassess. Do not repeatedly inspect
+processes/files/logs without new reason.
 
-Inspect environment names rather than values where possible; names-only raw
-inventory belongs in ignored local evidence, not a committed environment dump.
-External services receive only necessary non-secret context; use local tools
-for Grocery POS questions. Hosted tools can have trust/network behavior outside
-shell domain restrictions. Review MCP installation/configuration separately
-before trusting it. Do not solve environment inheritance or change permissions
-as an incidental workflow edit.
+Restart only for demonstrated failure, corrupted session, required configuration
+change, confirmed stall/deadlock, or an intentional rerun after correction. Quiet
+output or a lost UI update is insufficient; restarting destroys timing/failure
+evidence. Use normal execution-session facilities, not shell sleep loops, polling
+wrappers, watchdogs, repository polling settings, or test changes for agent observation.
 
-Do not add project-local Codex permission/network/profile settings casually:
-CP1 established their potential to override selected user profiles and blur
-work/learn separation. This checkpoint adds no configuration.
+CP1 Scenario E's `just crash-m6 3` passed in **56.78 seconds** with one initial
+execution, one follow-up poll, zero unchanged updates, and zero unnecessary
+restarts. Preserve/generalize that positive result; no campaign is rerun to
+validate this policy. It was process-crash evidence, not physical power evidence.
 
-## Dependencies, documentation, and handoff
+## Concise collaboration and bounded output
 
-Before a meaningful dependency addition/replacement, explain its capability,
-why existing project dependencies are insufficient, and its security/maintenance
-cost. Keep the dependency surface small; do not update unrelated dependencies
-in a focused change. Tool availability does not justify adding a production
-dependency or runtime/cloud prerequisite.
+For nontrivial work, give a short initial plan and surface early material findings,
+changes, or blockers. For consequential/unfamiliar work, explain the affected
+invariant, important language/architecture concept, meaningful design/security
+tradeoff, and planned focused validation. Keep the developer able to explain
+important decisions; implement only the agreed, independently reviewable slice.
+Familiar local work needs no essay or ritual architecture recap. Do not narrate
+every search/read/call or repeatedly announce unchanged jobs.
 
-Update affected behavior, architecture, and operational documentation with the
-change. Record consequential architectural decisions in an ADR; do not silently
-replace accepted rationale. Hand off the outcome, important evidence/limitations,
-changed files, and human review points concisely.
+Prefer symbol ranges, relevant sections, narrow searches, output filters, and
+bounded diagnostic tails to whole files/catalogs/logs. Summarize large output
+rather than echoing it. CP1's oversized plugin catalog illustrates unnecessary
+context expansion, not a reason to avoid necessary discovery. Final handoffs
+emphasize the outcome, invariant, actual evidence/checks, limitations, changed
+files, Git state, and suggested commit—not an action transcript or unrun test claims.
 
-The usual project cadence can be planning → Codex checkpoint implementation →
-human/ChatGPT review → developer-signed commit → branch/PR review → squash merge.
-This is not mandatory ceremony for every trivial correction and is never
-authorization to operate Git. No commit, push, force-push, rebase, reset, merge,
-history rewrite, or release creation without explicit instruction; preserve
-unrelated work and do not stage merely for tooling. A Conventional Commit
-suggestion, such as `docs(dev): route codex repository context`, is only a
-suggestion.
+## Security and configuration boundaries
 
-## Future prompts and evaluation
+Credentials never belong in prompts, committed configs, logs, or baseline evidence.
+Do not expose PINs, passwords, credential verifiers, private keys, bearer/approval
+capabilities or digests, prohibited payment data, raw request bodies, or unsanitized
+secret-bearing device/exception output. Synthetic privacy sentinels must be deliberately fake,
+isolated, never copied from real secrets or into ordinary/external diagnostics.
+Inspect environment names rather than values where possible; names-only inventories
+belong in ignored local evidence, not committed dumps.
 
-Prefer checkpoint prompts organized around Goal, Scope, Key invariants, Expected
-areas, Acceptance, and Non-goals. Retrieve additional context conditionally
-through the root router instead of reproducing the entire project history.
-Shorter prompts are not automatically better: keep safety-critical or easily
-missed checkpoint-specific invariants explicit.
+Grocery POS questions stay local. Context7 receives only minimal generic public
+upstream queries: no source excerpts, internal identifiers, uncommitted design,
+credentials, or security-sensitive implementation details, even for a public repo.
+It is not a Grocery POS index. The local codebase-memory graph is ignored derived
+source information; do not copy its database into prompts or commits. Local tools
+do not make the complete Codex workflow on-device. Give external services only
+necessary non-secret context; hosted services can have trust and network behavior
+outside shell domain restrictions.
 
-CP7.5.3 owns README/developer-interface and environment hygiene; CP7.5.4/5 own
-specialist qualification. Do not fix those surfaces while changing context
-architecture. CP7.5.8 repeats the fixed corpus to assess unnecessary work without
-sacrificing correctness; lower tool counts or a shorter root file alone are not
-evidence of better engineering.
+Review MCP installation/configuration separately; tool availability is not permission
+to change it. Do not casually add trusted project Codex settings that override
+selected profiles or blur work/learn separation. CP7.5.7 owns OAuth storage,
+shell inheritance, TMPDIR/PUB_CACHE/analytics disposition, health/version diagnostics,
+startup/catalog measurement, and tool cleanup/update hygiene. This policy changes
+none of those settings, enables no watchers, and adds no diagnostic infrastructure.
+
+## Dependencies, documentation, and human handoff
+
+Before meaningful dependency addition/replacement, explain the needed capability,
+why existing dependencies are insufficient, and security/maintenance cost. Keep
+the surface small; do not update unrelated dependencies or add production/cloud
+prerequisites merely because a tool exists. Update affected behavior, architecture,
+and operational docs in the same authorized change. Record consequential decisions
+in ADRs rather than silently replacing accepted rationale.
+
+Usual cadence: planning → Codex checkpoint → human/ChatGPT review → developer-signed
+commit → branch/PR review → squash merge. This is not mandatory ceremony for trivial
+corrections or Git authorization. No commit, push, force-push, rebase, reset, merge,
+history rewrite, or release without explicit instruction; preserve unrelated work
+and do not stage merely for tooling. A Conventional Commit suggestion is not permission.
+
+Future prompts should carry Goal, Scope, Key invariants, Expected areas, Acceptance,
+and Non-goals; retrieve other context conditionally through the root router. Shorter
+is not automatically safer: retain checkpoint-specific safety-critical/easily missed
+invariants. CP7.5.8 repeats the [fixed corpus](m7-5-evaluation-corpus.md), not this
+policy checkpoint. Preserve CP1 evidence unchanged; static routing rehearsal is
+not benchmark execution or proof of improvement.
