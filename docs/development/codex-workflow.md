@@ -72,20 +72,22 @@ Before changing the Flutter ↔ Racket boundary, read the
 errors; do not expose raw exceptions, duplicate backend semantics in Flutter,
 or create a broad speculative API ahead of tested domain requirements.
 
-## Provisional specialist routing
+## Specialist routing and qualification
 
-The four intended MCPs are **not configured yet**. The following is an intended
-responsibility split, not a claim of installed or verified capabilities. Exact
-installed/free-tier capabilities, trust boundaries, and ownership are qualified
-in CP7.5.4/5. This document provides no installation or registration instructions.
+CP7.5.4 qualified the SDK-shipped Dart/Flutter MCP in the user work profile only.
+DCM 1.39.2 is privately activated as Free and qualified for targeted CLI and MCP
+quality/metrics reads. Its work-only MCP uses a verified roots fallback; no exact
+licensing LOC figure was exposed. See [Dart/Flutter agent tooling](dart-flutter-agent-tooling.md)
+for exact capabilities, mutation boundaries, setup and limitations.
+Codebase-memory and Context7 remain provisional until CP7.5.5.
 
-| Substrate/provider | Intended responsibility |
+| Substrate/provider | Responsibility / qualification state |
 | --- | --- |
 | Native Codex + shell + `just` | Default repository exploration, edits, and project validation |
-| Dart/Flutter MCP | Dart/Flutter semantics and analyzer/symbol/runtime/test assistance |
-| DCM | Targeted Dart maintainability, metrics, and quality lens |
-| codebase-memory | Structural repository navigation and impact narrowing |
-| Context7 | Current external software documentation |
+| Dart/Flutter MCP | Qualified local analyzer/symbol/package-source assistance; runtime capabilities exposed but not smoke-tested |
+| DCM MCP + Free CLI | Qualified targeted Free metrics/quality lens; CLI provides structure and other observed checks |
+| codebase-memory | Provisional structural repository navigation and impact narrowing |
+| Context7 | Provisional current external software documentation |
 
 No fifth MCP is proposed. Optional tooling must not become a prerequisite for a
 simple local question that existing tools can answer.
@@ -94,13 +96,27 @@ Do not ask several tools the same question without a reason:
 
 - “Where does this behavior live?” → repository search, or future structural
   indexing if it helps narrow the location.
-- “What does this Dart symbol mean?” → source and, if useful, future Dart MCP.
-- “Is this Flutter code unusually complex?” → future DCM if qualified and useful.
+- “What does this Dart symbol mean?” → source and, if useful, qualified Dart MCP.
+- “Is this Flutter code unusually complex?” → qualified DCM Free metrics/structure
+  when that dimension adds useful evidence; no automatic source fixes.
 - “What does current upstream documentation say?” → official documentation or
   future Context7 if qualified; Context7 is not required to answer today.
 
 Cross-tool checks are justified by different dimensions or conflicting evidence,
 not by automatically querying every provider after each answer.
+
+Dart MCP's exposed test/fix/format/pub/app tools are not blanket mutation
+authority. `just` remains the project validation interface despite tool-level
+instructions preferring MCP test execution; dependency/source/runtime mutations
+require explicit task scope. Neither specialist is a required project gate.
+
+Specialist semantic tooling should resolve semantic uncertainty or avoid expensive
+exploration—not mechanically precede ordinary source/search. The first Dart
+trial used 19 MCP calls, 14 shell calls and 14 manually inspected repository
+files, versus CP1 Scenario B's 0 MCP calls, 4 shell/search calls and 11 files.
+Those tasks were not perfectly identical and are not a formal benchmark, but
+MCP availability plainly does not guarantee lower exploration cost. Preserve
+this routing consideration for CP7.5.6; do not rerun it for prettier numbers.
 
 ## Small checkpoints and learning-first collaboration
 
