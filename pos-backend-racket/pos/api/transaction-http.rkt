@@ -9,7 +9,8 @@
          "../application/transaction-service.rkt"
          "../domain/money.rkt"
          "../domain/transaction.rkt"
-         "../persistence/transaction-command-codec.rkt")
+         "../persistence/transaction-command-codec.rkt"
+         "../security/transaction-void-approval.rkt")
 
 (provide handle-transaction-command-request
          handle-transaction-query-request)
@@ -124,6 +125,15 @@
       "Command ID is already associated with a different command."
       #:status 409
       #:status-message conflict-message)]
+    [(transaction-service-authorization-denied? result)
+     (authorization-denied-response)]
+    [(transaction-service-approval-required? result)
+     (api-error-response
+      "approval_required"
+      "Supervisor / Manager Approval is required for this command."
+      #:status 403
+      #:status-message #"Forbidden"
+      #:retry-same-command-id? #t)]
     [(transaction-service-command-persistence-failed? result)
      (api-error-response
       "command_persistence_failed"
@@ -139,7 +149,8 @@
       "unsupported transaction service command result: ~e"
       result)]))
 
-(define (execute-decoded-command transaction-service command)
+(define (execute-decoded-command
+         transaction-service principal command approval-capability)
   ;; Once a typed command exists, an escaping exception cannot prove that the
   ;; atomic commit did not land. The only safe client protocol is same-ID retry.
   (with-handlers
@@ -152,9 +163,31 @@
            #:status-message internal-server-error-message
            #:retry-same-command-id? #t))])
     (command-result-response
-     (transaction-service-execute-command transaction-service command))))
+     (transaction-service-execute-command
+      transaction-service
+      principal
+      command
+      #:approval-capability approval-capability))))
 
-(define (handle-transaction-command-request transaction-service req)
+(define (approval-header-values req)
+  (for/list ([candidate (in-list (request-headers/raw req))]
+             #:when
+             (string-ci=?
+              (bytes->string/latin-1 (header-field candidate))
+              "X-Grocery-POS-Approval"))
+    (header-value candidate)))
+
+(define (request-approval-capability req)
+  (define values (approval-header-values req))
+  (cond
+    [(null? values) #f]
+    [(not (= (length values) 1)) 'invalid]
+    [else
+     (or (transaction-void-approval-token->capability
+          (bytes->string/latin-1 (first values)))
+         'invalid)]))
+
+(define (handle-transaction-command-request transaction-service principal req)
   ;; Failures before a typed logical command exists are transport/internal
   ;; failures, not uncertain outcomes for a particular command identity.
   (with-handlers ([exn:fail? (lambda (_exception) (internal-error-response))])
@@ -179,9 +212,25 @@
               (decode-failure-code->reason
                (command-decode-failure-code decoded)))]
             [(command-decode-success? decoded)
-             (execute-decoded-command
-              transaction-service
-              (command-decode-success-command decoded))]
+             (define command (command-decode-success-command decoded))
+             (define approval-capability (request-approval-capability req))
+             (cond
+               [(eq? approval-capability 'invalid)
+                (api-error-response
+                 "invalid_approval"
+                 "Transaction approval credential is invalid."
+                 #:status 400
+                 #:status-message bad-request-message)]
+               [(and approval-capability
+                     (not (void-transaction-command? command)))
+                (api-error-response
+                 "unexpected_approval"
+                 "Transaction approval is not valid for this command."
+                 #:status 400
+                 #:status-message bad-request-message)]
+               [else
+                (execute-decoded-command
+                 transaction-service principal command approval-capability)])]
             [else
              (error
               'handle-transaction-command-request
@@ -213,9 +262,10 @@
    (money-minor-units
     (transaction-line-item-unit-price line-item))))
 
-(define (transaction->jsexpr transaction version)
+(define (transaction->jsexpr transaction version owned-by-operator?)
   (hasheq
    'transaction_id (transaction-id transaction)
+   'owned_by_authenticated_operator owned-by-operator?
    'version version
    'status (transaction-status->string (transaction-status transaction))
    'line_items
@@ -232,7 +282,7 @@
    'change_due_minor_units
    (nullable-money->jsexpr (transaction-change-due transaction))))
 
-(define (query-result-response result)
+(define (query-result-response result principal)
   (cond
     [(transaction-service-success? result)
      (json-response
@@ -241,7 +291,9 @@
        'transaction
        (transaction->jsexpr
         (transaction-service-success-transaction result)
-        (transaction-service-success-version result))))]
+        (transaction-service-success-version result)
+        (transaction-service-success-owned-by-principal?
+         result principal))))]
     [(transaction-service-not-found? result)
      (api-error-response
       "transaction_not_found"
@@ -258,9 +310,12 @@
 
 (define (handle-transaction-query-request
          transaction-service
+         principal
          transaction-id)
   (with-handlers ([exn:fail? (lambda (_exception) (internal-error-response))])
     (query-result-response
      (transaction-service-load-transaction
       transaction-service
-      transaction-id))))
+      principal
+      transaction-id)
+     principal)))

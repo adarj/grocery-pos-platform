@@ -6,20 +6,32 @@
          racket/file
          "../pos/runtime-config.rkt"
          "../pos/runtime.rkt"
+         "../pos/application/authentication-service.rkt"
          "../pos/application/transaction-command-receipt.rkt"
          "../pos/application/transaction-command.rkt"
          "../pos/application/register-operations-service.rkt"
          "../pos/application/transaction-service.rkt"
+         "../pos/application/transaction-void-approval-service.rkt"
          "../pos/domain/fake-catalog.rkt"
          "../pos/domain/money.rkt"
+         "../pos/domain/security-audit-event.rkt"
          "../pos/domain/tax.rkt"
          "../pos/domain/transaction-event.rkt"
          "../pos/persistence/catalog-snapshot-codec.rkt"
          "../pos/persistence/operational-configuration-snapshot-codec.rkt"
          "../pos/persistence/sqlite-catalog.rkt"
          "../pos/persistence/sqlite-connection.rkt"
+         "../pos/persistence/security-audit-store.rkt"
          "../pos/persistence/sqlite-register-operations.rkt"
-         "../pos/persistence/sqlite-transaction-event-store.rkt")
+         "../pos/persistence/sqlite-transaction-event-store.rkt"
+         "../pos/security/operator-pin.rkt"
+         "../pos/security/transaction-void-approval.rkt"
+         "support/seed-authenticated-operator.rkt")
+
+(define runtime-principal
+  (authenticated-operator "runtime-cashier" "Runtime Cashier" 'cashier 1))
+(define runtime-approver-pin "80421637")
+(define runtime-approver-hash (delay (hash-operator-pin runtime-approver-pin)))
 
 (define (call-with-temporary-database proc)
   (define directory
@@ -35,10 +47,10 @@
   (pos-runtime-config "127.0.0.1" 7340 database-path))
 
 (define (execute service command)
-  (transaction-service-execute-command service command))
+  (transaction-service-execute-command service runtime-principal command))
 
 (define (resolved-receipt result)
-  (check-true (transaction-service-command-resolved? result))
+  (check-pred transaction-service-command-resolved? result)
   (transaction-service-command-resolved-receipt result))
 
 (define (with-connection database-path proc)
@@ -100,14 +112,44 @@
    (lambda (connection)
      (activate-operational-configuration!
       connection
-      (operational-configuration-decode-success-snapshot decoded))
+     (operational-configuration-decode-success-snapshot decoded))
+     (db:query-exec connection
+                    "INSERT OR IGNORE INTO operator_pin_credentials VALUES ('runtime-cashier', '$argon2id$fixture', 1)")
+     (db:query-exec connection
+                    "INSERT OR IGNORE INTO operators VALUES ('runtime-supervisor', 'Runtime Supervisor', 1)")
+     (db:query-exec connection
+                    "INSERT OR IGNORE INTO operator_roles VALUES ('runtime-supervisor', 'supervisor')")
+     (db:query-exec connection
+                    "INSERT OR IGNORE INTO operator_pin_credentials VALUES ('runtime-supervisor', ?, 1)"
+                    (force runtime-approver-hash))
      (register-operations-open-shift
       (make-register-operations-service
        connection
        #:current-epoch-ms (lambda () 1000)
        #:generate-shift-id (lambda () "shift-runtime"))
-      "runtime-cashier"
+     runtime-principal
       (money 0)))))
+
+(define (execute-approved-void runtime command)
+  (define approval-service
+    (pos-runtime-transaction-void-approval-service runtime))
+  (define granted
+    (transaction-void-approval-service-request
+     approval-service
+     runtime-principal
+     command
+     "runtime-supervisor"
+     runtime-approver-pin))
+  (check-pred transaction-void-approval-granted? granted)
+  (define capability
+    (transaction-void-approval-token->capability
+     (transaction-void-approval-granted-approval-token granted)))
+  (transaction-service-execute-command
+   (pos-runtime-transaction-service runtime)
+   runtime-principal
+   command
+   #:approval-capability
+   capability))
 
 (define (check-command-outcome result kind code)
   (define receipt (resolved-receipt result))
@@ -116,6 +158,89 @@
   receipt)
 
 (module+ test
+  (test-case "fresh v11 runtime and restart append one distinct start boundary each"
+    (call-with-temporary-database
+     (lambda (database-path _directory)
+       (initialize-sqlite-database! database-path)
+       (with-connection
+        database-path
+        (lambda (connection)
+          (check-equal?
+           (db:query-value connection "SELECT COUNT(*) FROM security_audit_events")
+           0)))
+       (for ([expected-count '(1 2)])
+         (define runtime (start-pos-runtime (runtime-config database-path)))
+         (dynamic-wind
+           void
+           (lambda ()
+             (for ([_ (in-range 3)])
+               (check-not-exn (lambda () (pos-runtime-readiness runtime))))
+             (with-connection
+              database-path
+              (lambda (connection)
+                (check-equal?
+                 (db:query-list
+                  connection
+                  "SELECT sequence FROM security_audit_events WHERE event_type = 'runtime.started' ORDER BY sequence")
+                 (build-list expected-count add1)))))
+           (lambda () (stop-pos-runtime! runtime))))
+       (with-connection
+        database-path
+        (lambda (connection)
+          (define sources
+            (db:query-list
+             connection
+             "SELECT source_instance_id FROM security_audit_events ORDER BY sequence"))
+          (check-equal? (length sources) 2)
+          (check-false (string=? (first sources) (second sources)))
+          (check-true
+           (security-audit-ledger-valid?
+            (verify-security-audit-ledger connection))))))))
+
+  (test-case "startup fails closed if required runtime audit append fails"
+    (call-with-temporary-database
+     (lambda (database-path _directory)
+       (check-exn
+        exn:fail?
+        (lambda ()
+          (start-pos-runtime
+           (runtime-config database-path)
+           #:current-epoch-ms (lambda () -1))))
+       (with-connection
+        database-path
+        (lambda (connection)
+          (check-equal?
+           (db:query-value connection
+                           "SELECT COUNT(*) FROM security_audit_events")
+           0))))))
+
+  (test-case "startup rejects a damaged chain before appending a restart event"
+    (call-with-temporary-database
+     (lambda (database-path _directory)
+       (initialize-sqlite-database! database-path)
+       (with-connection
+        database-path
+        (lambda (connection)
+          (append-security-audit-event!
+           connection (runtime-started-event)
+           #:source-kind 'pos_core
+           #:source-instance-id "audit_runtime_damaged"
+           #:occurred-at-epoch-ms 100)
+          (db:query-exec connection
+                         "DROP TRIGGER security_audit_events_no_update")
+          (db:query-exec connection
+                         "UPDATE security_audit_events SET occurred_at_epoch_ms = 200 WHERE sequence = 1")))
+       (check-exn exn:fail?
+                  (lambda ()
+                    (start-pos-runtime (runtime-config database-path))))
+       (with-connection
+        database-path
+        (lambda (connection)
+          (check-equal?
+           (db:query-value connection
+                           "SELECT COUNT(*) FROM security_audit_events")
+           1))))))
+
   (test-case "startup migration connection is disconnected on success and failure"
     (call-with-temporary-database
      (lambda (database-path _directory)
@@ -160,7 +285,21 @@
                   (vector 3 "create_catalog")
                   (vector 4 "create_tax_categories")
                   (vector 5 "create_register_operations")
-                  (vector 6 "create_shift_cash_accountability")))
+                  (vector 6 "create_shift_cash_accountability")
+                  (vector 7 "create_operator_identity_credentials")
+                  (vector 8 "create_operator_login_throttle")
+                  (vector 9 "create_transaction_command_actor_attributions")
+                  (vector 10 "create_transaction_void_approvals")
+                  (vector 11 "create_security_audit_ledger")
+                  (vector 12 "bind_transaction_void_approvals_to_requester_credentials")))
+           (with-connection
+            database-path
+            (lambda (connection)
+              (check-equal?
+               (db:query-list
+                connection
+                "SELECT event_type FROM security_audit_events ORDER BY sequence")
+               '("runtime.started"))))
            (with-connection
             database-path
             (lambda (connection)
@@ -185,6 +324,12 @@ SQL
                  "transaction_command_receipts"
                  "transaction_events"))))
 
+           (with-connection
+            database-path
+            (lambda (connection)
+              (seed-authenticated-test-operator!
+               connection "runtime-cashier" 'cashier)))
+
            (define receipt
              (resolved-receipt
               (execute
@@ -207,7 +352,10 @@ SQL
      (lambda (database-path _directory)
        (prepare-runtime-operations! database-path)
        (define runtime-empty
-         (start-pos-runtime (runtime-config database-path)))
+         (start-pos-runtime
+          (runtime-config database-path)
+          #:current-monotonic-ms (lambda () 1000)
+          #:current-epoch-ms (lambda () 500000)))
        (dynamic-wind
          void
          (lambda ()
@@ -230,16 +378,20 @@ SQL
             'domain-rejected
             "unknown_barcode")
            (check-command-outcome
-            (execute service
-                     (void-transaction-command
-                      "cmd-empty-void" "txn-empty" 1))
+            (execute-approved-void
+             runtime-empty
+             (void-transaction-command
+              "cmd-empty-void" "txn-empty" 1))
             'accepted
             "accepted"))
          (lambda () (stop-pos-runtime! runtime-empty)))
 
        (activate-runtime-catalog! database-path persistent-runtime-catalog)
        (define runtime-persisted
-         (start-pos-runtime (runtime-config database-path)))
+         (start-pos-runtime
+          (runtime-config database-path)
+          #:current-monotonic-ms (lambda () 1000)
+          #:current-epoch-ms (lambda () 500000)))
        (dynamic-wind
          void
          (lambda ()
@@ -262,9 +414,10 @@ SQL
             "accepted")
 
            (check-command-outcome
-            (execute service
-                     (void-transaction-command
-                      "cmd-persisted-void" "txn-persisted" 2))
+            (execute-approved-void
+             runtime-persisted
+             (void-transaction-command
+              "cmd-persisted-void" "txn-persisted" 2))
             'accepted
             "accepted")
 
@@ -284,9 +437,10 @@ SQL
             'domain-rejected
             "unknown_barcode")
            (check-command-outcome
-            (execute service
-                     (void-transaction-command
-                      "cmd-inactive-void" "txn-inactive" 1))
+            (execute-approved-void
+             runtime-persisted
+             (void-transaction-command
+              "cmd-inactive-void" "txn-inactive" 1))
             'accepted
             "accepted")
 
@@ -306,14 +460,16 @@ SQL
             'domain-rejected
             "unknown_barcode")
            (check-command-outcome
-            (execute service
-                     (void-transaction-command
-                      "cmd-unknown-void" "txn-unknown" 1))
+            (execute-approved-void
+             runtime-persisted
+             (void-transaction-command
+              "cmd-unknown-void" "txn-unknown" 1))
             'accepted
             "accepted")
 
            (define recovered
-             (transaction-service-load-transaction service "txn-persisted"))
+             (transaction-service-load-transaction
+              service runtime-principal "txn-persisted"))
            (check-pred transaction-service-success? recovered)
            (define events
              (with-connection
@@ -347,15 +503,16 @@ SQL
          (start-pos-runtime
           (runtime-config database-path)
           #:connect recording-connect))
-       (check-equal? (map car opened) '(create))
+       (check-equal? (map car opened) '(create read/write))
        (check-false (db:connected? (cdar opened)))
+       (check-false (db:connected? (cdr (second opened))))
 
        (resolved-receipt
         (execute
          (pos-runtime-transaction-service runtime)
          (start-transaction-command "cmd-start" "txn-owned" 0)))
-       (check-equal? (map car opened) '(create read/write))
-       (define request-connection (cdr (second opened)))
+       (check-equal? (map car opened) '(create read/write read/write))
+       (define request-connection (cdr (third opened)))
        (check-true (db:connected? request-connection))
        (check-equal?
         (db:query-value request-connection "PRAGMA journal_mode")
@@ -419,7 +576,13 @@ SQL
                   (vector 3 "create_catalog")
                   (vector 4 "create_tax_categories")
                   (vector 5 "create_register_operations")
-                  (vector 6 "create_shift_cash_accountability")))
+                  (vector 6 "create_shift_cash_accountability")
+                  (vector 7 "create_operator_identity_credentials")
+                  (vector 8 "create_operator_login_throttle")
+                  (vector 9 "create_transaction_command_actor_attributions")
+                  (vector 10 "create_transaction_void_approvals")
+                  (vector 11 "create_security_audit_ledger")
+                  (vector 12 "bind_transaction_void_approvals_to_requester_credentials")))
            (define service
              (pos-runtime-transaction-service runtime-B))
            (define retry-receipt
@@ -427,7 +590,8 @@ SQL
            (check-equal? retry-receipt original-receipt)
            (check-equal? catalog-lookups 1)
            (define recovered
-             (transaction-service-load-transaction service "txn-001"))
+             (transaction-service-load-transaction
+              service runtime-principal "txn-001"))
            (check-true (transaction-service-success? recovered))
            (check-equal? (transaction-service-success-version recovered) 2)
            (with-connection

@@ -45,6 +45,7 @@ final class RealPosCoreFixture {
   bool _disposed = false;
   bool _catalogPrepared = false;
   bool _operationalConfigurationPrepared = false;
+  bool _operatorCredentialPrepared = false;
 
   String get databasePath => _join(temporaryDirectory.path, 'pos.db');
 
@@ -63,6 +64,18 @@ final class RealPosCoreFixture {
   }
 
   bool get isRunning => _process != null && _observedExitCode == null;
+
+  Future<void> prepareReferenceData() async {
+    if (_disposed) {
+      throw StateError('A disposed POS Core fixture cannot be prepared.');
+    }
+    if (_process != null) {
+      throw StateError(
+        'Reference data must be prepared before POS Core starts.',
+      );
+    }
+    await _prepareReferenceDataIfNeeded();
+  }
 
   int get processId {
     final process = _process;
@@ -162,6 +175,68 @@ final class RealPosCoreFixture {
       );
     }
     await _runOperationalConfigurationActivation(configurationPath);
+  }
+
+  Future<void> enrollIntegrationOperator({
+    required String operatorId,
+    required String pin,
+    required String role,
+  }) async {
+    if (_disposed) {
+      throw StateError('A disposed POS Core fixture cannot enroll operators.');
+    }
+    await _runOperatorCredentialEnrollment(
+      pin: pin,
+      operators: <(String, String)>[(operatorId, role)],
+    );
+  }
+
+  Future<void> enrollIntegrationOperators({
+    required List<(String, String)> operators,
+    required String pin,
+  }) async {
+    if (_disposed) {
+      throw StateError('A disposed POS Core fixture cannot enroll operators.');
+    }
+    await _runOperatorCredentialEnrollment(pin: pin, operators: operators);
+  }
+
+  Future<void> resetIntegrationOperatorPin({
+    required String operatorId,
+    required String newPin,
+  }) async {
+    if (_disposed) {
+      throw StateError('A disposed POS Core fixture cannot reset operators.');
+    }
+    final process = await Process.start(
+      'racket',
+      [
+        'tests/support/reset-integration-operator.rkt',
+        databasePath,
+        operatorId,
+      ],
+      workingDirectory: posBackendDirectoryPath,
+      environment: Platform.environment,
+    );
+    process.stdin.writeln(newPin);
+    await process.stdin.close();
+    final stdoutFuture = process.stdout.transform(utf8.decoder).join();
+    final stderrFuture = process.stderr.transform(utf8.decoder).join();
+    final exitCode = await process.exitCode.timeout(
+      _referenceDataActivationTimeout,
+      onTimeout: () {
+        process.kill(ProcessSignal.sigkill);
+        throw TimeoutException('Timed out resetting isolated operator PIN.');
+      },
+    );
+    final output = await stdoutFuture;
+    final errorOutput = await stderrFuture;
+    if (exitCode != 0) {
+      throw StateError(
+        'Isolated operator reset failed with exit code $exitCode.\n'
+        'stdout:\n$output\nstderr:\n$errorOutput',
+      );
+    }
   }
 
   Future<void> stop() async {
@@ -278,6 +353,15 @@ final class RealPosCoreFixture {
       await _runOperationalConfigurationActivation(configurationPath);
       _operationalConfigurationPrepared = true;
     }
+    if (!_operatorCredentialPrepared) {
+      await _runOperatorCredentialEnrollment(
+        pin: '80421637',
+        operators: const <(String, String)>[
+          ('cashier-development-01', 'manager'),
+        ],
+      );
+      _operatorCredentialPrepared = true;
+    }
   }
 
   Future<void> _runCatalogActivation(String catalogPath) async {
@@ -350,6 +434,50 @@ final class RealPosCoreFixture {
     if (exitCode != 0) {
       throw StateError(
         'Register configuration activation for POS Core fixture failed with '
+        'exit code $exitCode.\nstdout:\n$output\nstderr:\n$errorOutput',
+      );
+    }
+  }
+
+  Future<void> _runOperatorCredentialEnrollment({
+    required String pin,
+    required List<(String, String)> operators,
+  }) async {
+    final backendDirectory = _join(repositoryRoot.path, 'pos-backend-racket');
+    final arguments = <String>[
+      'tests/support/enroll-integration-operator.rkt',
+      databasePath,
+      for (final (operatorId, role) in operators) ...[operatorId, role],
+    ];
+    final process = await Process.start(
+      'racket',
+      arguments,
+      workingDirectory: backendDirectory,
+      environment: Platform.environment,
+    );
+    process.stdin.writeln(pin);
+    await process.stdin.close();
+    final stdoutFuture = process.stdout.transform(utf8.decoder).join();
+    final stderrFuture = process.stderr.transform(utf8.decoder).join();
+
+    int exitCode;
+    try {
+      exitCode = await process.exitCode.timeout(
+        _referenceDataActivationTimeout,
+      );
+    } on TimeoutException {
+      process.kill(ProcessSignal.sigkill);
+      await process.exitCode.timeout(_shutdownTimeout);
+      throw TimeoutException(
+        'Timed out enrolling the isolated integration operator.',
+        _referenceDataActivationTimeout,
+      );
+    }
+    final output = await stdoutFuture;
+    final errorOutput = await stderrFuture;
+    if (exitCode != 0) {
+      throw StateError(
+        'Operator credential enrollment for POS Core fixture failed with '
         'exit code $exitCode.\nstdout:\n$output\nstderr:\n$errorOutput',
       );
     }

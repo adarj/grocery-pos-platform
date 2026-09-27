@@ -52,6 +52,7 @@ final class TransactionLineItem {
 final class TransactionSnapshot {
   TransactionSnapshot({
     required this.transactionId,
+    this.ownedByAuthenticatedOperator = false,
     required this.version,
     required this.status,
     required List<TransactionLineItem> lineItems,
@@ -63,6 +64,10 @@ final class TransactionSnapshot {
   }) : lineItems = List.unmodifiable(lineItems);
 
   final String transactionId;
+
+  /// A server-derived relationship hint used only to bind legacy local
+  /// recovery. Racket remains authoritative for every mutation.
+  final bool ownedByAuthenticatedOperator;
   final int version;
   final TransactionStatus status;
   final List<TransactionLineItem> lineItems;
@@ -82,6 +87,11 @@ final class TransactionSnapshot {
         'transaction_id',
         context,
         nonEmpty: true,
+      ),
+      ownedByAuthenticatedOperator: requireJsonBool(
+        json,
+        'owned_by_authenticated_operator',
+        context,
       ),
       version: requireJsonNonnegativeInt(json, 'version', context),
       status: TransactionStatus.fromWireName(

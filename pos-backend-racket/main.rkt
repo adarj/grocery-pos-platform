@@ -26,6 +26,10 @@
     (serve-pos-app
      (make-app (pos-runtime-transaction-service runtime)
                (pos-runtime-register-operations-service runtime)
+               #:authentication-service
+               (pos-runtime-authentication-service runtime)
+               #:transaction-void-approval-service
+               (pos-runtime-transaction-void-approval-service runtime)
                #:readiness-probe
                (lambda () (pos-runtime-readiness runtime)))
      host

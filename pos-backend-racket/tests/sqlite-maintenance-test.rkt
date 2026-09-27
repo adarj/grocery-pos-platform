@@ -123,8 +123,8 @@ SQL
         (sqlite-database-info-highest-applied-migration-version info)
         1)
        (check-equal?
-        (sqlite-database-info-current-supported-migration-version info)
-        6)
+       (sqlite-database-info-current-supported-migration-version info)
+        12)
        (check-equal? (sqlite-database-info-migration-status info)
                      'supported-prefix)
        (check-true (sqlite-database-info-schema-valid? info))
@@ -157,10 +157,10 @@ SQL
        (check-equal? (sqlite-database-info-migration-status info) 'current)
        (check-equal?
         (length (sqlite-database-info-migration-history info))
-        6)
+        12)
        (check-equal?
-        (sqlite-database-info-highest-applied-migration-version info)
-        6)
+       (sqlite-database-info-highest-applied-migration-version info)
+        12)
        (check-true (sqlite-database-info-schema-valid? info))
        (check-pred exact-positive-integer?
                    (sqlite-database-info-page-size info))
@@ -178,7 +178,7 @@ SQL
         (lambda (connection)
           (db:query-exec
            connection
-           "INSERT INTO pos_schema_migrations (version, name) VALUES (7, 'unknown')")))
+           "INSERT INTO pos_schema_migrations (version, name) VALUES (13, 'unknown')")))
        (define unsupported (inspect-pos-sqlite-database database-path))
        (check-equal? (sqlite-database-info-migration-status unsupported)
                      'unsupported)
@@ -189,7 +189,16 @@ SQL
         (lambda (connection)
           (db:query-exec
            connection
-           "DELETE FROM pos_schema_migrations WHERE version = 7")
+           "DELETE FROM pos_schema_migrations WHERE version = 13")
+          (db:query-exec
+           connection
+           "DELETE FROM pos_schema_migrations WHERE version = 12")
+          (db:query-exec
+           connection
+           "DELETE FROM pos_schema_migrations WHERE version = 11")
+          (db:query-exec
+           connection
+           "DELETE FROM pos_schema_migrations WHERE version = 10")
           (db:query-exec connection "DROP TABLE transaction_command_receipts")))
        (define drifted (inspect-pos-sqlite-database database-path))
        (check-equal? (sqlite-database-info-migration-status drifted) 'invalid)

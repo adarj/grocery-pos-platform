@@ -4,6 +4,8 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import 'models/command_result.dart';
+import 'authentication_client.dart';
+import 'models/authentication.dart';
 import 'models/canonical_receipt.dart';
 import 'models/json_fields.dart';
 import 'models/pos_core_failure.dart';
@@ -13,23 +15,35 @@ import 'models/register_operations.dart';
 import 'models/transaction_command.dart';
 import 'models/transaction_snapshot.dart';
 import 'pos_core_client.dart';
+import 'transaction_void_approval_client.dart';
 
-final class HttpPosCoreClient implements PosCoreClient {
+final class HttpPosCoreClient
+    implements
+        PosCoreClient,
+        PosAuthenticationClient,
+        TransactionVoidApprovalClient {
   HttpPosCoreClient({
     required this.baseUri,
     http.Client? httpClient,
+    MemoryAuthenticationSession? authenticationSession,
     this.timeout = const Duration(seconds: 3),
   }) : _httpClient = httpClient ?? http.Client(),
-       _ownsHttpClient = httpClient == null;
+       _ownsHttpClient = httpClient == null,
+       authenticationSession =
+           authenticationSession ?? MemoryAuthenticationSession();
 
   final Uri baseUri;
   final Duration timeout;
   final http.Client _httpClient;
   final bool _ownsHttpClient;
+  final MemoryAuthenticationSession authenticationSession;
 
   @override
   Future<PosCoreHealth> fetchHealth() async {
-    final response = await _get(baseUri.resolve('/health'));
+    final response = await _get(
+      baseUri.resolve('/health'),
+      authenticated: false,
+    );
     final body = _decodeObject(response);
 
     if (response.statusCode != 200) {
@@ -41,7 +55,10 @@ final class HttpPosCoreClient implements PosCoreClient {
 
   @override
   Future<PosCoreReadiness> fetchReadiness() async {
-    final response = await _get(baseUri.resolve('/ready'));
+    final response = await _get(
+      baseUri.resolve('/ready'),
+      authenticated: false,
+    );
     final body = _decodeObject(response);
 
     if (response.statusCode == 200 || response.statusCode == 503) {
@@ -64,7 +81,83 @@ final class HttpPosCoreClient implements PosCoreClient {
 
   @override
   Future<PosCommandResult> executeCommand(TransactionCommand command) async {
-    final response = await _postCommand(command);
+    return _executeCommand(command);
+  }
+
+  @override
+  Future<TransactionVoidApproval> requestTransactionVoidApproval(
+    VoidTransactionCommand command,
+    String approverOperatorId,
+    String approverPin,
+  ) async {
+    final body = await _successfulQueryObject(
+      await _postJson(baseUri.resolve('/approvals/transaction-void'), {
+        'command': command.toJson(),
+        'approver_operator_id': approverOperatorId,
+        'approver_pin': approverPin,
+      }),
+      'transaction void approval response',
+    );
+    const context = 'transaction void approval';
+    final approval = expectJsonObject(
+      requireJsonField(body, 'approval', context),
+      context,
+    );
+    final token = requireJsonString(
+      approval,
+      'approval_token',
+      context,
+      nonEmpty: true,
+    );
+    if (!RegExp(r'^gpos_a1_[0-9a-f]{64}$').hasMatch(token)) {
+      throw const PosCoreInvalidResponseFailure(
+        'Transaction void approval token has invalid format.',
+      );
+    }
+    final returnedApprover = requireJsonString(
+      approval,
+      'approver_operator_id',
+      context,
+      nonEmpty: true,
+    );
+    if (returnedApprover != approverOperatorId) {
+      throw const PosCoreInvalidResponseFailure(
+        'Transaction void approver identity does not match the request.',
+      );
+    }
+    return TransactionVoidApproval(
+      approvalToken: token,
+      expiresAtEpochMs: requireJsonNonnegativeInt(
+        approval,
+        'expires_at_epoch_ms',
+        context,
+      ),
+      approverOperatorId: returnedApprover,
+      approverDisplayName: requireJsonString(
+        approval,
+        'approver_display_name',
+        context,
+        nonEmpty: true,
+      ),
+    );
+  }
+
+  @override
+  Future<PosCommandResult> executeApprovedVoid(
+    VoidTransactionCommand command,
+    String approvalToken,
+  ) {
+    if (!RegExp(r'^gpos_a1_[0-9a-f]{64}$').hasMatch(approvalToken)) {
+      throw ArgumentError.value(null, 'approvalToken', 'invalid token format');
+    }
+    return _executeCommand(command, approvalToken: approvalToken);
+  }
+
+  Future<PosCommandResult> _executeCommand(
+    TransactionCommand command, {
+    String? approvalToken,
+  }) async {
+    final response = await _postCommand(command, approvalToken: approvalToken);
     try {
       final body = _decodeObject(response);
       final ok = requireJsonBool(body, 'ok', 'transaction command response');
@@ -235,13 +328,7 @@ final class HttpPosCoreClient implements PosCoreClient {
   }
 
   @override
-  Future<ShiftOperationResult> openShift(
-    String cashierId,
-    int openingCashMinorUnits,
-  ) async {
-    if (cashierId.isEmpty) {
-      throw ArgumentError.value(cashierId, 'cashierId', 'must not be empty');
-    }
+  Future<ShiftOperationResult> openShift(int openingCashMinorUnits) async {
     if (openingCashMinorUnits < 0) {
       throw ArgumentError.value(
         openingCashMinorUnits,
@@ -250,7 +337,6 @@ final class HttpPosCoreClient implements PosCoreClient {
       );
     }
     return _operationalShiftWrite('/shifts/open', <String, Object?>{
-      'cashier_id': cashierId,
       'opening_cash_minor_units': openingCashMinorUnits,
     });
   }
@@ -301,15 +387,122 @@ final class HttpPosCoreClient implements PosCoreClient {
     return summary;
   }
 
+  @override
+  Future<AuthenticationLogin> login(String operatorId, String pin) async {
+    final response = await _postJson(
+      baseUri.resolve('/auth/login'),
+      <String, Object?>{'operator_id': operatorId, 'pin': pin},
+      authenticated: false,
+    );
+    final body = _decodeObject(response);
+    if (response.statusCode == 200 &&
+        requireJsonBool(body, 'ok', 'login response')) {
+      final token = requireJsonString(
+        body,
+        'access_token',
+        'login response',
+        nonEmpty: true,
+      );
+      if (requireJsonString(body, 'token_type', 'login response') != 'Bearer') {
+        throw const PosCoreInvalidResponseFailure(
+          'POS Core login token type is unsupported.',
+        );
+      }
+      final session = AuthenticatedOperatorSession.fromJson(
+        expectJsonObject(body['session'], 'login response session'),
+      );
+      return AuthenticationLogin(accessToken: token, session: session);
+    }
+    if (body.containsKey('error')) {
+      throw _serverFailureFrom(body, response.statusCode);
+    }
+    throw const PosCoreInvalidResponseFailure(
+      'POS Core login response is inconsistent.',
+    );
+  }
+
+  @override
+  Future<AuthenticatedOperatorSession> fetchAuthenticatedSession() async {
+    final body = await _successfulQueryObject(
+      await _get(baseUri.resolve('/auth/session')),
+      'authenticated session response',
+    );
+    final session = AuthenticatedOperatorSession.fromJson(
+      expectJsonObject(
+        body['session'],
+        'authenticated session response session',
+      ),
+    );
+    authenticationSession.updateSession(session);
+    return session;
+  }
+
+  @override
+  Future<void> logout(String accessToken) async {
+    final response = await _postJson(
+      baseUri.resolve('/auth/logout'),
+      const <String, Object?>{},
+      tokenOverride: accessToken,
+      includeBody: false,
+    );
+    final body = _decodeObject(response);
+    if (response.statusCode == 200 &&
+        requireJsonBool(body, 'ok', 'logout response')) {
+      return;
+    }
+    if (body.containsKey('error')) {
+      throw _serverFailureFrom(body, response.statusCode);
+    }
+    throw const PosCoreInvalidResponseFailure(
+      'POS Core logout response is inconsistent.',
+    );
+  }
+
+  @override
+  Future<int> changePin(String currentPin, String newPin) async {
+    final response = await _postJson(
+      baseUri.resolve('/auth/change-pin'),
+      <String, Object?>{'current_pin': currentPin, 'new_pin': newPin},
+    );
+    final body = _decodeObject(response);
+    if (response.statusCode == 200 &&
+        requireJsonBool(body, 'ok', 'PIN change response') &&
+        requireJsonBool(
+          body,
+          'reauthentication_required',
+          'PIN change response',
+        )) {
+      final revision = requireJsonNonnegativeInt(
+        body,
+        'credential_revision',
+        'PIN change response',
+      );
+      if (revision < 2) {
+        throw const PosCoreInvalidResponseFailure(
+          'POS Core PIN change response has an invalid revision.',
+        );
+      }
+      return revision;
+    }
+    if (body.containsKey('error')) {
+      throw _serverFailureFrom(body, response.statusCode);
+    }
+    throw const PosCoreInvalidResponseFailure(
+      'POS Core PIN change response is inconsistent.',
+    );
+  }
+
   void close() {
     if (_ownsHttpClient) {
       _httpClient.close();
     }
   }
 
-  Future<http.Response> _get(Uri uri) async {
+  Future<http.Response> _get(Uri uri, {bool authenticated = true}) async {
     try {
-      return await _httpClient.get(uri).timeout(timeout);
+      return await _httpClient
+          .get(uri, headers: _requestHeaders(authenticated: authenticated))
+          .timeout(timeout);
     } on Exception {
       throw const PosCoreTransportFailure('Unable to reach POS Core.');
     }
@@ -320,13 +513,7 @@ final class HttpPosCoreClient implements PosCoreClient {
     Map<String, Object?> body,
   ) async {
     try {
-      return await _httpClient
-          .post(
-            uri,
-            headers: const {'Content-Type': 'application/json'},
-            body: jsonEncode(body),
-          )
-          .timeout(timeout);
+      return await _postJson(uri, body);
     } on Exception {
       throw const PosCoreTransportFailure('Unable to reach POS Core.');
     }
@@ -358,12 +545,19 @@ final class HttpPosCoreClient implements PosCoreClient {
     return ShiftOperationResult.fromJson(body);
   }
 
-  Future<http.Response> _postCommand(TransactionCommand command) async {
+  Future<http.Response> _postCommand(
+    TransactionCommand command, {
+    String? approvalToken,
+  }) async {
+    final headers = _requestHeaders(json: true);
+    if (approvalToken != null) {
+      headers['X-Grocery-POS-Approval'] = approvalToken;
+    }
     try {
       return await _httpClient
           .post(
             baseUri.resolve('/transaction-commands'),
-            headers: const {'Content-Type': 'application/json'},
+            headers: headers,
             body: jsonEncode(command.toJson()),
           )
           .timeout(timeout);
@@ -374,6 +568,45 @@ final class HttpPosCoreClient implements PosCoreClient {
         retrySameCommandId: true,
       );
     }
+  }
+
+  Future<http.Response> _postJson(
+    Uri uri,
+    Map<String, Object?> body, {
+    bool authenticated = true,
+    String? tokenOverride,
+    bool includeBody = true,
+  }) async {
+    try {
+      return await _httpClient
+          .post(
+            uri,
+            headers: _requestHeaders(
+              json: includeBody,
+              authenticated: authenticated,
+              tokenOverride: tokenOverride,
+            ),
+            body: includeBody ? jsonEncode(body) : null,
+          )
+          .timeout(timeout);
+    } on Exception {
+      throw const PosCoreTransportFailure('Unable to reach POS Core.');
+    }
+  }
+
+  Map<String, String> _requestHeaders({
+    bool json = false,
+    bool authenticated = true,
+    String? tokenOverride,
+  }) {
+    final headers = <String, String>{
+      if (json) 'Content-Type': 'application/json',
+    };
+    final token =
+        tokenOverride ??
+        (authenticated ? authenticationSession.accessToken : null);
+    if (token != null) headers['Authorization'] = 'Bearer $token';
+    return headers;
   }
 
   Map<String, Object?> _decodeObject(http.Response response) {
@@ -404,18 +637,28 @@ final class HttpPosCoreClient implements PosCoreClient {
     final reason = error.containsKey('reason')
         ? requireJsonString(error, 'reason', context, nonEmpty: true)
         : null;
-    final retrySameCommandId =
-        preserveRetrySameCommandId && error.containsKey('retry_same_command_id')
+    final authenticationRejectedBeforeCommand =
+        preserveRetrySameCommandId &&
+        statusCode == 401 &&
+        error['code'] == 'authentication_required';
+    final retrySameCommandId = authenticationRejectedBeforeCommand
+        ? true
+        : preserveRetrySameCommandId &&
+              error.containsKey('retry_same_command_id')
         ? requireJsonBool(error, 'retry_same_command_id', context)
         : false;
 
-    return PosCoreServerFailure(
+    final failure = PosCoreServerFailure(
       code: requireJsonString(error, 'code', context, nonEmpty: true),
       message: requireJsonString(error, 'message', context, nonEmpty: true),
       reason: reason,
       statusCode: statusCode,
       retrySameCommandId: retrySameCommandId,
     );
+    if (statusCode == 401 && failure.code == 'authentication_required') {
+      authenticationSession.clear();
+    }
+    return failure;
   }
 
   void _validateCommandResultEnvelope(

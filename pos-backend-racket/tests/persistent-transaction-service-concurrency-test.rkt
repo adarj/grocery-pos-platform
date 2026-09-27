@@ -1,11 +1,18 @@
 #lang racket
 
+(require "support/seed-authenticated-operator.rkt")
+
 (require (prefix-in db: db)
          racket/file
          rackunit
          "../pos/application/transaction-command-receipt.rkt"
          "../pos/application/transaction-command.rkt"
-         "../pos/application/transaction-service.rkt"
+         "../pos/application/authentication-service.rkt"
+         (rename-in "../pos/application/transaction-service.rkt"
+                    [transaction-service-execute-command
+                     execute-command/authorized]
+                    [transaction-service-load-transaction
+                     load-transaction/authorized])
          "../pos/domain/fake-catalog.rkt"
          "../pos/domain/money.rkt"
          "../pos/domain/tax.rkt"
@@ -15,6 +22,17 @@
          "../pos/persistence/transaction-command-receipt-store.rkt"
          "../pos/persistence/transaction-command-unit-of-work.rkt"
          "../pos/persistence/pos-database-migrations.rkt")
+
+(define test-principal
+  (authenticated-operator "legacy-concurrency-test-operator"
+                          "Legacy concurrency test operator"
+                          'manager 1))
+
+(define (transaction-service-execute-command service command)
+  (execute-command/authorized service test-principal command))
+
+(define (transaction-service-load-transaction service transaction-id)
+  (load-transaction/authorized service test-principal transaction-id))
 
 (define test-barcode "049000001234")
 (define test-sale-item-event
@@ -46,6 +64,8 @@
              #:database database-path
              #:mode 'create))
       (migrate-pos-database! connection-A)
+      (seed-authenticated-test-operator!
+       connection-A "legacy-concurrency-test-operator" 'manager)
       (set! connection-B
             (db:sqlite3-connect
              #:database database-path

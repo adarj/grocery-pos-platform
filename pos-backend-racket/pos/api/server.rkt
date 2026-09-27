@@ -3,13 +3,18 @@
 (require net/url
          web-server/http
          web-server/servlet-env
+         "auth-http.rkt"
+         "approval-http.rkt"
          "http-safety.rkt"
          "http-response.rkt"
          "receipt-http.rkt"
          "register-operations-http.rkt"
          "transaction-http.rkt"
          "../application/transaction-service.rkt"
+         "../application/transaction-void-approval-service.rkt"
+         "../application/authentication-service.rkt"
          "../application/register-operations-service.rkt"
+         "../security/authorization-policy.rkt"
          "../support/health.rkt"
          "../support/readiness.rkt")
 
@@ -99,8 +104,25 @@
        (positive? (string-length (second path)))
        (equal? (third path) "cash-summary")))
 
+(define (authenticated-principal authenticated)
+  (authentication-session-authenticated-principal authenticated))
+
+(define (with-route-permission authentication-service authenticated permission
+                               resource-kind handler)
+  (define principal (authenticated-principal authenticated))
+  (if (operator-role-authorized?
+       (authenticated-operator-role principal) permission)
+      (handler principal)
+      (begin
+        (authentication-service-record-authorization-denial!
+         authentication-service authenticated permission resource-kind)
+        (authorization-denied-response))))
+
 (define (make-app transaction-service
                   [register-service #f]
+                  #:authentication-service authentication-service
+                  #:transaction-void-approval-service
+                  [approval-service #f]
                   #:readiness-probe readiness-probe)
   (unless (transaction-service? transaction-service)
     (raise-argument-error
@@ -109,6 +131,15 @@
               (register-operations-service? register-service))
     (raise-argument-error
      'make-app "(or/c #f register-operations-service?)" register-service))
+  (unless (authentication-service? authentication-service)
+    (raise-argument-error
+     'make-app "authentication-service?" authentication-service))
+  (unless (or (not approval-service)
+              (transaction-void-approval-service? approval-service))
+    (raise-argument-error
+     'make-app
+     "(or/c #f transaction-void-approval-service?)"
+     approval-service))
   (unless (and (procedure? readiness-probe)
                (procedure-arity-includes? readiness-probe 0))
     (raise-argument-error
@@ -131,48 +162,149 @@
              (readiness-response readiness-probe)
              (method-not-allowed-response #"GET"))]
 
+        [(equal? path '("auth" "login"))
+         (if (equal? method #"POST")
+             (handle-login-request authentication-service req)
+             (method-not-allowed-response #"POST"))]
+
+        [(equal? path '("auth" "session"))
+         (if (equal? method #"GET")
+             (handle-session-request authentication-service req)
+             (method-not-allowed-response #"GET"))]
+
+        [(equal? path '("auth" "logout"))
+         (if (equal? method #"POST")
+             (handle-logout-request authentication-service req)
+             (method-not-allowed-response #"POST"))]
+
+        [(equal? path '("auth" "change-pin"))
+         (if (equal? method #"POST")
+             (authenticate-protected-request
+              authentication-service req
+              (lambda (token authenticated)
+                (handle-change-pin-request
+                 authentication-service
+                 (authenticated-principal authenticated)
+                 token req)))
+             (method-not-allowed-response #"POST"))]
+
         [(equal? path '("transaction-commands"))
          (if (equal? method #"POST")
-             (handle-transaction-command-request transaction-service req)
+             (authenticate-protected-request
+              authentication-service req
+              (lambda (_token authenticated)
+                (with-route-permission
+                 authentication-service
+                 authenticated
+                 'transaction.operate.own
+                 'transaction_command
+                 (lambda (principal)
+                   (handle-transaction-command-request
+                    transaction-service principal req)))))
+             (method-not-allowed-response #"POST"))]
+
+        [(and approval-service
+              (equal? path '("approvals" "transaction-void")))
+         (if (equal? method #"POST")
+             (authenticate-protected-request
+              authentication-service req
+              (lambda (_token authenticated)
+                (with-route-permission
+                 authentication-service
+                 authenticated
+                 'transaction.operate.own
+                 'transaction_command
+                 (lambda (principal)
+                   (handle-transaction-void-approval-request
+                    approval-service principal req)))))
              (method-not-allowed-response #"POST"))]
 
         [(and register-service (equal? path '("register-context")))
          (if (equal? method #"GET")
-             (handle-register-context-request register-service)
+             (authenticate-protected-request
+              authentication-service req
+              (lambda (_token authenticated)
+                (with-route-permission
+                 authentication-service
+                 authenticated
+                 'register.read
+                 'register
+                 (lambda (_principal)
+                   (handle-register-context-request register-service)))))
              (method-not-allowed-response #"GET"))]
 
         [(and register-service (equal? path '("cashiers")))
          (if (equal? method #"GET")
-             (handle-active-cashiers-request register-service)
+             (authenticate-protected-request
+              authentication-service req
+              (lambda (_token authenticated)
+                (with-route-permission
+                 authentication-service
+                 authenticated
+                 'cashier_directory.read
+                 'cashier_directory
+                 (lambda (_principal)
+                   (handle-active-cashiers-request register-service)))))
              (method-not-allowed-response #"GET"))]
 
         [(and register-service (equal? path '("shifts" "open")))
          (if (equal? method #"POST")
-             (handle-open-shift-request register-service req)
+             (authenticate-protected-request
+              authentication-service req
+              (lambda (_token authenticated)
+                (with-route-permission
+                 authentication-service
+                 authenticated
+                 'shift.open.own
+                 'shift
+                 (lambda (principal)
+                   (handle-open-shift-request
+                    register-service principal req)))))
              (method-not-allowed-response #"POST"))]
 
         [(and register-service (shift-close-path? path))
          (if (equal? method #"POST")
-             (handle-close-shift-request register-service (second path) req)
+             (authenticate-protected-request
+              authentication-service req
+              (lambda (_token authenticated)
+                (handle-close-shift-request
+                 register-service
+                 (authenticated-principal authenticated)
+                 (second path)
+                 req)))
              (method-not-allowed-response #"POST"))]
 
         [(and register-service (shift-cash-summary-path? path))
          (if (equal? method #"GET")
-             (handle-shift-cash-summary-request register-service (second path))
+             (authenticate-protected-request
+              authentication-service req
+              (lambda (_token authenticated)
+                (handle-shift-cash-summary-request
+                 register-service
+                 (authenticated-principal authenticated)
+                 (second path))))
              (method-not-allowed-response #"GET"))]
 
         [(transaction-query-path? path)
          (if (equal? method #"GET")
-             (handle-transaction-query-request
-              transaction-service
-              (second path))
+             (authenticate-protected-request
+              authentication-service req
+              (lambda (_token authenticated)
+                (handle-transaction-query-request
+                 transaction-service
+                 (authenticated-principal authenticated)
+                 (second path))))
              (method-not-allowed-response #"GET"))]
 
         [(receipt-query-path? path)
          (if (equal? method #"GET")
-             (handle-receipt-query-request
-              transaction-service
-              (second path))
+             (authenticate-protected-request
+              authentication-service req
+              (lambda (_token authenticated)
+                (handle-receipt-query-request
+                 transaction-service
+                 (authenticated-principal authenticated)
+                 (second path))))
              (method-not-allowed-response #"GET"))]
 
         [else

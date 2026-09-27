@@ -4,8 +4,11 @@
          racket/file
          racket/runtime-path
          rackunit
+         "../pos/persistence/pos-database-migrations.rkt"
+         "../pos/persistence/sqlite-connection.rkt"
          "../pos/persistence/sqlite-maintenance.rkt"
-         "../pos/support/appliance-provisioning.rkt")
+         "../pos/support/appliance-provisioning.rkt"
+         "../scripts/appliance.rkt")
 
 (define-runtime-path valid-catalog-path
   "../fixtures/development/catalog-snapshot-v2.json")
@@ -16,6 +19,34 @@
   (appliance-host-profile "fedora" "44" "kinoite" "x86_64" #t))
 
 (module+ test
+  (test-case "root appliance auth status reflects enrolled register and approver readiness"
+    (define directory
+      (make-temporary-file "grocery-pos-auth-status-~a" 'directory))
+    (dynamic-wind
+      void
+      (lambda ()
+        (define database-path (build-path directory "pos.db"))
+        (define missing (appliance-auth-status database-path))
+        (check-false (hash-ref missing 'register_auth_ready))
+        (check-false (hash-ref missing 'approval_auth_ready))
+        (define connection
+          (open-pos-sqlite-connection database-path 'create))
+        (migrate-pos-database! connection)
+        (db:query-exec connection
+                       "INSERT INTO operators VALUES ('Alice', 'Alice', 1), ('Morgan', 'Morgan', 1)")
+        (db:query-exec connection
+                       "INSERT INTO operator_roles VALUES ('Alice', 'cashier'), ('Morgan', 'manager')")
+        (db:query-exec connection
+                       "INSERT INTO operator_pin_credentials VALUES ('Alice', '$argon2id$fixture', 1), ('Morgan', '$argon2id$fixture', 1)")
+        (db:query-exec connection
+                       "INSERT INTO cashiers VALUES ('Alice', 'Alice', 1)")
+        (db:disconnect connection)
+        (define ready (appliance-auth-status database-path))
+        (check-true (hash-ref ready 'register_auth_ready))
+        (check-true (hash-ref ready 'approval_auth_ready))
+        (check-equal? (hash-ref ready 'audit_event_count) 0))
+      (lambda () (delete-directory/files directory))))
+
   (test-case "only the Fedora Kinoite 44 x86_64 ostree profile is accepted"
     (check-not-exn (lambda () (validate-kinoite-host! (supported-host))))
     (for ([profile
@@ -39,7 +70,7 @@
         (define result
           (build-initial-pos-database!
            valid-catalog-path valid-register-path target))
-        (check-equal? (initial-pos-database-schema-version result) 6)
+        (check-equal? (initial-pos-database-schema-version result) 12)
         (check-true (file-exists? target))
         (check-true
          (sqlite-backup-validation-valid?
@@ -62,7 +93,23 @@
             (check-equal?
              (db:query-value connection
                              "SELECT register_id FROM register_configuration")
-             "register-development-01"))
+             "register-development-01")
+            (check-equal?
+             (db:query-row
+              connection
+              #<<SQL
+SELECT operator.operator_id,
+       assignment.role,
+       credential.operator_id
+FROM operators AS operator
+JOIN operator_roles AS assignment
+  ON assignment.operator_id = operator.operator_id
+LEFT JOIN operator_pin_credentials AS credential
+  ON credential.operator_id = operator.operator_id
+WHERE operator.operator_id = 'cashier-development-01'
+SQL
+              )
+             (vector "cashier-development-01" "cashier" db:sql-null)))
           (lambda () (db:disconnect connection))))
       (lambda () (delete-directory/files directory))))
 

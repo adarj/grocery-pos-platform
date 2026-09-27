@@ -257,6 +257,45 @@ returns its original outcome and version without another business action. If a
 failure occurred before the atomic unit of work, no receipt or event exists and
 the same command ID remains eligible for execution.
 
+## Authenticated actor recovery
+
+Schema v9 records one operator ID beside every newly committed durable command
+receipt. Receipt, actor attribution, events, and operational effects commit in
+the same Unit of Work. Duplicate resolution checks actor identity during the
+early lookup and again under `BEGIN IMMEDIATE`.
+
+The same operator may recover the exact original outcome after reauthentication,
+role change, shift close, or POS Core restart. A different operator receives
+generic authorization denial before command payload or outcome details are
+compared. Exact pre-v9 receipts remain recoverable but are never retroactively
+attributed. Actor metadata is not read by transaction replay or receipt
+derivation. See [Authorization and Ownership](../security/authorization-and-ownership.md).
+
+## Whole-sale void approval provenance
+
+Schema v10 stores an approved fresh void's independently authenticated
+approver ID, credential revision, approval ID and approval epoch beside the
+durable command receipt. The grant is consumed and that evidence, requester
+actor attribution, receipt, event and operational effect commit in the same
+writer transaction. A durable rejected outcome also consumes approval and
+carries both actors. Transaction replay and canonical receipt derivation do
+not use this security metadata.
+
+Migration v10 marks exactly the existing void receipts as legacy unapproved;
+it invents no approver. Every void receipt must have exactly one of modern
+approver attribution or the explicit legacy marker. Missing modern evidence
+fails closed rather than being mistaken for historical. The same original
+requester can recover an exact durable void without another approval, while a
+different requester is denied before payload, outcome or approval provenance
+is disclosed. See [Supervisor / Manager Approval](../security/scoped-manager-approval.md).
+
+Schema v11 adds a separate chronological
+[security audit ledger](../security/security-audit-ledger.md). Fresh approved
+void resolution appends one required audit event inside the same command writer
+transaction, including durable rejection outcomes. Exact receipt retry appends
+no second resolution event. The audit chain is not consulted for duplicate
+recovery, transaction replay, receipt derivation, or actor/approver provenance.
+
 ## Load and corruption handling
 
 Lookup by global command ID returns found, not-found, or failed. Not-found is a

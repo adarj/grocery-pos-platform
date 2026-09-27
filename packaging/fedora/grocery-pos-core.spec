@@ -1,6 +1,6 @@
 Name:           grocery-pos-core
 Version:        0.0.0
-Release:        0.3.dev%{?dist}
+Release:        0.9.dev%{?dist}
 Summary:        Local-first Grocery POS transaction core
 License:        LicenseRef-Project-Undecided
 URL:            https://github.com/adarj/grocery-pos-platform
@@ -8,13 +8,16 @@ Source0:        %{name}-%{version}.tar.gz
 
 BuildArch:      noarch
 Requires:       racket
+Requires:       racket-pkgs
+Requires:       libargon2
 Requires:       coreutils
 Requires:       systemd
 
 %description
 Grocery POS Core is the local Racket authority for transaction, catalog,
-tax, receipt, register, shift, and cash-accountability semantics. This internal
-package installs the source application and its Fedora systemd service boundary.
+tax, receipt, register, shift, cash-accountability, and operator-identity
+semantics. This internal package installs the source application and its Fedora
+systemd service boundary.
 
 %prep
 %autosetup
@@ -28,8 +31,10 @@ install -d %{buildroot}/usr/libexec/grocery-pos-core
 install -m 0644 main.rkt %{buildroot}/usr/libexec/grocery-pos-core/main.rkt
 cp -a pos %{buildroot}/usr/libexec/grocery-pos-core/pos
 cp -a scripts %{buildroot}/usr/libexec/grocery-pos-core/scripts
+cp -a vendor %{buildroot}/usr/libexec/grocery-pos-core/vendor
 find %{buildroot}/usr/libexec/grocery-pos-core/pos \
   %{buildroot}/usr/libexec/grocery-pos-core/scripts \
+  %{buildroot}/usr/libexec/grocery-pos-core/vendor \
   -type f -exec chmod 0644 {} +
 
 install -m 0755 packaging/fedora/run-pos-core \
@@ -44,6 +49,10 @@ install -D -m 0755 packaging/fedora/grocery-pos-recovery \
   %{buildroot}/usr/bin/grocery-pos-recovery
 install -D -m 0755 packaging/fedora/grocery-pos-support \
   %{buildroot}/usr/bin/grocery-pos-support
+install -D -m 0755 packaging/fedora/grocery-pos-auth \
+  %{buildroot}/usr/bin/grocery-pos-auth
+install -D -m 0755 packaging/fedora/grocery-pos-audit \
+  %{buildroot}/usr/bin/grocery-pos-audit
 
 install -D -m 0644 packaging/fedora/grocery-pos-core.service \
   %{buildroot}/usr/lib/systemd/system/grocery-pos-core.service
@@ -58,18 +67,39 @@ install -D -m 0644 packaging/fedora/pos-core.env \
 /usr/libexec/grocery-pos-core/main.rkt
 /usr/libexec/grocery-pos-core/pos
 /usr/libexec/grocery-pos-core/scripts
+/usr/libexec/grocery-pos-core/vendor
 /usr/libexec/grocery-pos-core/run-pos-core
 /usr/bin/grocery-pos-db
 /usr/bin/grocery-pos-catalog
 /usr/bin/grocery-pos-register-config
 /usr/bin/grocery-pos-recovery
 /usr/bin/grocery-pos-support
+/usr/bin/grocery-pos-auth
+/usr/bin/grocery-pos-audit
 /usr/lib/systemd/system/grocery-pos-core.service
 /usr/lib/sysusers.d/grocery-pos.conf
 %dir /etc/grocery-pos
 %config(noreplace) /etc/grocery-pos/pos-core.env
 
 %changelog
+* Thu Sep 24 2026 Grocery POS Platform <internal@invalid> - 0.0.0-0.9.dev
+- Add credential rotation, root PIN recovery, and schema-v12 grant binding.
+
+* Wed Sep 23 2026 Grocery POS Platform <internal@invalid> - 0.0.0-0.8.dev
+- Add the local hash-chained security audit ledger and root audit inspection.
+
+* Tue Sep 22 2026 Grocery POS Platform <internal@invalid> - 0.0.0-0.7.dev
+- Add scoped whole-sale void approval and durable approver evidence.
+
+* Mon Sep 21 2026 Grocery POS Platform <internal@invalid> - 0.0.0-0.6.dev
+- Add fixed authorization, resource ownership, and durable command actors.
+
+* Mon Sep 14 2026 Grocery POS Platform <internal@invalid> - 0.0.0-0.5.dev
+- Add process-local authenticated register sessions and durable login throttling.
+
+* Sun Sep 13 2026 Grocery POS Platform <internal@invalid> - 0.0.0-0.4.dev
+- Add operator identity administration and pinned Argon2id credential support.
+
 * Fri Sep 11 2026 Grocery POS Platform <internal@invalid> - 0.0.0-0.3.dev
 - Add the canonical database-building primitive used by appliance provisioning.
 

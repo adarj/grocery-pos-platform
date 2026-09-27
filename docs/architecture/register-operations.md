@@ -3,9 +3,10 @@
 ## Boundary
 
 POS Core owns the operational context for this single-register MVP. Flutter
-selects a configured cashier identity and presents shift actions, but it does
-not authenticate the person, supply register identity to transaction commands,
-or bind transactions to shifts.
+presents the authenticated operator and shift actions, but it does not choose
+a cashier identity, supply register identity to transaction commands, or bind
+transactions to shifts. POS Core derives the shift cashier from the
+authenticated same-ID operator and current cashier configuration.
 
 Current configuration and historical attribution are deliberately separate:
 
@@ -88,6 +89,14 @@ directory atomically. It is rejected while any shift is open, leaves
 historical shifts untouched, and rolls back completely on failure. Flutter has
 no configuration-write API.
 
+Migration 7 relates this operational directory to, but does not merge it with,
+the security identity domain. Each configured cashier must have a same-ID
+operator. Activation creates a cashier-role, no-credential operator stub only
+for a genuinely new ID. An existing operator's display name, active state,
+role, credential, and credential revision are preserved. Operators and their
+credentials are not deleted when a cashier disappears from a later snapshot;
+re-adding the exact ID reconnects to the same principal.
+
 Operator commands are explicit about the file and target database:
 
 ```text
@@ -100,18 +109,20 @@ never activates it automatically at startup.
 
 ## Shift lifecycle
 
-`POST /shifts/open` accepts a `cashier_id` and exact nonnegative integer
-`opening_cash_minor_units`. POS Core resolves the current
-register and active cashier, generates a cryptographically random `shift_...`
-ID, records an exact UTC Unix epoch-millisecond open time, and snapshots the
-current display names. The shift and immutable sequence-1 opening movement
-commit atomically. An inactive or unknown cashier cannot open a shift.
+`POST /shifts/open` accepts only the exact nonnegative integer
+`opening_cash_minor_units`. POS Core derives the cashier ID from the
+authenticated operator, resolves the current register and active same-ID
+cashier, generates a cryptographically random `shift_...` ID, records an exact
+UTC Unix epoch-millisecond open time, and snapshots the current display names.
+The shift and immutable sequence-1 opening movement commit atomically. An
+operator without a configured active same-ID cashier cannot open a shift.
 
-Repeating open for the same cashier returns the existing open shift and its
-original cash summary without changing the opening amount. An open
-shift for a different cashier returns `shift_already_open`. This resource
-idempotence supports lost-response recovery without adding Transaction Command
-Schema receipts to shift operations.
+Repeating open for the same cashier returns the existing open shift without
+changing the opening amount; the HTTP summary remains limited or full according
+to the caller's current read permission. An open shift for a different cashier
+returns `shift_already_open`. This resource idempotence supports lost-response
+recovery without adding Transaction Command Schema receipts to shift
+operations.
 
 `POST /shifts/{shift_id}/close` accepts exact nonnegative integer
 `counted_cash_minor_units`. Closing an idle shift validates its cash ledger,
@@ -175,20 +186,25 @@ GET  /shifts/{shift_id}/cash-summary
 ```
 
 The connected Flutter home renders unconfigured, configured/no-shift, and
-active-shift states. With no shift it lists active cashier references, accepts
-exact opening cash, and offers `Open Shift`. With an active shift it presents
-register, cashier, shift ID, UTC open time, backend opening cash,
-`Open Register`, completed-sale lookup, and close reconciliation. The physical
-closing count is not prefilled with expected cash, and all reconciliation
-values are rendered from the backend. Backend enforcement remains authoritative
-if Flutter state is stale.
+active-shift states only after authentication. With no shift it shows the safe
+authenticated operator identity, accepts exact opening cash, and offers
+`Open Shift`; it no longer fetches a cashier roster or allows another cashier
+to be selected. `POST /shifts/open` contains only opening cash. Racket derives
+the cashier ID from the authenticated operator and requires a matching active
+cashier configuration.
 
-Cashier selection is attribution only. There is no PIN, password, role,
-manager approval, lockout, or authentication claim.
+An active shift owned by another operator is shown as register-in-use and is
+not adopted for transaction work. Cashiers and supervisors close only their
+own shifts; managers have an explicit close-any grant. For an open cashier-owned
+shift, cash-summary serialization is limited and omits every financial value
+that could reveal expected drawer cash. Read-any supervisors/managers and
+closed reconciliations use the full representation. Backend enforcement remains
+authoritative if Flutter presentation permissions are stale. See
+[Authorization and Ownership](../security/authorization-and-ownership.md).
 
 ## Deliberately deferred
 
-This model does not define employee authentication, store/address identity,
-roles, cash drops, paid-outs, refunds, manager variance approval, drawer
-hardware, breaks, payroll/timeclock behavior, receipt numbering, broad
-transaction search, or cloud employee synchronization.
+This model does not define manager approval, editable permission policy,
+store/address identity, cash drops, paid-outs, refunds, manager variance
+approval, drawer hardware, breaks, payroll/timeclock behavior, receipt
+numbering, broad transaction search, or cloud employee synchronization.

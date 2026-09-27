@@ -1,13 +1,41 @@
 #lang racket
 
 (require (prefix-in db: db)
+         racket/file
          rackunit
-         "../pos/application/register-operations-service.rkt"
+         "../pos/application/authentication-service.rkt"
+         (rename-in "../pos/application/register-operations-service.rkt"
+                    [register-operations-open-shift open-shift/authorized]
+                    [register-operations-close-shift close-shift/authorized])
          "../pos/domain/money.rkt"
          "../pos/domain/register-operations.rkt"
          "../pos/persistence/operational-configuration-snapshot-codec.rkt"
          "../pos/persistence/pos-database-migrations.rkt"
+         "../pos/persistence/security-audit-event-codec.rkt"
+         "../pos/persistence/security-audit-store.rkt"
+         "../pos/persistence/sqlite-connection.rkt"
          "../pos/persistence/sqlite-register-operations.rkt")
+
+(define (cashier-principal cashier-id)
+  (authenticated-operator cashier-id cashier-id 'cashier 1))
+
+(define (enroll-test-operator! connection id)
+  ;; Configuration creates uncredentialed stubs. Protected shift tests need
+  ;; an explicitly enrolled application principal, including negative cases.
+  (db:query-exec connection
+                 "INSERT OR IGNORE INTO operators VALUES (?, ?, 1)" id id)
+  (db:query-exec connection
+                 "INSERT OR IGNORE INTO operator_roles VALUES (?, 'cashier')" id)
+  (db:query-exec connection
+                 "INSERT OR IGNORE INTO operator_pin_credentials VALUES (?, '$argon2id$fixture', 1)"
+                 id))
+
+(define (register-operations-open-shift service cashier-id opening-cash)
+  (open-shift/authorized service (cashier-principal cashier-id) opening-cash))
+
+(define (register-operations-close-shift service shift-id counted-cash)
+  (close-shift/authorized
+   service (cashier-principal "cashier-alice") shift-id counted-cash))
 
 (define config-json
   #<<JSON
@@ -36,6 +64,22 @@ JSON
   },
   "cashiers": [
     {"cashier_id":"cashier-alice","display_name":"Alice Smith","active":true}
+  ]
+}
+JSON
+  )
+
+(define security-seam-replacement-json
+  #<<JSON
+{
+  "schema_version": 1,
+  "register": {
+    "register_id": "register-front-01",
+    "display_name": "Front Register 1"
+  },
+  "cashiers": [
+    {"cashier_id":"cashier-alice","display_name":"Operational Alice","active":true},
+    {"cashier_id":"cashier-new","display_name":"New Cashier","active":false}
   ]
 }
 JSON
@@ -84,6 +128,8 @@ JSON
         "register-front-01")
        (check-equal? (db:query-value connection "SELECT COUNT(*) FROM cashiers") 3)
 
+       (enroll-test-operator! connection "cashier-alice")
+
        (define service (make-service connection '(1000 2000) '("shift_one")))
        (define opened
          (register-operations-open-shift service "cashier-alice" (money 0)))
@@ -122,15 +168,177 @@ JSON
          "SELECT register_display_name, cashier_display_name FROM register_shifts WHERE shift_id = 'shift_one'")
         #("Front Register 1" "Alice")))))
 
+  (test-case "configuration replacement preserves security principals and credentials"
+    (call-with-database
+     (lambda (connection)
+       (activate-operational-configuration! connection (snapshot config-json))
+       (db:query-exec
+        connection
+        "UPDATE operators SET display_name = 'Security Alice', active = 0 WHERE operator_id = 'cashier-alice'")
+       (db:query-exec
+        connection
+        "UPDATE operator_roles SET role = 'manager' WHERE operator_id = 'cashier-alice'")
+       (db:query-exec
+        connection
+        #<<SQL
+INSERT INTO operator_pin_credentials
+  (operator_id, password_hash, credential_revision)
+VALUES ('cashier-alice', '$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA', 4)
+SQL
+        )
+
+       (activate-operational-configuration!
+        connection (snapshot security-seam-replacement-json))
+
+       (check-equal?
+        (db:query-rows
+         connection
+         "SELECT cashier_id, display_name, active FROM cashiers ORDER BY cashier_id")
+        (list #("cashier-alice" "Operational Alice" 1)
+              #("cashier-new" "New Cashier" 0)))
+       (check-equal?
+        (db:query-row
+         connection
+         #<<SQL
+SELECT operator.display_name, operator.active, assignment.role,
+       credential.password_hash, credential.credential_revision
+FROM operators AS operator
+JOIN operator_roles AS assignment USING (operator_id)
+JOIN operator_pin_credentials AS credential USING (operator_id)
+WHERE operator.operator_id = 'cashier-alice'
+SQL
+         )
+        #("Security Alice"
+          0
+          "manager"
+          "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA"
+          4))
+       (check-equal?
+        (db:query-list
+         connection
+         "SELECT operator_id FROM operators ORDER BY operator_id")
+        '("cashier-alice"
+          "cashier-bob"
+          "cashier-new"
+          "cashier-old"))
+       (check-equal?
+        (db:query-row
+         connection
+         #<<SQL
+SELECT operator.display_name, operator.active, assignment.role
+FROM operators AS operator
+JOIN operator_roles AS assignment USING (operator_id)
+WHERE operator.operator_id = 'cashier-new'
+SQL
+         )
+        #("New Cashier" 0 "cashier"))
+       (check-equal?
+        (db:query-value
+         connection
+         "SELECT COUNT(*) FROM operator_pin_credentials WHERE operator_id = 'cashier-new'")
+        0))))
+
+  (test-case "configuration activation audits only newly created operator principals"
+    (call-with-database
+     (lambda (connection)
+       (activate-operational-configuration! connection (snapshot config-json))
+       (check-equal?
+        (for/list ([event-json
+                    (in-list
+                     (db:query-list
+                      connection
+                      "SELECT event_json FROM security_audit_events ORDER BY sequence"))])
+          (hash-ref
+           (decode-security-audit-event-json 'operator.created event-json)
+           'operator_id))
+        '("cashier-alice" "cashier-bob" "cashier-old"))
+       (activate-operational-configuration! connection (snapshot config-json))
+       (check-equal?
+        (db:query-value
+         connection
+         "SELECT COUNT(*) FROM security_audit_events WHERE event_type = 'operator.created'")
+        3)
+       (check-true
+        (security-audit-ledger-valid?
+         (verify-security-audit-ledger connection))))))
+
+  (test-case "single stub and existing principal keep distinct audit behavior"
+    (call-with-database
+     (lambda (connection)
+       (activate-operational-configuration!
+        connection (snapshot replacement-json))
+       (check-equal?
+        (db:query-value
+         connection
+         "SELECT COUNT(*) FROM security_audit_events WHERE event_type = 'operator.created'")
+        1)
+       (db:query-exec
+        connection
+        "UPDATE operator_roles SET role = 'manager' WHERE operator_id = 'cashier-alice'")
+       (activate-operational-configuration!
+        connection (snapshot security-seam-replacement-json))
+       (check-equal?
+        (db:query-list
+         connection
+         "SELECT event_json FROM security_audit_events WHERE event_type = 'operator.created' ORDER BY sequence")
+        (list
+         "{\"operator_id\":\"cashier-alice\",\"role\":\"cashier\"}"
+         "{\"operator_id\":\"cashier-new\",\"role\":\"cashier\"}"))
+       (check-equal?
+        (db:query-value
+         connection
+         "SELECT role FROM operator_roles WHERE operator_id = 'cashier-alice'")
+        "manager"))))
+
+  (test-case "configuration audit failure rolls back all stubs and snapshot state"
+    (call-with-database
+     (lambda (connection)
+       (define appends (box 0))
+       (check-exn
+        exn:fail?
+        (lambda ()
+          (activate-operational-configuration!
+           connection (snapshot config-json)
+           #:audit-append!
+           (lambda (writer event)
+             (append-security-audit-event!/in-transaction!
+              writer event
+              #:source-kind 'root_cli
+              #:source-instance-id "audit_root_cli_rollback"
+              #:occurred-at-epoch-ms 100)
+             (set-box! appends (add1 (unbox appends)))
+             (when (= (unbox appends) 2)
+               (error 'test "injected failure after second audit insert"))))))
+       (check-equal? (unbox appends) 2)
+       (for ([table '(operators operator_roles cashiers
+                     register_configuration security_audit_events)])
+         (check-equal?
+          (db:query-value connection (format "SELECT COUNT(*) FROM ~a" table))
+          0))
+       (activate-operational-configuration! connection (snapshot config-json))
+       (check-equal?
+        (db:query-list
+         connection
+         "SELECT sequence FROM security_audit_events ORDER BY sequence")
+        '(1 2 3))
+       (check-true
+        (security-audit-ledger-valid?
+         (verify-security-audit-ledger connection))))))
+
   (test-case "unconfigured unknown and inactive open attempts reject safely"
     (call-with-database
      (lambda (connection)
        (define service (make-service connection '(1000) '("unused")))
+       (enroll-test-operator! connection "cashier-alice")
        (define unconfigured
          (register-operations-open-shift service "cashier-alice" (money 0)))
        (check-equal? (register-shift-open-rejected-code unconfigured)
                      'register-not-configured)
        (activate-operational-configuration! connection (snapshot config-json))
+       (enroll-test-operator! connection "cashier-missing")
+       (enroll-test-operator! connection "cashier-old")
+       (db:query-exec connection
+                      "UPDATE operators SET active = 1 WHERE operator_id = 'cashier-old'")
        (check-equal?
         (register-shift-open-rejected-code
          (register-operations-open-shift service "cashier-missing" (money 0)))
@@ -144,6 +352,8 @@ JSON
     (call-with-database
      (lambda (connection)
        (activate-operational-configuration! connection (snapshot config-json))
+       (enroll-test-operator! connection "cashier-alice")
+       (enroll-test-operator! connection "cashier-bob")
        (define service (make-service connection '(1000) '("shift_exact")))
        (define first
          (register-operations-open-shift service "cashier-alice" (money 0)))
@@ -159,12 +369,17 @@ JSON
                      'shift-already-open)
        (check-equal?
         (db:query-value connection "SELECT COUNT(*) FROM register_shifts")
+        1)
+       (check-equal?
+        (db:query-value connection
+                        "SELECT COUNT(*) FROM security_audit_events WHERE event_type = 'shift.opened'")
         1))))
 
   (test-case "close is exact repeatable and refuses an active transaction"
     (call-with-database
      (lambda (connection)
        (activate-operational-configuration! connection (snapshot config-json))
+       (enroll-test-operator! connection "cashier-alice")
        (define service
          (make-service connection '(1000 2000) '("shift_close")))
        (register-operations-open-shift service "cashier-alice" (money 0))
@@ -192,9 +407,90 @@ JSON
        (check-equal? (register-shift-closed-shift repeated)
                      (register-shift-closed-shift closed))
        (check-equal?
+        (db:query-value connection
+                        "SELECT COUNT(*) FROM security_audit_events WHERE event_type = 'shift.closed'")
+        1)
+       (check-equal?
         (register-shift-close-rejected-code
          (register-operations-close-shift service "missing" (money 0)))
         'shift-not-found))))
+
+  (test-case "shift open and close recovery after reconnect never duplicate audit or cash state"
+    (define directory (make-temporary-file "shift-audit-retry-~a" 'directory))
+    (define database-path (build-path directory "pos.db"))
+    (dynamic-wind
+      void
+      (lambda ()
+        (define initial-connection
+          (open-pos-sqlite-connection database-path 'create))
+        (migrate-pos-database! initial-connection)
+        (db:disconnect initial-connection)
+        (define first-connection
+          (open-pos-sqlite-connection database-path 'read/write))
+        (dynamic-wind
+          void
+          (lambda ()
+            (activate-operational-configuration!
+             first-connection (snapshot config-json))
+            (enroll-test-operator! first-connection "cashier-alice")
+            (define first-service
+              (make-service first-connection '(1000) '("shift_reconnect")))
+            (define opened
+              (register-operations-open-shift
+               first-service "cashier-alice" (money 500)))
+            (check-pred register-shift-opened? opened)
+            (check-pred
+             register-shift-opened?
+             (register-operations-open-shift
+              first-service "cashier-alice" (money 999))))
+          (lambda () (db:disconnect first-connection)))
+        (define second-connection
+          (open-pos-sqlite-connection database-path 'read/write))
+        (dynamic-wind
+          void
+          (lambda ()
+            (define second-service
+              (make-service second-connection '(2000) '("unused")))
+            (check-pred
+             register-shift-opened?
+             (register-operations-open-shift
+              second-service "cashier-alice" (money 1234)))
+            (check-pred
+             register-shift-closed?
+             (register-operations-close-shift
+              second-service "shift_reconnect" (money 500)))
+            (check-pred
+             register-shift-closed?
+             (register-operations-close-shift
+              second-service "shift_reconnect" (money 999))))
+          (lambda () (db:disconnect second-connection)))
+        (define third-connection
+          (open-pos-sqlite-connection database-path 'read/write))
+        (dynamic-wind
+          void
+          (lambda ()
+            (define third-service (make-service third-connection '() '()))
+            (check-pred
+             register-shift-closed?
+             (register-operations-close-shift
+              third-service "shift_reconnect" (money 999)))
+            (for ([table '(shift_cash_movements shift_cash_reconciliations)])
+              (check-equal?
+               (db:query-value
+                third-connection (format "SELECT COUNT(*) FROM ~a" table))
+               1))
+            (for ([kind '("shift.opened" "shift.closed")])
+              (check-equal?
+               (db:query-value
+                third-connection
+                "SELECT COUNT(*) FROM security_audit_events WHERE event_type = ?"
+                kind)
+               1))
+            (check-true
+             (security-audit-ledger-valid?
+              (verify-security-audit-ledger third-connection))))
+          (lambda () (db:disconnect third-connection))))
+      (lambda () (delete-directory/files directory))))
 
   (test-case "register context and active cashier list expose current state only"
     (call-with-database
@@ -205,6 +501,7 @@ JSON
        (check-false (register-context-register before))
        (check-false (register-context-active-shift before))
        (activate-operational-configuration! connection (snapshot config-json))
+       (enroll-test-operator! connection "cashier-alice")
        (check-equal?
         (map cashier-identity-cashier-id
              (register-operations-list-active-cashiers service))

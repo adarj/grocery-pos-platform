@@ -148,6 +148,25 @@ Verified capabilities currently include:
   historical identity snapshotting;
 * migration v6 append-only opening/completed-sale cash movements and immutable
   shift close reconciliation with exact signed over/short;
+* migration v7 local operator principals, fixed cashier/supervisor/manager
+  roles, same-ID cashier compatibility, and optional Argon2id PIN credentials
+  with no default identities or credentials;
+* root-only packaged operator bootstrap administration with no-echo PIN entry,
+  a fixed canonical database target, and no HTTP enrollment escape hatch;
+* schema v12 credential-revision-bound void grants, authenticated Change PIN,
+  interactive root PIN reset, final-writer stale-credential rejection, and
+  root-only appliance authentication-readiness reporting;
+* migration v8 durable per-known-operator login throttling, process-local
+  single-register bearer sessions, five-minute idle/twelve-hour absolute
+  expiry, credential-revision binding, and generic anti-enumeration failures;
+* authenticated local business routes plus a Flutter register lock with
+  memory-only bearer state, manual/inactivity locking, and exact-command
+  recovery preserved across reauthentication and POS Core restart;
+* migration v9 atomic transaction-command actor attribution plus fixed,
+  deny-by-default cashier/supervisor/manager permissions and durable
+  transaction/shift ownership enforcement;
+* server-derived shift identity, manager-only close-any, blind-count-safe open
+  cash summaries, and operator-bound Flutter transaction recovery;
 * idempotent persistent transaction application service with deterministic
   two-connection concurrency and file-backed restart/retry coverage;
 * explicit SQLite WAL/FULL connection policy with foreign-key enforcement,
@@ -185,7 +204,7 @@ Verified capabilities currently include:
   cash sales, restart recovery, uncertain transport, durable same-command
   receipt resolution, net drawer movements, shift reconciliation, and mixed
   one-shift endurance;
-* Flutter-to-Racket local health connection;
+* Flutter-to-Racket public health/readiness plus local operator authentication;
 * nixGL-based Flutter GUI launch in the current VM environment;
 * GitHub Actions workflow definitions for scaffold/Nix validation, Racket
   tests, and Flutter analysis/tests;
@@ -195,6 +214,13 @@ Milestone 6 acceptance evidence and the current deliberately conservative
 status are documented under [`docs/acceptance/m6`](docs/acceptance/m6/README.md).
 Repository-side green tests do not by themselves qualify a booted appliance or
 physical power-loss behavior.
+
+Milestone 7 security acceptance has a separate [requirements and evidence
+record](docs/acceptance/m7/README.md). `just accept-m7` runs deterministic
+repository qualification and records the tested uncommitted worktree; booted
+x86_64 Kinoite, selected kiosk hardware, and abrupt physical interruption
+still require their own observed evidence before the milestone can be called
+fully qualified.
 
 ## Development Environment
 
@@ -264,9 +290,21 @@ just register-config-validate fixtures/development/register-configuration-v1.jso
 just register-config-activate fixtures/development/register-configuration-v1.json .local/sqlite/pos-dev.db
 ```
 
-POS Core does not auto-seed identities. After startup, Flutter selects the
-development cashier and opens a shift. This is identity attribution, not
-PIN/password authentication.
+POS Core does not auto-seed identities or credentials. Before the Checkpoint 2
+terminal can unlock, an administrator must explicitly create/enroll at least
+one active operator through the root-only appliance bootstrap tool described in
+[Operator Identity and PIN Credentials](docs/security/operator-identity-and-pin-credentials.md).
+Cashier selection and shift attribution remain distinct from authentication;
+the authenticated operator now supplies shift identity, while Racket enforces
+the fixed role and resource-ownership policy documented in
+[Authorization and Ownership](docs/security/authorization-and-ownership.md).
+Fresh whole-sale voids now require a different supervisor/manager's local PIN
+approval, scoped to the exact command without replacing the cashier's register
+session. See [Supervisor / Manager Approval](docs/security/scoped-manager-approval.md).
+Security-sensitive local activity now has a separate hash-chained audit ledger,
+inspectable through a root-only CLI and validated with database backups; it is
+not transaction replay input or a Flutter/HTTP audit feed. See
+[Local Security Audit Ledger](docs/security/security-audit-ledger.md).
 
 ### Terminal 1 — POS Core
 

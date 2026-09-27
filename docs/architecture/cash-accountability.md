@@ -46,15 +46,17 @@ or reconciliation and return `cash_accounting_unavailable` when queried.
 
 ## Opening a tracked shift
 
-`POST /shifts/open` requires a cashier ID and exact nonnegative
-`opening_cash_minor_units`. One `BEGIN IMMEDIATE` creates the shift row and its
-sequence-1 opening movement with the same POS-Core-recorded epoch-millisecond
-timestamp. Either both become durable or neither does.
+`POST /shifts/open` requires only exact nonnegative
+`opening_cash_minor_units`; POS Core derives the cashier ID from the
+authenticated operator and active same-ID cashier configuration. One
+`BEGIN IMMEDIATE` creates the shift row and its sequence-1 opening movement
+with the same POS-Core-recorded epoch-millisecond timestamp. Either both become
+durable or neither does.
 
-A repeated same-cashier open returns the existing shift and its stored summary.
-It neither appends another opening movement nor changes the first accepted
-opening amount, even when the repeated request supplies a different value.
-Opening cash is immutable in this checkpoint.
+A repeated same-cashier open resolves the existing shift; its HTTP cash-summary
+view remains permission-scoped. It neither appends another opening movement nor
+changes the first accepted opening amount, even when the repeated request
+supplies a different value. Opening cash is immutable in this checkpoint.
 
 ## Completed sale movements
 
@@ -76,7 +78,10 @@ after retained-line corrections. It is not tendered cash. For example, a
 event; the clock is not called twice.
 
 A void appends no cash movement and releases the slot atomically with its event
-and command receipt. A zero-total completed sale appends a zero-valued movement
+and command receipt after its separate Supervisor / Manager Approval has been
+validated and consumed inside the same writer transaction. The cashier remains
+the command actor; see [Scoped Approval](../security/scoped-manager-approval.md).
+A zero-total completed sale appends a zero-valued movement
 and therefore still counts as one completed cash sale. Durable same-command
 completion retry returns the original command receipt before operational
 effects and cannot append a second movement; transaction-linked uniqueness is
@@ -117,10 +122,24 @@ ledger, calculates exact expected cash, records:
 over_short = counted_cash - expected_cash
 ```
 
+Before a cashier submits that independent count, Racket returns only a limited
+open-own-shift view containing shift identity and status. It does not send
+opening cash, sale totals, expected cash, counted cash, or over/short. A
+supervisor or manager with read-any may receive the full open summary. After
+close, the owner may receive the full immutable reconciliation. This blind-count
+boundary is enforced by serialization, not by hiding already-returned fields in
+Flutter. See [Authorization and Ownership](../security/authorization-and-ownership.md).
+
 then inserts the reconciliation and closes the shift. All changes commit or
 roll back together. A nonzero variance is preserved honestly and does not
 block closure. Repeated close returns the first durable reconciliation without
 rewriting it, even if the repeated request supplies another count.
+
+Schema v11 also appends a minimal required `shift.opened` or `shift.closed`
+security-audit event within the corresponding existing SQLite writer
+transaction. The event identifies operators and shift but contains no opening,
+counted, expected, or variance amount. It does not replace the cash ledger or
+reconciliation; see [Local Security Audit Ledger](../security/security-audit-ledger.md).
 
 Open/close are operational resource writes, not Transaction Command Schema
 commands. After an uncertain response Flutter explicitly reads register state

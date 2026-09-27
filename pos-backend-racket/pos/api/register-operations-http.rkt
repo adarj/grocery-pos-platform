@@ -4,11 +4,13 @@
          racket/string
          web-server/http
          "http-response.rkt"
+         "../application/authentication-service.rkt"
          "../application/register-operations-service.rkt"
          "../domain/money.rkt"
          "../domain/register-operations.rkt"
          "../domain/shift-cash-accountability.rkt"
-         "../persistence/strict-json.rkt")
+         "../persistence/strict-json.rkt"
+         "../security/authorization-policy.rkt")
 
 (provide handle-register-context-request
          handle-active-cashiers-request
@@ -60,6 +62,7 @@
   (hasheq
    'shift_id (shift-cash-summary-shift-id summary)
    'status (symbol->string (shift-cash-summary-status summary))
+   'view "full"
    'opening_cash_minor_units
    (money-minor-units (shift-cash-summary-opening-cash summary))
    'completed_cash_sale_count
@@ -74,6 +77,23 @@
        (json-null))
    'over_short_minor_units
    (or (shift-cash-summary-over-short-minor-units summary) (json-null))))
+
+(define (limited-cash-summary->jsexpr result)
+  (hasheq
+   'shift_id (register-cash-summary-limited-shift-id result)
+   'status (symbol->string (register-cash-summary-limited-status result))
+   'view "limited"))
+
+(define (opened-cash-summary->jsexpr principal opened)
+  (if (operator-role-authorized?
+       (authenticated-operator-role principal)
+       'shift.cash_summary.read.any)
+      (cash-summary->jsexpr (register-shift-opened-cash-summary opened))
+      (hasheq
+       'shift_id
+       (register-shift-shift-id (register-shift-opened-shift opened))
+       'status "open"
+       'view "limited")))
 
 (define (handle-register-context-request service)
   (with-handlers ([exn:fail? (lambda (_exception) (internal-error-response))])
@@ -146,10 +166,10 @@
 (define (exact-nonnegative-integer? value)
   (and (exact-integer? value) (>= value 0)))
 
-(define (handle-open-shift-request service req)
+(define (handle-open-shift-request service principal req)
   (with-handlers ([exn:fail? (lambda (_exception) (internal-error-response))])
     (define object
-      (request-object req '(cashier_id opening_cash_minor_units)))
+      (request-object req '(opening_cash_minor_units)))
     (cond
       [(eq? object 'unsupported-media-type)
        (invalid-request-response
@@ -160,15 +180,9 @@
         "invalid_shift_request" "Open-shift request is invalid."
         400 #"Bad Request")]
       [else
-       (define cashier-id (hash-ref object 'cashier_id))
        (define opening-minor-units
          (hash-ref object 'opening_cash_minor_units))
        (cond
-         [(not (and (string? cashier-id)
-                    (positive? (string-length cashier-id))))
-          (invalid-request-response
-           "invalid_shift_request" "cashier_id must be a non-empty string."
-           400 #"Bad Request")]
          [(not (exact-nonnegative-integer? opening-minor-units))
           (invalid-request-response
            "invalid_shift_request"
@@ -177,7 +191,7 @@
          [else
           (define result
             (register-operations-open-shift
-             service cashier-id (money opening-minor-units)))
+             service principal (money opening-minor-units)))
           (cond
             [(register-shift-opened? result)
              (json-response
@@ -186,11 +200,13 @@
                       (shift->jsexpr
                        (register-shift-opened-shift result))
                       'cash_summary
-                      (cash-summary->jsexpr
-                       (register-shift-opened-cash-summary result))))]
+                      (opened-cash-summary->jsexpr principal result)))]
             [(register-shift-open-rejected? result)
-             (open-rejection-response
-              (register-shift-open-rejected-code result))]
+             (if (eq? (register-shift-open-rejected-code result)
+                      'authorization-denied)
+                 (authorization-denied-response)
+                 (open-rejection-response
+                  (register-shift-open-rejected-code result)))]
             [else (error 'handle-open-shift-request
                          "unsupported result: ~e" result)])])])) )
 
@@ -211,7 +227,7 @@
       409 #"Conflict")]
     [else (error 'close-rejection-response "unsupported rejection: ~e" code)]))
 
-(define (handle-close-shift-request service shift-id req)
+(define (handle-close-shift-request service principal shift-id req)
   (with-handlers ([exn:fail? (lambda (_exception) (internal-error-response))])
     (define object (request-object req '(counted_cash_minor_units)))
     (cond
@@ -235,7 +251,7 @@
          [else
           (define result
             (register-operations-close-shift
-             service shift-id (money counted-minor-units)))
+             service principal shift-id (money counted-minor-units)))
           (cond
             [(register-shift-closed? result)
              (json-response
@@ -247,31 +263,41 @@
                       (cash-summary->jsexpr
                        (register-shift-closed-cash-summary result))))]
             [(register-shift-close-rejected? result)
-             (close-rejection-response
-              (register-shift-close-rejected-code result))]
+             (if (eq? (register-shift-close-rejected-code result)
+                      'authorization-denied)
+                 (authorization-denied-response)
+                 (close-rejection-response
+                  (register-shift-close-rejected-code result)))]
             [else (error 'handle-close-shift-request
                          "unsupported result: ~e" result)])])])))
 
 (define (cash-summary-result-response result)
   (cond
-    [(shift-cash-summary-found? result)
+    [(register-cash-summary-limited? result)
+     (json-response
+      (hasheq 'ok #t
+              'cash_summary (limited-cash-summary->jsexpr result)))]
+    [(register-cash-summary-full? result)
      (json-response
       (hasheq 'ok #t
               'cash_summary
               (cash-summary->jsexpr
-               (shift-cash-summary-found-summary result))))]
-    [(shift-cash-summary-not-found? result)
+               (register-cash-summary-full-summary result))))]
+    [(register-cash-summary-not-found? result)
      (invalid-request-response
       "shift_not_found" "Shift was not found." 404 #"Not Found")]
-    [(shift-cash-summary-unavailable? result)
+    [(register-cash-summary-unavailable? result)
      (invalid-request-response
       "cash_accounting_unavailable"
       "Cash accounting is unavailable for this legacy shift."
       409 #"Conflict")]
+    [(register-cash-summary-authorization-denied? result)
+     (authorization-denied-response)]
     [else
      (error 'cash-summary-result-response "unsupported result: ~e" result)]))
 
-(define (handle-shift-cash-summary-request service shift-id)
+(define (handle-shift-cash-summary-request service principal shift-id)
   (with-handlers ([exn:fail? (lambda (_exception) (internal-error-response))])
     (cash-summary-result-response
-     (register-operations-load-cash-summary service shift-id))))
+     (register-operations-load-cash-summary
+      service principal shift-id))))

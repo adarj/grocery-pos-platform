@@ -3,8 +3,9 @@
 ## Status
 
 The Flutter `pos_terminal` implements a typed client for the current local POS
-Core transaction, receipt, and register-operation routes, a cashier-session
-application controller, and the
+Core authentication, transaction, receipt, and register-operation routes, a
+process-memory authentication controller, a cashier-session application
+controller, and the
 current cash-sale cashier slice: start, scan, cash tender, authoritative paid
 state/change, completion, open-sale line removal/void, crash-safe
 command-intent recovery, explicit next-sale session transition, and read-only
@@ -28,6 +29,13 @@ are governed by
 - reading configured register/active-shift context and active cashier choices;
 - explicitly opening and reconciling/closing a register shift;
 - reading authoritative shift cash summaries.
+
+`PosAuthenticationClient` is deliberately separate. It owns login, current
+session lookup, and logout transport. `MemoryAuthenticationSession` retains the
+opaque bearer only for the life of the Flutter process and supplies it to the
+HTTP adapter for protected requests. A definitive
+`authentication_required` 401 clears that memory centrally; a transient 503
+does not falsely revoke it.
 
 Widgets do not receive raw `http.Response` values or package HTTP exceptions.
 Flutter owns presentation and cashier intent orchestration; it does not
@@ -62,6 +70,7 @@ lib/
   app/pos_terminal_app.dart         Material application
   core/pos_core/                    typed client boundary and HTTP adapter
     models/                         wire-facing immutable values
+  features/authentication/         register lock, login, in-memory session
   features/cashier/                 session state, recovery, orchestration, UI
   features/receipt/                 read-only receipt lookup and presentation
   features/status/                  health/register/shift operational home
@@ -233,27 +242,30 @@ database shows `Register configuration required`, points to the explicit CLI
 workflow, blocks `Open Register`, and still permits historical receipt lookup.
 Flutter does not create a default identity.
 
-A configured register with no shift loads the active cashier directory,
-accepts exact opening cash through the shared integer-only money parser, and
-offers `Select Cashier` / `Open Shift`. The request sends the exact cashier ID
-and nonnegative opening minor units. While it is pending the action cannot be submitted again. Transport
+A configured register with no shift shows the authenticated operator, accepts
+exact opening cash through the shared integer-only money parser, and offers
+`Open Shift`. The request sends only nonnegative opening minor units; Racket
+derives and validates the shift cashier. While it is pending the action cannot
+be submitted again. Transport
 uncertainty offers `Refresh Register State`; it never enters transaction
 same-command recovery.
 
-An active shift displays its snapshotted register/cashier names, opaque shift
-ID, explicitly UTC open time, and backend opening cash. It enables
-`Open Register`, receipt lookup, and a close-reconciliation workflow. The
+An active own shift displays its snapshotted register/cashier names, opaque
+shift ID, and explicitly UTC open time. It enables `Open Register`, receipt
+lookup, and a close-reconciliation workflow. Another operator's active shift
+shows register-in-use and cannot be adopted for transaction work. The
 cashier enters an independent physical count; expected cash is not prefilled.
 An active-sale close rejection tells the operator to finish or void the sale;
 Flutter never abandons transaction state to force closure. Success first shows
 the authoritative opening, sales, expected, counted, and signed over/short
-values, then `Done` returns to cashier selection.
+values, then `Done` returns to the authenticated register home.
 
-`ShiftCashSummary` strictly parses nonnegative opening/sales/expected/count
-fields, a nonnegative completed-sale count, explicit open/closed status, and a
-signed variance only for a closed reconciliation. Widgets render those values
-independently even if they appear arithmetically surprising. Flutter never
-calculates expected cash or over/short.
+`ShiftCashSummary` strictly discriminates `limited` and `full`. A limited open
+view permits only shift ID, status, and view. A full view requires nonnegative
+opening/sales/expected/count fields, a nonnegative completed-sale count, and a
+signed variance only for closed reconciliation. Widgets render returned values
+independently even if arithmetically surprising. Flutter never calculates
+expected cash or over/short.
 
 An uncertain open or close is recovered through `GET /register-context` and
 `GET /shifts/{shift_id}/cash-summary`; Flutter does not automatically repeat the
@@ -265,8 +277,47 @@ strict identity fields, and valid configured/shift nullability. Operational
 writes create no transaction command ID and do not touch
 `CashierSessionStore`.
 
-Cashier selection is identity attribution, not authentication. The UI makes no
-PIN, password, authenticated-session, role, or manager-authorization claim.
+Flutter parses server-supplied permissions into typed presentation hints; it
+contains no role-to-permission matrix. Racket relates the authenticated
+operator to durable cashier/shift ownership and independently enforces every
+operation. Local recovery schema v2 stores only its operator owner, active
+transaction ID, and optional exact pending command. A different operator
+cannot send or erase that state. Legacy schema-v1 state binds only after
+authoritative current shift-slot evidence agrees or an authorized transaction
+query supplies `owned_by_authenticated_operator: true` from durable operational
+context. This second proof preserves exact completion/void recovery after the
+active slot is released. A legacy pending start whose transaction does not
+exist remains preserved but unbound rather than being assigned from its local
+ID alone.
+
+## Register authentication and lock
+
+Terminal startup calls only public health/readiness routes. A ready terminal
+starts locked and does not fetch register, cashier, shift, transaction, or
+receipt state until local operator login succeeds. The kiosk-friendly view
+collects an exact operator ID and masked 8–12 digit PIN, disables suggestions,
+and clears the PIN field after every submission. It displays one generic
+failure message for wrong, missing, inactive, unenrolled, or throttled
+identities.
+
+The access token is memory-only. It is not part of `CashierSessionController`,
+`CashierSessionStore`, Flatpak/XDG files, preferences, logs, or crash text.
+Manual `Lock` immediately obscures protected presentation, clears token memory,
+and then attempts best-effort server logout. A high-level five-minute input
+timer supplies presentation locking; server-side expiry remains authoritative.
+If a 401 arrives while a pushed cashier/receipt route is open, the app shell
+immediately obscures it and replaces the root navigator identity. That disposes
+the authenticated subtree and its complete protected route history. A later
+operator therefore receives a newly constructed status/register view and fresh
+protected queries rather than access to the prior operator's widget state.
+
+Locking never clears transaction recovery. A transaction POST rejected by
+authentication before dispatch remains an exact pending command and is retried
+with its original command ID only after reauthentication. Likewise, if a
+command committed before POS Core process death, restart invalidates the bearer
+but the same persisted command resolves through its durable command receipt
+after a fresh login. No bearer/session identifier is added to the transaction
+command schema.
 
 ## Cashier presentation
 
@@ -292,7 +343,7 @@ The current presentation supports:
 - sale completion followed by an authoritative completed-state read;
 - confirmed removal of one selected open-sale line, followed by an
   authoritative read;
-- confirmed pre-payment void, followed by an authoritative `voided` read;
+- separately approved pre-payment void, followed by an authoritative `voided` read;
 - an explicit `Next Sale` action after an authoritative completed or voided
   snapshot;
 - concise feedback for unknown barcodes and version conflicts;
@@ -345,6 +396,19 @@ resend a command whose durable result is already known. These same recovery
 paths apply to scan, tender, completion, removal, and void commands. A retry
 uses the exact persisted correction command; it never reconstructs one from
 currently visible line or dialog state.
+
+Whole-sale void now opens a distinct **Supervisor / Manager Approval** dialog
+that identifies the requester and exact sale, item count and total. A
+different supervisor/manager enters an ID and masked PIN. Cancellation before
+approval does not save or send the generated void command. Once approved,
+Flutter saves the exact command before POST and sends the 90-second capability
+only in `X-Grocery-POS-Approval`. The PIN and capability are never saved in
+cashier recovery state. On transport uncertainty the exact pending command
+survives but the token is discarded. Retrying it without a token either
+recovers the committed durable result or receives `approval_required`; in the
+latter case the same command ID is reapproved and resent. The cashier's
+register bearer session is never replaced by approver authentication. See
+[Supervisor / Manager Approval](../security/scoped-manager-approval.md).
 
 `Next Sale` is a client-session safety operation, not a Racket lifecycle rule.
 It is available only from an authoritative completed or voided snapshot. One
@@ -517,8 +581,16 @@ This slice does not implement automatic retry, retry timers, cached/offline
 transaction truth, quantity editing, post-payment refund/reversal, split
 tender, card/external payment behavior, receipt printing, receipt numbering or
 date/recent-sale search, drawer hardware, cash drops, paid-outs, refunds, or
-general accounting reports. It also does not implement employee authentication,
-PINs/passwords, roles, manager authorization, or variance approval.
+general accounting reports. Fixed endpoint/resource authorization and command
+actor attribution are implemented in Racket; Flutter only consumes the
+server-computed permission list. Scoped whole-sale void approval is implemented;
+approval for other actions and variance approval remain deferred. The terminal
+now offers self-service Change PIN through the bearer-protected Core endpoint.
+Current/new/confirmation fields are obscured and cleared after submission;
+only current/new are sent. Success or transport uncertainty disposes protected
+navigation and locks without deleting operator-bound transaction recovery.
+Root credential reset and the separate audit ledger live only in POS Core; the
+terminal has no manager credential-administration or audit viewer.
 Current recovery payloads may contain an opaque barcode, integer cash amount,
 or nonnegative removal line index; void and lifecycle commands have empty
 payloads. The recovery record is never logged.

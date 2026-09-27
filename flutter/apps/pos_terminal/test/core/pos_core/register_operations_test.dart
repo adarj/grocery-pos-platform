@@ -79,6 +79,7 @@ void main() {
   }) => {
     'shift_id': 'shift-one',
     'status': status,
+    'view': 'full',
     'opening_cash_minor_units': opening,
     'completed_cash_sale_count': saleCount,
     'cash_sales_minor_units': sales,
@@ -100,6 +101,26 @@ void main() {
       expect(summary.overShortMinorUnits, -999);
     },
   );
+
+  test('limited open summary rejects every financial field', () {
+    final limited = ShiftCashSummary.fromJson({
+      'shift_id': 'shift-one',
+      'status': 'open',
+      'view': 'limited',
+    });
+    expect(limited.view, ShiftCashSummaryView.limited);
+    expect(limited.expectedCashMinorUnits, isNull);
+
+    expect(
+      () => ShiftCashSummary.fromJson({
+        'shift_id': 'shift-one',
+        'status': 'open',
+        'view': 'limited',
+        'expected_cash_minor_units': 77777,
+      }),
+      throwsA(isA<PosCoreInvalidResponseFailure>()),
+    );
+  });
 
   test(
     'cash summary accepts open nulls and signed closed variance strictly',

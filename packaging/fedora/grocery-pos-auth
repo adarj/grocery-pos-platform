@@ -1,0 +1,47 @@
+#!/bin/sh
+
+set -eu
+
+if [ "$(/usr/bin/id -u)" -ne 0 ]; then
+  printf '%s\n' '{"error":{"code":"not_privileged","message":"Operator administration requires root."},"ok":false}' >&2
+  exit 1
+fi
+
+collections=/usr/libexec/grocery-pos-core/vendor/racket/collects
+PLTCOLLECTS="$collections:"
+export PLTCOLLECTS
+
+if [ "$#" -eq 3 ] && [ "$1" = operator ] &&
+   { [ "$2" = enroll-pin ] || [ "$2" = reset-pin ]; }; then
+  if [ ! -t 0 ]; then
+    printf '%s\n' '{"error":{"code":"secure_input_required","message":"PIN entry requires an interactive terminal."},"ok":false}' >&2
+    exit 1
+  fi
+  saved_tty=$(/usr/bin/stty -g)
+  trap '/usr/bin/stty "$saved_tty"' EXIT
+  trap 'exit 1' HUP INT TERM
+  printf '%s' 'PIN: ' >&2
+  /usr/bin/stty -echo
+  IFS= read -r first_pin
+  printf '\n%s' 'Confirm PIN: ' >&2
+  IFS= read -r second_pin
+  /usr/bin/stty "$saved_tty"
+  trap - EXIT HUP INT TERM
+  printf '\n' >&2
+  if [ "$first_pin" != "$second_pin" ]; then
+    unset first_pin second_pin
+    printf '%s\n' '{"error":{"code":"pin_mismatch","message":"PIN entries did not match."},"ok":false}' >&2
+    exit 1
+  fi
+  if printf '%s\n' "$first_pin" | /usr/bin/racket \
+      /usr/libexec/grocery-pos-core/scripts/operator-auth.rkt "$@"; then
+    status=0
+  else
+    status=$?
+  fi
+  unset first_pin second_pin
+  exit "$status"
+fi
+
+exec /usr/bin/racket \
+  /usr/libexec/grocery-pos-core/scripts/operator-auth.rkt "$@"

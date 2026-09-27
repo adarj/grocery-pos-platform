@@ -13,12 +13,18 @@
          (prefix-in op: "../pos/domain/transaction-operational-context.rkt")
          "../pos/persistence/pos-database-migrations.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt"
-         "../pos/support/readiness.rkt")
+         "../pos/support/readiness.rkt"
+         "support/authentication.rkt")
+
+(define current-test-access-token (make-parameter #f))
 
 (define (request-for method path)
   (request method
            (string->url path)
-           '()
+           (if (current-test-access-token)
+               (list
+                (test-authorization-header (current-test-access-token)))
+               '())
            (delay '())
            #f
            "127.0.0.1"
@@ -54,13 +60,17 @@
          #:catalog-lookup
          (lambda (_barcode)
            (error 'catalog "receipt query must not use current catalog"))))
-      (proc
-       connection
-       (make-app
-        service
-        #:readiness-probe
-        (lambda ()
-          (runtime-ready current-pos-database-schema-version)))))
+      (define auth-service (make-test-authentication-service connection))
+      (define token (issue-test-access-token auth-service))
+      (parameterize ([current-test-access-token token])
+        (proc
+         connection
+         (make-app
+          service
+          #:authentication-service auth-service
+          #:readiness-probe
+          (lambda ()
+            (runtime-ready current-pos-database-schema-version))))))
     (lambda () (db:disconnect connection))))
 
 (define taxed-A

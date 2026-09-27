@@ -12,7 +12,8 @@
          "../pos/application/transaction-service.rkt"
          "../pos/domain/fake-catalog.rkt"
          "../pos/persistence/pos-database-migrations.rkt"
-         "../pos/support/readiness.rkt")
+         "../pos/support/readiness.rkt"
+         "support/authentication.rkt")
 
 (define (allocate-loopback-port)
   (define listener (tcp-listen 0 4 #t "127.0.0.1"))
@@ -103,9 +104,15 @@
       (make-transaction-service
        connection
        #:catalog-lookup fake-catalog-lookup))
+    (define auth-service (make-test-authentication-service connection))
+    (define access-token (issue-test-access-token auth-service))
+    (define authorization-line
+      (string->bytes/utf-8
+       (string-append "Authorization: Bearer " access-token)))
     (define app
       (make-app
        service
+       #:authentication-service auth-service
        #:readiness-probe
        (lambda ()
          (runtime-ready current-pos-database-schema-version))))
@@ -143,7 +150,8 @@
              port
              "/transaction-commands"
              #:method #"POST"
-             #:headers '(#"Content-Type: application/json")
+             #:headers (list #"Content-Type: application/json"
+                             authorization-line)
              #:data oversized-body))
           (void body))
 
@@ -174,7 +182,8 @@
            port
            "/transaction-commands"
            #:method #"POST"
-           #:headers '(#"Content-Type: application/json")
+           #:headers (list #"Content-Type: application/json"
+                           authorization-line)
            #:data valid-body))
         (check-true (regexp-match? #rx#" 200 " status)
                     (format "unexpected response: ~e ~e"

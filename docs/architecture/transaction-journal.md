@@ -107,13 +107,38 @@ DDL. A v5 open shift blocks upgrade rather than receiving fabricated opening
 cash; closed v5 shifts remain explicitly untracked. See
 [Shift Cash Accountability](cash-accountability.md).
 
+Migration version 7, `create_operator_identity_credentials`, adds local
+operator principals, one fixed role per operator, and optional Argon2id PIN
+credentials. It backfills current cashiers as same-ID cashier-role principals
+without credentials. It does not alter transaction events, command receipts,
+cash movements, shift reconciliation, or historical cashier snapshots. See
+[Operator Identity and PIN Credentials](../security/operator-identity-and-pin-credentials.md).
+
+Migration version 8, `create_operator_login_throttle`, adds durable
+per-known-operator online PIN-failure state. It creates no rows by default and
+does not persist bearer sessions or alter business, operator-role, or credential
+facts. See [Authenticated Sessions and Register Lock](../security/authenticated-sessions-and-register-lock.md).
+
+Migration version 9, `create_transaction_command_actor_attributions`, adds the
+authenticated operator ID adjacent to each fresh durable command receipt. It
+also classifies the exact receipts already present at the v9 cutover as legacy
+unattributed receipts. That deterministic classification does not assign an
+operator, rewrite a receipt, or alter transaction replay, events, or canonical
+receipts. It prevents a later missing modern actor row from being mistaken for
+legacy compatibility. See [Authorization and Ownership](../security/authorization-and-ownership.md).
+
 The migration runner treats recorded history as an exact prefix of the known
-ordered migration list. A fresh database applies versions 1 through 6. Real
+ordered migration list. A fresh database applies versions 1 through 9. Real
 v1/v2 databases upgrade through the remaining sequence, while a real v3
 database preserves its merchandise rows and receives zero-tax mappings. A
 correct v4 database gains empty operational tables, and a correct v5 database
-with no open shift gains empty cash-accountability tables. Unknown, skipped, reordered,
-renamed, or drifted migration state fails rather than being silently repaired.
+with no open shift gains empty cash-accountability tables. A correct v6 database
+preserves every M6 fact and gains operator identity state; a correct v7 database
+gains an empty login-throttle table, and a correct v8 database gains an empty
+actor-attribution table plus exact legacy classification for its existing
+receipts without guessed history. Unknown, skipped,
+reordered, renamed, or drifted migration state fails rather than being silently
+repaired.
 
 Table creation is not hidden inside append or load. Application composition is
 responsible for running migrations explicitly before using the store.

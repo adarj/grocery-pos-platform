@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pos_terminal/core/pos_core/models/command_result.dart';
@@ -7,9 +8,11 @@ import 'package:pos_terminal/core/pos_core/models/canonical_receipt.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_failure.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_health.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_readiness.dart';
+import 'package:pos_terminal/core/pos_core/models/register_operations.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_command.dart';
 import 'package:pos_terminal/core/pos_core/models/transaction_snapshot.dart';
 import 'package:pos_terminal/core/pos_core/pos_core_client.dart';
+import 'package:pos_terminal/core/pos_core/transaction_void_approval_client.dart';
 import 'package:pos_terminal/features/cashier/cashier_id_generator.dart';
 import 'package:pos_terminal/features/cashier/cashier_local_recovery_failure.dart';
 import 'package:pos_terminal/features/cashier/cashier_session_controller.dart';
@@ -24,7 +27,25 @@ typedef TransactionHandler =
 
 final class RecordingClient
     with UnimplementedRegisterOperationsClient
-    implements PosCoreClient {
+    implements PosCoreClient, TransactionVoidApprovalClient {
+  @override
+  Future<TransactionVoidApproval> requestTransactionVoidApproval(
+    VoidTransactionCommand command,
+    String approverOperatorId,
+    String approverPin,
+  ) async => const TransactionVoidApproval(
+    approvalToken:
+        'gpos_a1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    expiresAtEpochMs: 123456,
+    approverOperatorId: 'Morgan',
+    approverDisplayName: 'Morgan',
+  );
+
+  @override
+  Future<PosCommandResult> executeApprovedVoid(
+    VoidTransactionCommand command,
+    String approvalToken,
+  ) => executeCommand(command);
   RecordingClient(this.log);
 
   final List<String> log;
@@ -165,11 +186,13 @@ TransactionSnapshot snapshot({
   String transactionId = 'txn-1',
   int version = 1,
   TransactionStatus status = TransactionStatus.open,
+  bool ownedByAuthenticatedOperator = false,
 }) {
   final hasPayment =
       status == TransactionStatus.paid || status == TransactionStatus.completed;
   return TransactionSnapshot(
     transactionId: transactionId,
+    ownedByAuthenticatedOperator: ownedByAuthenticatedOperator,
     version: version,
     status: status,
     lineItems: const [],
@@ -192,6 +215,7 @@ fixture({
   PersistedCashierSession? persisted,
   Iterable<String> commandIds = const ['cmd-start'],
   Iterable<String> transactionIds = const ['txn-1'],
+  String currentOperatorId = 'operator-test',
 }) {
   final log = <String>[];
   final client = RecordingClient(log);
@@ -205,6 +229,7 @@ fixture({
       client: client,
       idGenerator: ids,
       sessionStore: store,
+      currentOperatorId: () => currentOperatorId,
     ),
     client: client,
     store: store,
@@ -264,7 +289,10 @@ void main() {
       kind: PosCommandOutcomeKind.domainRejected,
     );
     testFixture.client.enqueueSnapshot(snapshot(version: 2));
-    await testFixture.controller.voidTransaction();
+    await testFixture.controller.submitApprovedVoid(
+      testFixture.controller.prepareVoidTransaction(),
+      'test-approval-token',
+    );
 
     for (final commandType in <String>[
       'start_transaction',
@@ -318,7 +346,10 @@ void main() {
         if (action == 'remove') {
           await testFixture.controller.removeLineItem(0);
         } else {
-          await testFixture.controller.voidTransaction();
+          await testFixture.controller.submitApprovedVoid(
+            testFixture.controller.prepareVoidTransaction(),
+            'test-approval-token',
+          );
         }
 
         expect(testFixture.client.commands, hasLength(1), reason: action);
@@ -326,6 +357,73 @@ void main() {
         expect(testFixture.controller.state.pendingCommand, isNull);
         expect(testFixture.controller.state.canExecuteNewMutation, isTrue);
       }
+    },
+  );
+
+  test(
+    'approval_required keeps exact void command but never saves capability',
+    () async {
+      final testFixture = fixture(commandIds: const ['cmd-start', 'cmd-void']);
+      await startOpen(testFixture, version: 1);
+      final command = testFixture.controller.prepareVoidTransaction();
+      const token =
+          'gpos_a1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+      testFixture.client.enqueueCommandFailure(
+        const PosCoreServerFailure(
+          code: 'approval_required',
+          message: 'Approval is required.',
+          statusCode: 403,
+          retrySameCommandId: true,
+        ),
+      );
+      await testFixture.controller.submitApprovedVoid(command, token);
+      expect(testFixture.controller.state.pendingCommand, same(command));
+      expect(testFixture.store.persisted!.pendingCommand, same(command));
+      expect(
+        jsonEncode(testFixture.store.persisted!.toJson()).contains(token),
+        isFalse,
+      );
+      expect(testFixture.ids.commandCalls, 2);
+
+      final reconstructed = CashierSessionController(
+        client: testFixture.client,
+        idGenerator: testFixture.ids,
+        sessionStore: testFixture.store,
+        currentOperatorId: () => 'operator-test',
+      );
+      await reconstructed.restoreLocalSession();
+      expect(reconstructed.state.pendingCommand!.commandId, 'cmd-void');
+      testFixture.client.enqueueCommandFailure(
+        const PosCoreServerFailure(
+          code: 'approval_required',
+          message: 'Approval is required.',
+          statusCode: 403,
+          retrySameCommandId: true,
+        ),
+      );
+      await reconstructed.retryPendingCommand();
+      final pending =
+          reconstructed.state.pendingCommand! as VoidTransactionCommand;
+      expect(pending.commandId, command.commandId);
+      await reconstructed.requestVoidApproval(pending, 'Morgan', '80421637');
+      testFixture.client.enqueueResult();
+      testFixture.client.enqueueSnapshot(
+        snapshot(version: 2, status: TransactionStatus.voided),
+      );
+      await reconstructed.submitApprovedVoid(pending, token);
+      expect(reconstructed.state.pendingCommand, isNull);
+      expect(reconstructed.state.snapshot!.status, TransactionStatus.voided);
+      expect(testFixture.ids.commandCalls, 2);
+      final voidPosts = testFixture.client.commands
+          .whereType<VoidTransactionCommand>()
+          .toList();
+      expect(voidPosts, hasLength(3));
+      expect(voidPosts.map((post) => post.commandId).toSet(), {'cmd-void'});
+      expect(
+        jsonEncode(testFixture.store.persisted!.toJson()).contains(token),
+        isFalse,
+      );
+      reconstructed.dispose();
     },
   );
 
@@ -343,7 +441,10 @@ void main() {
       if (action == 'remove') {
         await testFixture.controller.removeLineItem(0);
       } else {
-        await testFixture.controller.voidTransaction();
+        await testFixture.controller.submitApprovedVoid(
+          testFixture.controller.prepareVoidTransaction(),
+          'test-approval-token',
+        );
       }
 
       expect(testFixture.controller.state.pendingCommand, isNull);
@@ -407,6 +508,7 @@ void main() {
       );
       final testFixture = fixture(
         persisted: PersistedCashierSession(
+          operatorId: 'operator-test',
           activeTransactionId: 'txn-restored',
           pendingCommand: restoredCommand,
         ),
@@ -440,7 +542,10 @@ void main() {
 
   test('startup restores known session for GET-only refresh', () async {
     final testFixture = fixture(
-      persisted: PersistedCashierSession(activeTransactionId: 'txn-restored'),
+      persisted: PersistedCashierSession(
+        operatorId: 'operator-test',
+        activeTransactionId: 'txn-restored',
+      ),
       commandIds: const [],
       transactionIds: const [],
     );
@@ -522,6 +627,7 @@ void main() {
         client: restartedClient,
         idGenerator: restartedIds,
         sessionStore: testFixture.store,
+        currentOperatorId: () => 'operator-test',
       );
       await restarted.restoreLocalSession();
       expect(restarted.state.pendingCommand, same(stalePending));
@@ -709,6 +815,7 @@ void main() {
       );
       final testFixture = fixture(
         persisted: PersistedCashierSession(
+          operatorId: 'operator-test',
           activeTransactionId: 'txn-restored',
           pendingCommand: pending,
         ),
@@ -805,4 +912,272 @@ void main() {
     expect(pending.transactionId, 'txn-next');
     expect(testFixture.store.persisted!.pendingCommand, same(pending));
   });
+
+  test('another operator cannot retry or erase owned recovery', () async {
+    final pending = ScanBarcodeCommand(
+      commandId: 'cmd-alice',
+      transactionId: 'txn-alice',
+      expectedVersion: 1,
+      barcode: '049000001234',
+    );
+    final testFixture = fixture(
+      currentOperatorId: 'bob',
+      persisted: PersistedCashierSession(
+        operatorId: 'alice',
+        activeTransactionId: 'txn-alice',
+        pendingCommand: pending,
+      ),
+    );
+
+    await testFixture.controller.restoreLocalSession();
+
+    expect(testFixture.controller.recoveryBlockedForCurrentOperator, isTrue);
+    await expectLater(
+      testFixture.controller.retryPendingCommand(),
+      throwsA(isA<StateError>()),
+    );
+    expect(testFixture.client.commands, isEmpty);
+    expect(testFixture.store.persisted!.operatorId, 'alice');
+    expect(testFixture.store.persisted!.pendingCommand, same(pending));
+  });
+
+  test(
+    'legacy recovery binds only after authoritative shift evidence',
+    () async {
+      final legacy = PersistedCashierSession.fromJson({
+        'schema_version': 1,
+        'active_transaction_id': 'txn-legacy',
+        'pending_command': null,
+      });
+      final testFixture = fixture(persisted: legacy);
+      await testFixture.controller.restoreLocalSession();
+
+      const mismatched = RegisterContext(
+        configured: true,
+        register: RegisterIdentity(
+          registerId: 'register-one',
+          displayName: 'Register One',
+        ),
+        activeShift: RegisterShift(
+          shiftId: 'shift-one',
+          registerId: 'register-one',
+          registerDisplayName: 'Register One',
+          cashierId: 'someone-else',
+          cashierDisplayName: 'Someone Else',
+          openedAtEpochMs: 1,
+          closedAtEpochMs: null,
+          activeTransactionId: 'txn-legacy',
+        ),
+      );
+      testFixture.client.enqueueReadFailure(
+        const PosCoreServerFailure(
+          statusCode: 404,
+          code: 'transaction_not_found',
+          message: 'Transaction not found.',
+        ),
+      );
+      await testFixture.controller.reconcileRecoveryOwnership(mismatched);
+      expect(testFixture.store.persisted!.operatorId, isNull);
+      expect(testFixture.controller.recoveryBlockedForCurrentOperator, isTrue);
+
+      const authoritative = RegisterContext(
+        configured: true,
+        register: RegisterIdentity(
+          registerId: 'register-one',
+          displayName: 'Register One',
+        ),
+        activeShift: RegisterShift(
+          shiftId: 'shift-one',
+          registerId: 'register-one',
+          registerDisplayName: 'Register One',
+          cashierId: 'operator-test',
+          cashierDisplayName: 'Operator Test',
+          openedAtEpochMs: 1,
+          closedAtEpochMs: null,
+          activeTransactionId: 'txn-legacy',
+        ),
+      );
+      await testFixture.controller.reconcileRecoveryOwnership(authoritative);
+      expect(testFixture.store.persisted!.operatorId, 'operator-test');
+      expect(testFixture.controller.legacyRecoveryUnbound, isFalse);
+      expect(testFixture.controller.recoveryAvailableToCurrentOperator, isTrue);
+    },
+  );
+
+  test(
+    'legacy terminal recovery binds from authoritative transaction ownership after slot release',
+    () async {
+      for (final pending in <TransactionCommand>[
+        CompleteTransactionCommand(
+          commandId: 'cmd-complete-lost',
+          transactionId: 'txn-terminal',
+          expectedVersion: 3,
+        ),
+        VoidTransactionCommand(
+          commandId: 'cmd-void-lost',
+          transactionId: 'txn-terminal',
+          expectedVersion: 1,
+        ),
+      ]) {
+        final legacy = PersistedCashierSession.fromJson({
+          'schema_version': 1,
+          'active_transaction_id': 'txn-terminal',
+          'pending_command': pending.toJson(),
+        });
+        final testFixture = fixture(persisted: legacy);
+        await testFixture.controller.restoreLocalSession();
+        testFixture.client.enqueueSnapshot(
+          snapshot(
+            transactionId: 'txn-terminal',
+            version: pending.expectedVersion + 1,
+            status: pending is CompleteTransactionCommand
+                ? TransactionStatus.completed
+                : TransactionStatus.voided,
+            ownedByAuthenticatedOperator: true,
+          ),
+        );
+
+        await testFixture.controller.reconcileRecoveryOwnership(
+          const RegisterContext(
+            configured: true,
+            register: RegisterIdentity(
+              registerId: 'register-one',
+              displayName: 'Register One',
+            ),
+            activeShift: RegisterShift(
+              shiftId: 'shift-one',
+              registerId: 'register-one',
+              registerDisplayName: 'Register One',
+              cashierId: 'operator-test',
+              cashierDisplayName: 'Operator Test',
+              openedAtEpochMs: 1,
+              closedAtEpochMs: null,
+              activeTransactionId: null,
+            ),
+          ),
+        );
+
+        expect(testFixture.store.persisted!.operatorId, 'operator-test');
+        expect(
+          testFixture.store.persisted!.pendingCommand!.toJson(),
+          pending.toJson(),
+        );
+        expect(testFixture.controller.legacyRecoveryUnbound, isFalse);
+        testFixture.client.enqueueResult();
+        testFixture.client.enqueueSnapshot(
+          snapshot(
+            transactionId: 'txn-terminal',
+            version: pending.expectedVersion + 1,
+            status: pending is CompleteTransactionCommand
+                ? TransactionStatus.completed
+                : TransactionStatus.voided,
+            ownedByAuthenticatedOperator: true,
+          ),
+        );
+
+        await testFixture.controller.retryPendingCommand();
+
+        expect(testFixture.client.commands, hasLength(1));
+        expect(testFixture.client.commands.single.toJson(), pending.toJson());
+        expect(testFixture.controller.state.pendingCommand, isNull);
+      }
+    },
+  );
+
+  test(
+    'legacy recovery stays unbound when transaction ownership is absent',
+    () async {
+      final pending = StartTransactionCommand(
+        commandId: 'cmd-start-never-sent',
+        transactionId: 'txn-start-never-sent',
+        expectedVersion: 0,
+      );
+      final legacy = PersistedCashierSession.fromJson({
+        'schema_version': 1,
+        'active_transaction_id': pending.transactionId,
+        'pending_command': pending.toJson(),
+      });
+      final testFixture = fixture(persisted: legacy);
+      await testFixture.controller.restoreLocalSession();
+      testFixture.client.enqueueReadFailure(
+        const PosCoreServerFailure(
+          statusCode: 404,
+          code: 'transaction_not_found',
+          message: 'Transaction not found.',
+        ),
+      );
+
+      await testFixture.controller.reconcileRecoveryOwnership(
+        const RegisterContext(
+          configured: true,
+          register: RegisterIdentity(
+            registerId: 'register-one',
+            displayName: 'Register One',
+          ),
+          activeShift: RegisterShift(
+            shiftId: 'later-shift',
+            registerId: 'register-one',
+            registerDisplayName: 'Register One',
+            cashierId: 'operator-test',
+            cashierDisplayName: 'Operator Test',
+            openedAtEpochMs: 5000,
+            closedAtEpochMs: null,
+            activeTransactionId: null,
+          ),
+        ),
+      );
+
+      expect(testFixture.controller.legacyRecoveryUnbound, isTrue);
+      expect(testFixture.store.persisted!.operatorId, isNull);
+      expect(
+        testFixture.store.persisted!.pendingCommand!.toJson(),
+        pending.toJson(),
+      );
+      expect(testFixture.client.commands, isEmpty);
+    },
+  );
+
+  test(
+    'server read-any without ownership cannot bind legacy recovery',
+    () async {
+      final pending = CompleteTransactionCommand(
+        commandId: 'cmd-alice-complete',
+        transactionId: 'txn-alice-complete',
+        expectedVersion: 3,
+      );
+      final legacy = PersistedCashierSession.fromJson({
+        'schema_version': 1,
+        'active_transaction_id': pending.transactionId,
+        'pending_command': pending.toJson(),
+      });
+      final testFixture = fixture(
+        persisted: legacy,
+        currentOperatorId: 'manager-bob',
+      );
+      await testFixture.controller.restoreLocalSession();
+      testFixture.client.enqueueSnapshot(
+        snapshot(
+          transactionId: pending.transactionId,
+          version: 4,
+          status: TransactionStatus.completed,
+          ownedByAuthenticatedOperator: false,
+        ),
+      );
+
+      await testFixture.controller.reconcileRecoveryOwnership(
+        const RegisterContext(
+          configured: true,
+          register: RegisterIdentity(
+            registerId: 'register-one',
+            displayName: 'Register One',
+          ),
+          activeShift: null,
+        ),
+      );
+
+      expect(testFixture.controller.legacyRecoveryUnbound, isTrue);
+      expect(testFixture.store.persisted!.operatorId, isNull);
+      expect(testFixture.client.commands, isEmpty);
+    },
+  );
 }

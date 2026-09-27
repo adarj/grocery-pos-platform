@@ -32,7 +32,7 @@ fi
   fail "unexpected RPM package name"
 [[ "$(rpm -qp --queryformat '%{VERSION}' "$rpm_path")" == "0.0.0" ]] ||
   fail "unexpected internal RPM version"
-[[ "$(rpm -qp --queryformat '%{RELEASE}' "$rpm_path")" == "0.3.dev" ]] ||
+[[ "$(rpm -qp --queryformat '%{RELEASE}' "$rpm_path")" == "0.9.dev" ]] ||
   fail "unexpected internal RPM release"
 [[ "$(rpm -qp --queryformat '%{ARCH}' "$rpm_path")" == "noarch" ]] ||
   fail "RPM architecture is not noarch"
@@ -42,6 +42,10 @@ fi
 rpm_requires="$(rpm -qp --requires "$rpm_path")"
 grep -Eq '^racket([[:space:]]|$)' <<<"$rpm_requires" ||
   fail "RPM does not require Fedora's racket package"
+grep -Eq '^racket-pkgs([[:space:]]|$)' <<<"$rpm_requires" ||
+  fail "RPM does not require Fedora's standard Racket collections"
+grep -Eq '^libargon2([[:space:]]|$)' <<<"$rpm_requires" ||
+  fail "RPM does not require Fedora's Argon2 runtime library"
 grep -Eq '^coreutils([[:space:]]|$)' <<<"$rpm_requires" ||
   fail "RPM does not require the file utilities used by recovery diagnostics"
 grep -Eq '^systemd([[:space:]]|$)' <<<"$rpm_requires" ||
@@ -76,10 +80,31 @@ required_files=(
   "$payload_root/main.rkt"
   "$payload_root/pos/runtime.rkt"
   "$payload_root/pos/api/server.rkt"
+  "$payload_root/pos/api/auth-http.rkt"
+  "$payload_root/pos/api/approval-http.rkt"
+  "$payload_root/pos/application/authentication-service.rkt"
+  "$payload_root/pos/application/transaction-void-approval-service.rkt"
+  "$payload_root/pos/application/security-audit-service.rkt"
+  "$payload_root/pos/domain/security-audit-event.rkt"
+  "$payload_root/pos/persistence/security-audit-event-codec.rkt"
+  "$payload_root/pos/persistence/security-audit-store.rkt"
   "$payload_root/pos/persistence/sqlite-connection.rkt"
   "$payload_root/pos/persistence/sqlite-maintenance.rkt"
   "$payload_root/pos/persistence/atomic-file.rkt"
   "$payload_root/pos/persistence/sqlite-restore.rkt"
+  "$payload_root/pos/persistence/sqlite-operators.rkt"
+  "$payload_root/pos/persistence/sqlite-authentication.rkt"
+  "$payload_root/pos/persistence/sqlite-auth-throttle.rkt"
+  "$payload_root/pos/domain/operator-identity.rkt"
+  "$payload_root/pos/security/operator-pin.rkt"
+  "$payload_root/pos/security/operator-session.rkt"
+  "$payload_root/pos/security/authorization-policy.rkt"
+  "$payload_root/pos/security/transaction-void-approval.rkt"
+  "$payload_root/pos/domain/transaction-command-actor-attribution.rkt"
+  "$payload_root/pos/domain/transaction-void-approval.rkt"
+  "$payload_root/pos/persistence/transaction-command-actor-attribution-store.rkt"
+  "$payload_root/pos/persistence/transaction-void-approval-store.rkt"
+  "$payload_root/pos/application/operator-service.rkt"
   "$payload_root/pos/support/appliance-recovery.rkt"
   "$payload_root/pos/support/support-bundle.rkt"
   "$payload_root/pos/support/appliance-provisioning.rkt"
@@ -87,6 +112,8 @@ required_files=(
   "$payload_root/scripts/database-recovery.rkt"
   "$payload_root/scripts/support-diagnostics.rkt"
   "$payload_root/scripts/appliance.rkt"
+  "$payload_root/scripts/operator-auth.rkt"
+  "$payload_root/scripts/security-audit.rkt"
   "$payload_root/scripts/catalog.rkt"
   "$payload_root/scripts/register-configuration.rkt"
   "$payload_root/run-pos-core"
@@ -98,10 +125,41 @@ required_files=(
   "$extract_root/usr/bin/grocery-pos-register-config"
   "$extract_root/usr/bin/grocery-pos-recovery"
   "$extract_root/usr/bin/grocery-pos-support"
+  "$extract_root/usr/bin/grocery-pos-auth"
+  "$extract_root/usr/bin/grocery-pos-audit"
+  "$payload_root/vendor/racket/collects/crypto/main.rkt"
+  "$payload_root/vendor/racket/collects/crypto/argon2.rkt"
+  "$payload_root/vendor/racket/collects/asn1/main.rkt"
+  "$payload_root/vendor/racket/collects/hash-view/main.rkt"
+  "$payload_root/vendor/racket/collects/base64/main.rkt"
+  "$payload_root/vendor/racket/collects/binaryio/main.rkt"
+  "$payload_root/vendor/racket/collects/gmp/main.rkt"
+  "$payload_root/vendor/racket/collects/scramble/struct-info.rkt"
+  "$payload_root/vendor/racket/crypto-sources.json"
 )
 for path in "${required_files[@]}"; do
   [[ -f "$path" ]] || fail "required packaged file is missing: $path"
 done
+
+crypto_sources="$payload_root/vendor/racket/crypto-sources.json"
+jq -e '
+  .schema_version == 1 and
+  (.collections | length) == 7 and
+  ([.collections[].name] | sort) ==
+    (["asn1-lib", "base64-lib", "binaryio-lib", "crypto-lib",
+      "gmp-lib", "hash-view-lib", "scramble-lib"] | sort) and
+  ([.collections[] | select(
+      (.revision | test("^[0-9a-f]{40}$") | not) or
+      (.sha256 | startswith("sha256-") | not) or
+      (.license | length) == 0)] | length) == 0
+' "$crypto_sources" >/dev/null ||
+  fail "packaged Racket crypto provenance is incomplete"
+while IFS=$'\t' read -r revision sha256; do
+  grep -Fq "$revision" "$repository_root/flake.nix" ||
+    fail "packaged crypto revision is not pinned by the flake: $revision"
+  grep -Fq "$sha256" "$repository_root/flake.nix" ||
+    fail "packaged crypto hash is not pinned by the flake: $sha256"
+done < <(jq -r '.collections[] | [.revision, .sha256] | @tsv' "$crypto_sources")
 
 [[ ! -e "$payload_root/tests" ]] || fail "Racket tests were packaged"
 [[ ! -e "$payload_root/fixtures" ]] || fail "development fixtures were packaged"
@@ -126,6 +184,19 @@ if grep -Eq '^/var/lib/grocery-pos(/|$)|^/run/grocery-pos(/|$)|^/var/log/grocery
 fi
 if grep -R -a -F -l '/nix/store/' "$extract_root" >/dev/null; then
   fail "installed payload contains a /nix/store reference"
+fi
+if grep -R -a -E -l 'GROCERY_POS_DISABLE_AUTH|GROCERY_POS_AUTH_BYPASS' \
+  "$payload_root" >/dev/null; then
+  fail "installed payload contains an authentication bypass switch"
+fi
+if grep -R -a -E -l 'CREATE TABLE[^;]*(bearer|operator)_sessions' \
+  "$payload_root/pos" >/dev/null; then
+  fail "installed payload persists bearer sessions in SQLite"
+fi
+if grep -E -- '--pin([=[:space:]]|$)' \
+  "$extract_root/usr/bin/grocery-pos-auth" \
+  "$payload_root/scripts/operator-auth.rkt" >/dev/null; then
+  fail "installed operator administration accepts a PIN through argv"
 fi
 
 require_unit_line() {
@@ -200,6 +271,9 @@ grep -Fqx 'SQLITE_DB_PATH=/var/lib/grocery-pos/pos.db' "$payload_root/run-pos-co
   fail "service launcher does not force the canonical database path"
 grep -Fqx 'export SQLITE_DB_PATH' "$payload_root/run-pos-core" ||
   fail "service launcher does not export the canonical database path"
+grep -Fqx 'PLTCOLLECTS=/usr/libexec/grocery-pos-core/vendor/racket/collects:' \
+  "$payload_root/run-pos-core" ||
+  fail "service launcher does not use the packaged Racket crypto collections"
 grep -Fqx 'exec /usr/bin/racket /usr/libexec/grocery-pos-core/main.rkt "$@"' "$payload_root/run-pos-core" ||
   fail "service launcher does not execute the packaged entry point"
 
@@ -220,6 +294,43 @@ for launcher in \
   [[ "$(stat -c '%a' "$launcher")" == "755" ]] ||
     fail "launcher mode is not 0755: $launcher"
 done
+
+auth_launcher="$extract_root/usr/bin/grocery-pos-auth"
+[[ "$(stat -c '%a' "$auth_launcher")" == "755" ]] ||
+  fail "auth launcher mode is not 0755"
+grep -Fq '/usr/libexec/grocery-pos-core/scripts/operator-auth.rkt' \
+  "$auth_launcher" ||
+  fail "auth launcher does not use packaged Racket administration code"
+grep -Fq '/var/lib/grocery-pos/pos.db' \
+  "$payload_root/scripts/operator-auth.rkt" ||
+  fail "auth administration code does not fix the appliance database path"
+grep -Fq '$(/usr/bin/id -u)' "$auth_launcher" ||
+  fail "auth launcher does not enforce the root boundary"
+grep -Fq '/usr/bin/stty -echo' "$auth_launcher" ||
+  fail "auth launcher does not disable terminal echo for PIN entry"
+grep -Fq '[ "$2" = reset-pin ]' "$auth_launcher" ||
+  fail "auth launcher does not require secure PIN entry for reset"
+if grep -Eq -- '--pin|SQLITE_DB_PATH|[[:space:]]PIN([[:space:]]|=)' "$auth_launcher"; then
+  fail "auth launcher exposes a PIN argv or database override surface"
+fi
+audit_launcher="$extract_root/usr/bin/grocery-pos-audit"
+[[ "$(stat -c '%a' "$audit_launcher")" == "755" ]] ||
+  fail "audit launcher mode is not 0755"
+grep -Fq '/usr/libexec/grocery-pos-core/scripts/security-audit.rkt' \
+  "$audit_launcher" ||
+  fail "audit launcher does not use packaged Racket inspection code"
+grep -Fq '$(/usr/bin/id -u)' "$audit_launcher" ||
+  fail "audit launcher does not enforce the root boundary"
+grep -Fq '/var/lib/grocery-pos/pos.db' \
+  "$payload_root/scripts/security-audit.rkt" ||
+  fail "audit inspection code does not fix the appliance database path"
+if grep -Eq 'SQLITE_DB_PATH|--database' "$audit_launcher"; then
+  fail "audit launcher exposes a database override surface"
+fi
+if grep -R -a -E '\$argon2id\$v=[0-9]+\$m=' \
+  "$payload_root/pos" "$payload_root/scripts" >/dev/null; then
+  fail "application payload contains a pre-enrolled Argon2id credential"
+fi
 
 for launcher in \
   "$extract_root/usr/bin/grocery-pos-recovery" \

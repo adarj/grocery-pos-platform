@@ -2,9 +2,11 @@ import 'package:flutter/foundation.dart';
 
 import '../../core/pos_core/models/command_result.dart';
 import '../../core/pos_core/models/pos_core_failure.dart';
+import '../../core/pos_core/models/register_operations.dart';
 import '../../core/pos_core/models/transaction_command.dart';
 import '../../core/pos_core/models/transaction_snapshot.dart';
 import '../../core/pos_core/pos_core_client.dart';
+import '../../core/pos_core/transaction_void_approval_client.dart';
 import 'cashier_id_generator.dart';
 import 'cashier_local_recovery_failure.dart';
 import 'cashier_session_state.dart';
@@ -15,13 +17,36 @@ final class CashierSessionController extends ChangeNotifier {
     required PosCoreClient client,
     required CashierIdGenerator idGenerator,
     required CashierSessionStore sessionStore,
+    required String? Function() currentOperatorId,
+    TransactionVoidApprovalClient? approvalClient,
   }) : _client = client,
+       _approvalClient =
+           approvalClient ??
+           (client is TransactionVoidApprovalClient
+               ? client as TransactionVoidApprovalClient
+               : null),
        _idGenerator = idGenerator,
-       _sessionStore = sessionStore;
+       _sessionStore = sessionStore,
+       _currentOperatorId = currentOperatorId;
 
   final PosCoreClient _client;
+  final TransactionVoidApprovalClient? _approvalClient;
   final CashierIdGenerator _idGenerator;
   final CashierSessionStore _sessionStore;
+  final String? Function() _currentOperatorId;
+
+  String? _recoveryOperatorId;
+  bool _legacyRecoveryUnbound = false;
+
+  String? get recoveryOperatorId => _recoveryOperatorId;
+  bool get legacyRecoveryUnbound => _legacyRecoveryUnbound;
+  bool get recoveryAvailableToCurrentOperator {
+    final current = _currentOperatorId();
+    return current != null && _recoveryOperatorId == current;
+  }
+
+  bool get recoveryBlockedForCurrentOperator =>
+      _state.activeTransactionId != null && !recoveryAvailableToCurrentOperator;
 
   CashierSessionState _state = CashierSessionState.initial;
 
@@ -38,9 +63,13 @@ final class CashierSessionController extends ChangeNotifier {
     try {
       final persisted = await _sessionStore.load();
       if (persisted == null) {
+        _recoveryOperatorId = null;
+        _legacyRecoveryUnbound = false;
         _setState(CashierSessionState.initial);
         return;
       }
+      _recoveryOperatorId = persisted.operatorId;
+      _legacyRecoveryUnbound = persisted.isLegacyUnbound;
       _setState(
         CashierSessionState(
           activeTransactionId: persisted.activeTransactionId,
@@ -56,8 +85,44 @@ final class CashierSessionController extends ChangeNotifier {
     }
   }
 
+  Future<void> reconcileRecoveryOwnership(RegisterContext context) async {
+    final currentOperatorId = _requireCurrentOperatorId();
+    if (_state.activeTransactionId == null || !_legacyRecoveryUnbound) return;
+    final shift = context.activeShift;
+    var ownershipProven =
+        shift != null &&
+        shift.cashierId == currentOperatorId &&
+        shift.activeTransactionId == _state.activeTransactionId;
+    if (!ownershipProven) {
+      try {
+        final transaction = await _client.fetchTransaction(
+          _state.activeTransactionId!,
+        );
+        ownershipProven = transaction.ownedByAuthenticatedOperator;
+      } on PosCoreServerFailure catch (failure) {
+        // A cashier receives the same not-found response for a missing or
+        // foreign transaction. Neither case proves ownership. In particular,
+        // a pending legacy start that never reached POS Core stays preserved
+        // but unbound until an authoritative relationship exists.
+        if (failure.code != 'transaction_not_found') rethrow;
+      }
+    }
+    if (!ownershipProven) return;
+    await _sessionStore.save(
+      PersistedCashierSession(
+        operatorId: currentOperatorId,
+        activeTransactionId: _state.activeTransactionId!,
+        pendingCommand: _state.pendingCommand,
+      ),
+    );
+    _recoveryOperatorId = currentOperatorId;
+    _legacyRecoveryUnbound = false;
+    notifyListeners();
+  }
+
   Future<void> startTransaction() async {
     _requireIdle();
+    _requireRecoveryOwnership(allowNoRecovery: true);
     if (!_state.canStartTransaction) {
       throw StateError(
         'A new transaction cannot start in the current cashier session.',
@@ -133,18 +198,92 @@ final class CashierSessionController extends ChangeNotifier {
     await _persistAndExecuteNewCommand(command);
   }
 
-  Future<void> voidTransaction() async {
+  VoidTransactionCommand prepareVoidTransaction() {
     final snapshot = _requireAuthoritativeSnapshot();
-    final command = VoidTransactionCommand(
+    return VoidTransactionCommand(
       commandId: _idGenerator.nextCommandId(),
       transactionId: snapshot.transactionId,
       expectedVersion: snapshot.version,
     );
-    await _persistAndExecuteNewCommand(command);
+  }
+
+  Future<TransactionVoidApproval> requestVoidApproval(
+    VoidTransactionCommand command,
+    String approverOperatorId,
+    String approverPin,
+  ) async {
+    _requireIdle();
+    _requireRecoveryOwnership();
+    final pending = _state.pendingCommand;
+    if (pending != null) {
+      if (!_sameVoidCommand(pending, command)) {
+        throw StateError(
+          'Approval must target the exact pending void command.',
+        );
+      }
+    } else {
+      _requireMatchingVoidSnapshot(command);
+    }
+    return _requireApprovalClient().requestTransactionVoidApproval(
+      command,
+      approverOperatorId,
+      approverPin,
+    );
+  }
+
+  Future<void> submitApprovedVoid(
+    VoidTransactionCommand command,
+    String approvalToken,
+  ) async {
+    _requireIdle();
+    _requireRecoveryOwnership();
+    final pending = _state.pendingCommand;
+    if (pending != null) {
+      if (!_sameVoidCommand(pending, command)) {
+        throw StateError(
+          'Approval must target the exact pending void command.',
+        );
+      }
+      await _executePersistedCommand(
+        command,
+        pendingWhileExecuting: true,
+        approvalToken: approvalToken,
+      );
+      return;
+    }
+    _requireMatchingVoidSnapshot(command);
+    await _persistAndExecuteNewCommand(command, approvalToken: approvalToken);
+  }
+
+  TransactionVoidApprovalClient _requireApprovalClient() {
+    final client = _approvalClient;
+    if (client == null) {
+      throw StateError('Transaction void approval is unavailable.');
+    }
+    return client;
+  }
+
+  void _requireMatchingVoidSnapshot(VoidTransactionCommand command) {
+    final snapshot = _requireAuthoritativeSnapshot();
+    if (snapshot.transactionId != command.transactionId ||
+        snapshot.version != command.expectedVersion) {
+      throw StateError('Transaction changed before approval could be used.');
+    }
+  }
+
+  bool _sameVoidCommand(
+    TransactionCommand existing,
+    VoidTransactionCommand next,
+  ) {
+    return existing is VoidTransactionCommand &&
+        existing.commandId == next.commandId &&
+        existing.transactionId == next.transactionId &&
+        existing.expectedVersion == next.expectedVersion;
   }
 
   Future<void> retryPendingCommand() async {
     _requireIdle();
+    _requireRecoveryOwnership();
     if (!_state.canRetryPendingCommand) {
       throw StateError('There is no pending transaction command to retry.');
     }
@@ -156,6 +295,7 @@ final class CashierSessionController extends ChangeNotifier {
 
   Future<void> refreshTransaction() async {
     _requireIdle();
+    _requireRecoveryOwnership();
     if (!_state.canRefresh) {
       throw StateError('There is no active transaction to refresh safely.');
     }
@@ -167,6 +307,7 @@ final class CashierSessionController extends ChangeNotifier {
 
   Future<void> beginNextSale() async {
     _requireIdle();
+    _requireRecoveryOwnership();
     if (!_state.canBeginNextSale) {
       throw StateError(
         'The current cashier session is not ready to begin the next sale.',
@@ -184,6 +325,8 @@ final class CashierSessionController extends ChangeNotifier {
     );
     try {
       await _sessionStore.clear();
+      _recoveryOperatorId = null;
+      _legacyRecoveryUnbound = false;
     } on CashierSessionStoreFailure {
       _setState(
         CashierSessionState(
@@ -201,7 +344,10 @@ final class CashierSessionController extends ChangeNotifier {
     await startTransaction();
   }
 
-  Future<void> _persistAndExecuteNewCommand(TransactionCommand command) async {
+  Future<void> _persistAndExecuteNewCommand(
+    TransactionCommand command, {
+    String? approvalToken,
+  }) async {
     final stateBeforeCommand = _state;
     _setState(
       CashierSessionState(
@@ -210,12 +356,16 @@ final class CashierSessionController extends ChangeNotifier {
       ),
     );
     try {
+      final operatorId = _requireCurrentOperatorId();
       await _sessionStore.save(
         PersistedCashierSession(
+          operatorId: operatorId,
           activeTransactionId: command.transactionId,
           pendingCommand: command,
         ),
       );
+      _recoveryOperatorId = operatorId;
+      _legacyRecoveryUnbound = false;
     } on CashierSessionStoreFailure {
       _setState(
         CashierSessionState(
@@ -233,12 +383,13 @@ final class CashierSessionController extends ChangeNotifier {
       return;
     }
 
-    await _executePersistedCommand(command);
+    await _executePersistedCommand(command, approvalToken: approvalToken);
   }
 
   Future<void> _executePersistedCommand(
     TransactionCommand command, {
     bool pendingWhileExecuting = false,
+    String? approvalToken,
   }) async {
     _setState(
       CashierSessionState(
@@ -249,7 +400,12 @@ final class CashierSessionController extends ChangeNotifier {
     );
 
     try {
-      final result = await _client.executeCommand(command);
+      final result = approvalToken == null
+          ? await _client.executeCommand(command)
+          : await _requireApprovalClient().executeApprovedVoid(
+              command as VoidTransactionCommand,
+              approvalToken,
+            );
       final cleanupFailure = await _recordKnownCommandResult(command, result);
       await _handleResolvedCommand(
         command,
@@ -281,10 +437,18 @@ final class CashierSessionController extends ChangeNotifier {
     try {
       if (shouldClearSession) {
         await _sessionStore.clear();
+        _recoveryOperatorId = null;
+        _legacyRecoveryUnbound = false;
       } else {
+        final operatorId = _requireCurrentOperatorId();
         await _sessionStore.save(
-          PersistedCashierSession(activeTransactionId: command.transactionId),
+          PersistedCashierSession(
+            operatorId: operatorId,
+            activeTransactionId: command.transactionId,
+          ),
         );
+        _recoveryOperatorId = operatorId;
+        _legacyRecoveryUnbound = false;
       }
       return null;
     } on CashierSessionStoreFailure {
@@ -303,11 +467,19 @@ final class CashierSessionController extends ChangeNotifier {
     if (!requiresRetry) {
       try {
         if (keepTransactionId) {
+          final operatorId = _requireCurrentOperatorId();
           await _sessionStore.save(
-            PersistedCashierSession(activeTransactionId: command.transactionId),
+            PersistedCashierSession(
+              operatorId: operatorId,
+              activeTransactionId: command.transactionId,
+            ),
           );
+          _recoveryOperatorId = operatorId;
+          _legacyRecoveryUnbound = false;
         } else {
           await _sessionStore.clear();
+          _recoveryOperatorId = null;
+          _legacyRecoveryUnbound = false;
         }
       } on CashierSessionStoreFailure {
         localFailure = const CashierLocalRecoveryFailure.storageUnavailable();
@@ -397,6 +569,8 @@ final class CashierSessionController extends ChangeNotifier {
       if (explicitlyNotFound) {
         try {
           await _sessionStore.clear();
+          _recoveryOperatorId = null;
+          _legacyRecoveryUnbound = false;
         } on CashierSessionStoreFailure {
           storageFailure =
               const CashierLocalRecoveryFailure.storageUnavailable();
@@ -441,8 +615,27 @@ final class CashierSessionController extends ChangeNotifier {
     }
   }
 
+  String _requireCurrentOperatorId() {
+    final operatorId = _currentOperatorId();
+    if (operatorId == null || operatorId.isEmpty) {
+      throw StateError('An authenticated operator is required.');
+    }
+    return operatorId;
+  }
+
+  void _requireRecoveryOwnership({bool allowNoRecovery = false}) {
+    final operatorId = _requireCurrentOperatorId();
+    if (_state.activeTransactionId == null && allowNoRecovery) return;
+    if (_legacyRecoveryUnbound || _recoveryOperatorId != operatorId) {
+      throw StateError(
+        'Cashier recovery belongs to another or unverified operator.',
+      );
+    }
+  }
+
   TransactionSnapshot _requireAuthoritativeSnapshot() {
     _requireIdle();
+    _requireRecoveryOwnership();
     if (!_state.canExecuteNewMutation) {
       throw StateError(
         'A current authoritative transaction is required for this mutation.',

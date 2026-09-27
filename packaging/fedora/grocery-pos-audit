@@ -1,0 +1,15 @@
+#!/bin/sh
+
+set -eu
+
+if [ "$(/usr/bin/id -u)" -ne 0 ]; then
+  printf '%s\n' '{"error":{"code":"not_privileged","message":"Security audit inspection requires root."},"ok":false}' >&2
+  exit 1
+fi
+
+collections=/usr/libexec/grocery-pos-core/vendor/racket/collects
+PLTCOLLECTS="$collections:"
+export PLTCOLLECTS
+
+exec /usr/bin/racket \
+  /usr/libexec/grocery-pos-core/scripts/security-audit.rkt "$@"

@@ -2,12 +2,23 @@
 
 (require (prefix-in db: db)
          rackunit
-         "../pos/application/transaction-service.rkt"
+         "../pos/application/authentication-service.rkt"
+         (rename-in "../pos/application/transaction-service.rkt"
+                    [transaction-service-load-canonical-receipt
+                     load-canonical-receipt/authorized])
          "../pos/domain/canonical-receipt.rkt"
          "../pos/domain/money.rkt"
          "../pos/domain/transaction-event.rkt"
          "../pos/persistence/pos-database-migrations.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt")
+
+(define test-principal
+  (authenticated-operator "legacy-receipt-test-operator"
+                          "Legacy receipt test operator"
+                          'manager 1))
+
+(define (transaction-service-load-canonical-receipt service transaction-id)
+  (load-canonical-receipt/authorized service test-principal transaction-id))
 
 (define (with-service proc)
   (define connection (db:sqlite3-connect #:database 'memory))

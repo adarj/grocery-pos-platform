@@ -101,7 +101,7 @@ a control.
 
 The Racket process now constructs its durable transaction service before the
 HTTP listener starts. Startup resolves `SQLITE_DB_PATH`, migrates and validates
-the POS database through schema v6 using a dedicated connection after
+the POS database through schema v12 using a dedicated connection after
 establishing WAL with FULL synchronous durability. Every production connection
 explicitly enables foreign-key enforcement, retains a 1000-page WAL automatic
 checkpoint threshold, and uses the bounded Racket connector busy policy.
@@ -137,6 +137,80 @@ reconciliation. Completed cash-sale movement and shift-slot release participate
 in the same transaction-command writer boundary. See
 [Shift Cash Accountability](cash-accountability.md).
 
+Migration 7 adds operator principals, fixed roles, and optional Argon2id PIN
+credentials. Migration 8 adds durable per-known-operator login throttling.
+Bearer sessions remain process-local, and the runtime now supplies an explicit
+authentication service to the HTTP application. See
+[Operator Identity and PIN Credentials](../security/operator-identity-and-pin-credentials.md).
+
+## Authentication
+
+`POST /auth/login` is public and accepts exactly two string fields:
+
+```json
+{
+  "operator_id": "operator-123",
+  "pin": "80421637"
+}
+```
+
+Successful login returns an opaque 256-bit bearer capability and safe current
+operator/session presentation fields. Missing, inactive, unenrolled, blocked,
+and wrong-credential cases all return HTTP 401 with
+`authentication_failed`; the response never identifies the internal cause.
+Malformed request JSON remains a distinct 400 validation failure.
+
+`GET /auth/session` and `POST /auth/logout` require exactly one
+`Authorization: Bearer TOKEN` header. Query parameters, cookies, body fields,
+environment variables, and files are not bearer transports. Authentication
+responses use `Cache-Control: no-store`; missing/invalid protected credentials
+return `authentication_required` and a Bearer challenge.
+
+`POST /auth/change-pin` is also bearer-protected. It requires
+`application/json` with exactly `current_pin` and `new_pin` string fields;
+there is no client-supplied operator ID. The current PIN receives normal
+step-up verification and throttle treatment; the new PIN must satisfy the
+strong enrollment policy. Success returns
+`{"ok":true,"credential_revision":N,"reauthentication_required":true}`
+with `Cache-Control: no-store`; the old bearer is already invalidated. A 400
+`pin_policy_rejected` or 403 `credential_change_failed` guarantees no
+credential mutation; a 503 `credential_change_unavailable` means the writer
+rolled back. A transport-lost response is uncertain: the terminal locks and
+requires sign-in rather than blindly retrying the PIN-change POST.
+
+`GET /health`, `GET /ready`, and `POST /auth/login` remain public. Every other
+implemented business or auth-session route is protected. Authentication runs
+before its business handler, so an anonymous transaction command creates no
+event, receipt, cash movement, shift change, or command receipt. A genuine
+temporary failure while revalidating session security state returns sanitized
+HTTP 503 `authentication_unavailable` rather than mislabeling a credential as
+invalid.
+
+The server enforces five-minute idle and twelve-hour absolute expiry and checks
+current operator active state, credential presence, and credential revision on
+every protected request. POS Core restart invalidates all bearer sessions.
+Current roles and server-computed effective permissions are returned with
+authenticated principal state. Racket applies the fixed role and durable
+resource-ownership policy on every request; the Flutter list is a presentation
+hint only. See [Authenticated Sessions and Register Lock](../security/authenticated-sessions-and-register-lock.md)
+and [Authorization and Ownership](../security/authorization-and-ownership.md).
+
+Valid authentication with insufficient permission returns HTTP 403 with
+`authorization_denied`. It does not revoke the bearer session and does not
+include the missing permission. Authentication failures remain 401 and a
+temporary inability to revalidate security state remains 503.
+
+A fresh whole-sale void also requires the separate
+[`POST /approvals/transaction-void`](transaction-http-api-v1.md) ceremony.
+The approver's PIN issues no register bearer session. The resulting short-lived
+capability is sent only in `X-Grocery-POS-Approval` with the exact void command;
+see [Supervisor / Manager Approval](../security/scoped-manager-approval.md).
+
+Checkpoint 5's security-audit ledger is not exposed by HTTP or Flutter. POS
+Core records typed local evidence behind these routes; root-only
+`grocery-pos-audit` is the inspection boundary. See
+[Local Security Audit Ledger](../security/security-audit-ledger.md).
+
 ## Health Endpoint
 
 ### `GET /health`
@@ -171,7 +245,7 @@ production SQLite boundary. A ready response is HTTP 200:
 
 ```json
 {
-  "database_schema_version": 6,
+  "database_schema_version": 9,
   "ok": true,
   "service": "grocery-pos-core",
   "status": "ready"
@@ -392,9 +466,10 @@ Where practical:
 * `409` indicates a valid request that conflicts with current domain state;
 * `5xx` indicates an internal service failure.
 
-HTTP 503 is reserved here for a functioning `/ready` endpoint reporting that
-the runtime/persistence boundary is not ready. It does not replace existing
-domain statuses or transaction-command uncertainty semantics.
+HTTP 503 is used by `/ready` when the runtime/persistence boundary is not ready
+and by protected authentication when authoritative security state is
+temporarily unavailable. It does not replace existing domain statuses or
+transaction-command uncertainty semantics.
 
 Domain-specific error codes remain necessary even when an HTTP status code is supplied.
 
@@ -469,6 +544,10 @@ Currently implemented:
 ```text
 GET /health
 GET /ready
+POST /auth/login
+GET /auth/session
+POST /auth/logout
+POST /auth/change-pin
 POST /transaction-commands
 GET /transactions/{transaction_id}
 GET /receipts/{transaction_id}
@@ -479,17 +558,28 @@ POST /shifts/{shift_id}/close
 GET /shifts/{shift_id}/cash-summary
 ```
 
-The transaction routes expose the durable typed-command mutation,
+The health/readiness/login routes are public; all other routes above require an
+Authorization bearer. `GET /cashiers` additionally requires supervisor or
+manager permission. Transaction and receipt reads enforce own/read-any scope,
+and every transaction mutation enforces durable ownership. The transaction
+routes expose the durable typed-command mutation,
 authoritative current-state replay query, and canonical completed-sale receipt
 derived from that same replay. Receipt lookup creates no command or cashier
-recovery record. Command-specific mutation routes, broad sale search, and
+recovery record. Transaction snapshots include only a server-derived
+`owned_by_authenticated_operator` relationship hint for safe binding of legacy
+local recovery after terminal slot release; it does not grant authority.
+Command-specific mutation routes, broad sale search, and
 speculative transaction operations are deliberately absent.
 
 Shift open/close are operational resource writes, not transaction commands.
 They create no command ID or same-command retry marker; explicit
 `GET /register-context` and exact shift cash-summary reads resolve transport
 uncertainty. Opening and counted cash are exact integer minor units. Flutter
-does not calculate expected cash or over/short. Cashier selection is attribution
-only and provides no authentication claim.
+does not calculate expected cash or over/short. Open shift accepts only opening
+cash and derives the cashier identity from the authenticated operator. Cash
+summary responses are strictly discriminated as `limited` or `full`; the
+limited open-own cashier view contains no financial fields. Manager close-any
+does not rewrite the shift's cashier snapshot. See
+[Authorization and Ownership](../security/authorization-and-ownership.md).
 
 The domain model should drive the interface, not the reverse.

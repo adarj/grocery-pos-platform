@@ -4,7 +4,9 @@ import 'package:flutter/services.dart';
 import '../../core/pos_core/models/command_result.dart';
 import '../../core/pos_core/models/transaction_command.dart';
 import '../../core/pos_core/models/transaction_snapshot.dart';
+import '../../core/pos_core/models/pos_core_failure.dart';
 import '../../core/pos_core/pos_core_client.dart';
+import '../../core/pos_core/transaction_void_approval_client.dart';
 import '../receipt/receipt_screen.dart';
 import 'cashier_money_format.dart';
 import 'cashier_money_input.dart';
@@ -12,6 +14,131 @@ import 'cashier_session_controller.dart';
 import 'cashier_session_state.dart';
 
 enum _SubmittedAction { scan, tender, completion, removal, voidSale }
+
+final class _VoidApprovalDialog extends StatefulWidget {
+  const _VoidApprovalDialog({
+    required this.command,
+    required this.snapshot,
+    required this.requesterDisplayName,
+    required this.requestApproval,
+  });
+
+  final VoidTransactionCommand command;
+  final TransactionSnapshot snapshot;
+  final String requesterDisplayName;
+  final Future<TransactionVoidApproval> Function(
+    VoidTransactionCommand,
+    String,
+    String,
+  )
+  requestApproval;
+
+  @override
+  State<_VoidApprovalDialog> createState() => _VoidApprovalDialogState();
+}
+
+final class _VoidApprovalDialogState extends State<_VoidApprovalDialog> {
+  final _approverId = TextEditingController();
+  final _pin = TextEditingController();
+  bool _busy = false;
+  String? _failure;
+
+  @override
+  void dispose() {
+    _pin.clear();
+    _pin.dispose();
+    _approverId.clear();
+    _approverId.dispose();
+    super.dispose();
+  }
+
+  Future<void> _approve() async {
+    if (_busy) return;
+    final operatorId = _approverId.text;
+    final pin = _pin.text;
+    _pin.clear();
+    setState(() {
+      _busy = true;
+      _failure = null;
+    });
+    try {
+      final approval = await widget.requestApproval(
+        widget.command,
+        operatorId,
+        pin,
+      );
+      if (mounted) Navigator.of(context).pop(approval.approvalToken);
+    } catch (_) {
+      if (mounted) {
+        setState(
+          () => _failure =
+              'Approval was not granted. Check the approver ID, PIN, and authorization.',
+        );
+      }
+    } finally {
+      if (mounted) {
+        _pin.clear();
+        setState(() => _busy = false);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Supervisor / Manager Approval Required'),
+    content: SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Approve Entire Sale Void'),
+          const SizedBox(height: 8),
+          Text('Requester: ${widget.requesterDisplayName}'),
+          Text('Transaction: ${widget.command.transactionId}'),
+          Text('Items: ${widget.snapshot.lineItems.length}'),
+          Text(
+            'Total: ${formatUsdMinorUnits(widget.snapshot.totalMinorUnits)}',
+          ),
+          const Text('The entire open sale will be canceled.'),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _approverId,
+            decoration: const InputDecoration(
+              labelText: 'Approver operator ID',
+            ),
+            autocorrect: false,
+            enableSuggestions: false,
+          ),
+          TextField(
+            controller: _pin,
+            decoration: const InputDecoration(labelText: 'Approver PIN'),
+            obscureText: true,
+            keyboardType: TextInputType.number,
+            inputFormatters: [
+              FilteringTextInputFormatter.digitsOnly,
+              LengthLimitingTextInputFormatter(12),
+            ],
+            autocorrect: false,
+            enableSuggestions: false,
+            onSubmitted: (_) => _approve(),
+          ),
+          if (_failure != null)
+            Text(_failure!, key: const Key('approvalFailure')),
+        ],
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: _busy ? null : () => Navigator.of(context).pop(),
+        child: const Text('Keep Sale'),
+      ),
+      FilledButton(
+        onPressed: _busy ? null : _approve,
+        child: const Text('Approve Void'),
+      ),
+    ],
+  );
+}
 
 final class _FocusBarcodeIntent extends Intent {
   const _FocusBarcodeIntent();
@@ -29,11 +156,13 @@ final class CashierScreen extends StatefulWidget {
   const CashierScreen({
     required this.controller,
     required this.client,
+    this.requesterDisplayName = 'Current operator',
     super.key,
   });
 
   final CashierSessionController controller;
   final PosCoreClient client;
+  final String requesterDisplayName;
 
   @override
   State<CashierScreen> createState() => _CashierScreenState();
@@ -190,33 +319,30 @@ final class _CashierScreenState extends State<CashierScreen> {
   }
 
   Future<void> _confirmVoidSale(TransactionSnapshot sourceSnapshot) async {
-    final confirmed = await showDialog<bool>(
+    final command = widget.controller.prepareVoidTransaction();
+    await _approveAndSubmitVoid(command, sourceSnapshot);
+  }
+
+  Future<void> _approveAndSubmitVoid(
+    VoidTransactionCommand command,
+    TransactionSnapshot snapshot,
+  ) async {
+    final approvalToken = await showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Void this sale?'),
-        content: const Text(
-          'This cancels the current open transaction. '
-          'No payment will be taken.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Keep Sale'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Void Sale'),
-          ),
-        ],
+      builder: (context) => _VoidApprovalDialog(
+        command: command,
+        snapshot: snapshot,
+        requesterDisplayName: widget.requesterDisplayName,
+        requestApproval: widget.controller.requestVoidApproval,
       ),
     );
-    if (!mounted || confirmed != true) {
+    if (!mounted || approvalToken == null) {
       return;
     }
-
     final currentState = widget.controller.state;
-    if (!identical(currentState.snapshot, sourceSnapshot) ||
-        !currentState.canExecuteNewMutation) {
+    if (currentState.pendingCommand == null &&
+        (!identical(currentState.snapshot, snapshot) ||
+            !currentState.canExecuteNewMutation)) {
       setState(() {
         _interactionFeedback =
             'Transaction changed. Review the sale and try again.';
@@ -229,8 +355,25 @@ final class _CashierScreenState extends State<CashierScreen> {
       _lastCommandResultBeforeSubmission = currentState.lastCommandResult;
       _interactionFeedback = null;
     });
-    await widget.controller.voidTransaction();
+    await widget.controller.submitApprovedVoid(command, approvalToken);
     _restoreInputWorkflowAfterResolution();
+  }
+
+  Future<void> _approvePendingVoid(VoidTransactionCommand command) async {
+    try {
+      final snapshot = await widget.client.fetchTransaction(
+        command.transactionId,
+      );
+      if (!mounted) return;
+      await _approveAndSubmitVoid(command, snapshot);
+    } on PosCoreFailure {
+      if (mounted) {
+        setState(
+          () => _interactionFeedback =
+              'The transaction could not be loaded for approval. Retry safely.',
+        );
+      }
+    }
   }
 
   Future<void> _retryPendingCommand() async {
@@ -425,20 +568,46 @@ final class _CashierScreenState extends State<CashierScreen> {
                     message: localRecoveryFailure!.message,
                   );
                 }
+                if (widget.controller.recoveryBlockedForCurrentOperator) {
+                  return const _RecoveryView(
+                    icon: Icons.person_off_outlined,
+                    title: 'Another operator must recover this sale',
+                    message:
+                        'Saved transaction recovery is bound to a different '
+                        'operator, or its legacy ownership has not yet been '
+                        'verified by POS Core. Sign in as the original operator.',
+                  );
+                }
                 if (state.pendingCommand != null) {
+                  final pendingVoid =
+                      state.pendingCommand is VoidTransactionCommand &&
+                      state.failure is PosCoreServerFailure &&
+                      (state.failure as PosCoreServerFailure).code ==
+                          'approval_required';
                   return _RecoveryView(
                     icon: Icons.help_outline,
-                    title: 'Command result unknown',
-                    message:
-                        'POS Core could not confirm whether the last action '
-                        'completed. Retry the same command to safely resolve it.',
+                    title: pendingVoid
+                        ? 'Supervisor / Manager Approval Required'
+                        : 'Command result unknown',
+                    message: pendingVoid
+                        ? 'The exact pending void still needs approval. '
+                              'Its command ID will be reused.'
+                        : 'POS Core could not confirm whether the last action '
+                              'completed. Retry the same command to safely resolve it.',
                     action: FilledButton.icon(
                       style: _primaryActionStyle,
                       onPressed: state.canRetryPendingCommand
-                          ? _retryPendingCommand
+                          ? pendingVoid
+                                ? () => _approvePendingVoid(
+                                    state.pendingCommand!
+                                        as VoidTransactionCommand,
+                                  )
+                                : _retryPendingCommand
                           : null,
                       icon: const Icon(Icons.replay),
-                      label: const Text('Retry Command'),
+                      label: Text(
+                        pendingVoid ? 'Request Approval' : 'Retry Command',
+                      ),
                     ),
                     showProgress: state.isBusy,
                   );

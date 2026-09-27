@@ -2,13 +2,14 @@
 
 set -euo pipefail
 
-if [[ $# -ne 2 ]]; then
-  printf 'usage: build-rpm.sh REPOSITORY-ROOT OUTPUT-DIRECTORY\n' >&2
+if [[ $# -ne 3 ]]; then
+  printf 'usage: build-rpm.sh REPOSITORY-ROOT OUTPUT-DIRECTORY RACKET-COLLECTIONS\n' >&2
   exit 2
 fi
 
 repository_root="$1"
 output_directory="$2"
+racket_collections="$3"
 package_name='grocery-pos-core'
 package_version='0.0.0'
 work_root="$(mktemp -d)"
@@ -20,6 +21,7 @@ source "$repository_root/packaging/fedora/rpm-build-common.sh"
 source_tree="$work_root/$package_name-$package_version"
 rpm_topdir="$work_root/rpmbuild"
 mkdir -p "$source_tree/packaging/fedora" \
+  "$source_tree/vendor/racket/collects" \
   "$rpm_topdir/BUILD" \
   "$rpm_topdir/BUILDROOT" \
   "$rpm_topdir/RPMS" \
@@ -51,6 +53,11 @@ copy_racket_tree \
   "$repository_root/pos-backend-racket/scripts" \
   "$source_tree/scripts"
 cp -a "$repository_root/packaging/fedora/." "$source_tree/packaging/fedora/"
+cp -a "$racket_collections/." "$source_tree/vendor/racket/collects/"
+chmod -R u+rwX "$source_tree/vendor/racket/collects"
+install -D -m 0644 \
+  "$repository_root/packaging/fedora/racket-crypto-sources.json" \
+  "$source_tree/vendor/racket/crypto-sources.json"
 
 tar --sort=name \
   --mtime='@1' \

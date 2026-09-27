@@ -31,7 +31,7 @@ test-flutter:
     cd flutter/apps/pos_terminal && flutter test
 
 test-pos-integration:
-    cd flutter/apps/pos_terminal && flutter test --concurrency=1 integration/real_pos_core_test.dart
+    cd flutter/apps/pos_terminal && flutter test --concurrency=1 --timeout=2m integration/real_pos_core_test.dart
 
 analyze-flutter:
     cd flutter/apps/pos_terminal && flutter analyze
@@ -75,11 +75,25 @@ soak-m6 ITERATIONS="1000":
 
 # Optional extended real-process crash campaign; Tier A runs three iterations.
 crash-m6 ITERATIONS="100":
-    cd flutter/apps/pos_terminal && M6_CRASH_ITERATIONS={{quote(ITERATIONS)}} flutter test --concurrency=1 integration/real_pos_core_test.dart --plain-name "repeated accepted commands survive abrupt POS Core process death"
+    cd flutter/apps/pos_terminal && M6_CRASH_ITERATIONS={{quote(ITERATIONS)}} flutter test --concurrency=1 --timeout=2m integration/real_pos_core_test.dart --plain-name "repeated accepted commands survive abrupt POS Core process death"
 
 # Read-only qualification observations for an already booted reference host.
 qualify-m6-kinoite:
     packaging/acceptance/qualify-kinoite.sh
+
+# Deterministic M7 security acceptance; external appliance/hardware evidence
+# remains separately recorded and cannot be inferred from this runner.
+accept-m7:
+    bash scripts/acceptance/accept-m7.sh
+
+acceptance-report-m7:
+    racket scripts/acceptance/m7-report.rkt .local/acceptance/m7/run-summary.json docs/acceptance/m7/acceptance-results.json
+
+stress-m7 EVENTS="10000":
+    racket scripts/acceptance/m7-security-stress.rkt {{quote(EVENTS)}}
+
+qualify-m7-kinoite:
+    bash packaging/acceptance/qualify-m7-kinoite.sh
 
 catalog-validate FILE:
     racket pos-backend-racket/scripts/catalog.rkt validate {{quote(FILE)}}

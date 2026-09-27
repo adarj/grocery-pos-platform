@@ -4,11 +4,20 @@
          file/sha1
          racket/random
          "runtime-config.rkt"
+         "application/authentication-service.rkt"
+         "application/operator-service.rkt"
          "application/register-operations-service.rkt"
+         "application/security-audit-service.rkt"
          "application/transaction-service.rkt"
+         "application/transaction-void-approval-service.rkt"
+         "domain/security-audit-event.rkt"
          "persistence/pos-database-migrations.rkt"
+         "persistence/security-audit-store.rkt"
          "persistence/sqlite-catalog.rkt"
          "persistence/sqlite-connection.rkt"
+         "persistence/transaction-void-approval-store.rkt"
+         "persistence/transaction-command-unit-of-work.rkt"
+         "security/transaction-void-approval.rkt"
          "support/readiness.rkt")
 
 (provide runtime-sqlite-max-connections
@@ -19,6 +28,9 @@
          pos-runtime?
          pos-runtime-transaction-service
          pos-runtime-register-operations-service
+         pos-runtime-operator-service
+         pos-runtime-authentication-service
+         pos-runtime-transaction-void-approval-service
          pos-runtime-sqlite-db-path
          pos-runtime-stopped?
          pos-runtime-readiness)
@@ -33,6 +45,9 @@
 (struct pos-runtime
   (transaction-service
    register-operations-service
+   operator-service
+   authentication-service
+   transaction-void-approval-service
    sqlite-db-path
    custodian
    stopped-box
@@ -41,8 +56,15 @@
 (define (system-current-epoch-ms)
   (inexact->exact (floor (current-inexact-milliseconds))))
 
+(define (system-current-monotonic-ms)
+  (inexact->exact (floor (current-inexact-monotonic-milliseconds))))
+
 (define (secure-shift-id)
   (string-append "shift_" (bytes->hex-string (crypto-random-bytes 16))))
+
+(define (secure-audit-runtime-id)
+  (string-append "audit_runtime_"
+                 (bytes->hex-string (crypto-random-bytes 16))))
 
 (define (pos-runtime-stopped? runtime)
   (unless (pos-runtime? runtime)
@@ -107,6 +129,8 @@
          config
          #:catalog-lookup [catalog-lookup #f]
          #:connect [connect open-pos-sqlite-connection]
+         #:current-monotonic-ms
+         [current-monotonic-ms system-current-monotonic-ms]
          #:current-epoch-ms [current-epoch-ms system-current-epoch-ms]
          #:generate-shift-id [generate-shift-id secure-shift-id])
   (define who 'start-pos-runtime)
@@ -116,8 +140,10 @@
     (raise-argument-error who "(or/c #f procedure?)" catalog-lookup))
   (unless (procedure? connect)
     (raise-argument-error who "procedure?" connect))
-  (for ([value (in-list (list current-epoch-ms generate-shift-id))]
-        [name (in-list '(current-epoch-ms generate-shift-id))])
+  (for ([value (in-list
+                (list current-monotonic-ms current-epoch-ms generate-shift-id))]
+        [name (in-list
+               '(current-monotonic-ms current-epoch-ms generate-shift-id))])
     (unless (and (procedure? value) (procedure-arity-includes? value 0))
       (raise-arguments-error
        who "expected a zero-argument procedure" (symbol->string name) value)))
@@ -131,6 +157,26 @@
    database-path
    #:connect connect)
 
+  (define audit-runtime-id (secure-audit-runtime-id))
+  (define audit-source
+    (make-security-audit-source 'pos_core audit-runtime-id current-epoch-ms))
+  ;; This temporary connection is closed before the request pool exists. A
+  ;; startup failure cannot produce an unaudited serving process, and request
+  ;; connections retain their original read/write-only fail-closed boundary.
+  (define audit-start-connection #f)
+  (dynamic-wind
+    void
+    (lambda ()
+      (set! audit-start-connection (connect database-path 'read/write))
+      (append-security-audit-event!
+       audit-start-connection (runtime-started-event)
+       #:source-kind 'pos_core
+       #:source-instance-id audit-runtime-id
+       #:occurred-at-epoch-ms (current-epoch-ms)))
+    (lambda ()
+      (when (and audit-start-connection (db:connected? audit-start-connection))
+        (db:disconnect audit-start-connection))))
+
   (define runtime-custodian (make-custodian))
   (define stopped-box (box #f))
   (with-handlers
@@ -139,7 +185,9 @@
           (set-box! stopped-box #t)
           (custodian-shutdown-all runtime-custodian)
           (raise value))])
-    (define-values (transaction-service register-service)
+    (define-values
+      (transaction-service register-service operator-service auth-service
+                           approval-service)
       (parameterize ([current-custodian runtime-custodian])
         (define pool
           (db:connection-pool
@@ -156,17 +204,62 @@
               (lambda (barcode)
                 (lookup-catalog-item-by-barcode
                  virtual-connection barcode))))
+        (define operator-service
+          (make-operator-service virtual-connection))
+        (define auth-service
+          (make-authentication-service
+           virtual-connection
+           #:current-monotonic-ms current-monotonic-ms
+           #:current-epoch-ms current-epoch-ms
+           #:audit-source audit-source))
+        (define approval-authority
+          (make-transaction-void-approval-authority
+           #:current-monotonic-ms current-monotonic-ms
+           #:current-epoch-ms current-epoch-ms))
+        (define transaction-service
+          (make-transaction-service
+           virtual-connection
+           #:catalog-lookup effective-catalog-lookup
+           #:audit-source audit-source
+           #:commit-command!
+           (lambda (writer-connection plan)
+             (commit-transaction-command-outcome!
+              writer-connection plan
+              #:audit-append!
+              (lambda (audit-connection event)
+                (security-audit-append-required!/in-transaction!
+                 audit-source audit-connection event))))
+           #:approval-consumer
+           (lambda (connection capability requester requester-revision command)
+             (consume-transaction-void-approval!/in-transaction!
+              connection
+              capability
+              (transaction-void-approval-authority-issuer-instance-id
+               approval-authority)
+              requester
+              requester-revision
+              command
+              (current-monotonic-ms)))
+           #:current-epoch-ms current-epoch-ms))
+        (define approval-service
+          (make-transaction-void-approval-service
+           auth-service transaction-service approval-authority
+           #:audit-source audit-source))
         (values
-         (make-transaction-service
-          virtual-connection
-          #:catalog-lookup effective-catalog-lookup
-          #:current-epoch-ms current-epoch-ms)
+         transaction-service
          (make-register-operations-service
           virtual-connection
           #:current-epoch-ms current-epoch-ms
-          #:generate-shift-id generate-shift-id))))
+          #:generate-shift-id generate-shift-id
+          #:audit-source audit-source)
+         operator-service
+         auth-service
+         approval-service)))
     (pos-runtime transaction-service
                  register-service
+                 operator-service
+                 auth-service
+                 approval-service
                  database-path
                  runtime-custodian
                  stopped-box

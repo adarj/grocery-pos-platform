@@ -26,7 +26,7 @@ service.
 The workflow is:
 
 ```text
-validate selected backup read-only
+validate selected current-v12 backup read-only (including the security audit chain)
   -> copy to /var/lib/grocery-pos/.grocery-pos-restore.<random>.partial
   -> synchronize and validate staged copy read-only
   -> systemctl stop grocery-pos-core
@@ -41,8 +41,22 @@ validate selected backup read-only
 
 Both validations require the Checkpoint 2 contract: a regular nonempty SQLite
 file, healthy full integrity check, zero foreign-key violations, exact current
-v1-v6 migration history, and valid Grocery POS schema/application invariants.
+v1-v12 migration history, and valid Grocery POS schema/application invariants.
 Validation never migrates, repairs, or converts the backup to WAL.
+
+The selected backup is the explicit security recovery point too: operator
+credentials, revisions, roles, active states, throttle rows, command evidence,
+and audit history are restored exactly from it. If revision 3 was backed up
+before a later PIN reset to revision 4, deliberately restoring that backup
+restores revision 3 and its older PIN. No newer security rows are merged from
+the displaced database. The restart invalidates old bearer sessions and
+process-bound void grants; operators must sign in against the restored
+credential state. Success reports `security_state_restored_from_backup` and
+`reauthentication_required` as true. Inspect `sudo grocery-pos-auth status`;
+use explicit root PIN reset or operator enrollment if needed. Protect backups
+as sensitive credential-verifier stores, and create a new validated backup
+after a schema upgrade. Older-schema backups are not silently migrated during
+restore; rpm-ostree rollback is not a database downgrade.
 
 Before the service stops, a failure removes ordinary staging where safe and
 does not touch the live database. If stop fails or the unit remains active,

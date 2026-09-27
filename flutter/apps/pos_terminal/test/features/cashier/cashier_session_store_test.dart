@@ -6,6 +6,7 @@ import 'package:pos_terminal/features/cashier/cashier_session_store.dart';
 
 PersistedCashierSession roundTrip(TransactionCommand command) {
   final session = PersistedCashierSession(
+    operatorId: 'operator-test',
     activeTransactionId: command.transactionId,
     pendingCommand: command,
   );
@@ -115,18 +116,35 @@ void main() {
     final restored = PersistedCashierSession.fromJson(
       jsonDecode(
         jsonEncode(
-          PersistedCashierSession(activeTransactionId: 'txn-known').toJson(),
+          PersistedCashierSession(operatorId: 'operator-test', activeTransactionId: 'txn-known').toJson(),
         ),
       ),
     );
 
     expect(restored.activeTransactionId, 'txn-known');
+    expect(restored.operatorId, 'operator-test');
     expect(restored.pendingCommand, isNull);
+  });
+
+  test('schema v1 recovery remains legacy unbound without invented owner', () {
+    final restored = PersistedCashierSession.fromJson({
+      'schema_version': 1,
+      'active_transaction_id': 'txn-legacy',
+      'pending_command': null,
+    });
+
+    expect(restored.operatorId, isNull);
+    expect(restored.isLegacyUnbound, isTrue);
+    expect(
+      restored.toJson,
+      throwsA(isA<CashierSessionStoreFailure>()),
+    );
   });
 
   test('recovery record persists no transaction truth or result metadata', () {
     final encoded = jsonEncode(
       PersistedCashierSession(
+        operatorId: 'operator-test',
         activeTransactionId: 'txn-1',
         pendingCommand: ScanBarcodeCommand(
           commandId: 'cmd-scan',
@@ -147,6 +165,9 @@ void main() {
       'status',
       'outcome_kind',
       'outcome_code',
+      'access_token',
+      'permissions',
+      'role',
     ]) {
       expect(encoded, isNot(contains(forbidden)));
     }

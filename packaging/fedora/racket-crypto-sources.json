@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "collections": [
+    {
+      "name": "crypto-lib",
+      "collection": "crypto",
+      "version": "2.0",
+      "repository": "https://github.com/rmculpepper/crypto",
+      "revision": "713eaaf45a5e6c55bd3e97a32b2a90f61ef13c4f",
+      "sha256": "sha256-6Y4WZ494vNxY3/WOq7Dmi7SpfYqMsqVvG8SyqXUTU7g=",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "asn1-lib",
+      "collection": "asn1",
+      "version": "1.3",
+      "repository": "https://github.com/rmculpepper/asn1",
+      "revision": "3cd32b61a68b40ec03bed98cd0c4d4d4f72cacf2",
+      "sha256": "sha256-aNYtnW/usIbqebWXIsWZKylfo83oXUGGJCbLhoaXoJ8=",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "hash-view-lib",
+      "collection": "hash-view",
+      "version": "1.0",
+      "repository": "https://github.com/rmculpepper/racket-hash-view",
+      "revision": "7a9b31d1715c40c205a065d666fcc74d840a8a5e",
+      "sha256": "sha256-pKp/sVd/xNOIbZsRwg1yRi5Xr+7V5DJqr3QxsM6MLhI=",
+      "license": "Apache-2.0 OR MIT"
+    },
+    {
+      "name": "base64-lib",
+      "collection": "base64",
+      "version": "1.1",
+      "repository": "https://github.com/rmculpepper/racket-base64",
+      "revision": "f783f42743b158173c5775b90b5cadcc41f700b3",
+      "sha256": "sha256-SKoi5GD3bHL0ktxEtC7wpzu6epjIEnc7zMtJ2rGe5zU=",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "binaryio-lib",
+      "collection": "binaryio",
+      "version": "1.3",
+      "repository": "https://github.com/rmculpepper/binaryio",
+      "revision": "e949401e3acd7aa51ffe044cb75288128ce64c61",
+      "sha256": "sha256-wxEqfbAcnZNhB2YXiMTadpilHWcaGBfXtDjYYQ/VtbQ=",
+      "license": "Apache-2.0 OR MIT"
+    },
+    {
+      "name": "gmp-lib",
+      "collection": "gmp",
+      "version": "1.2",
+      "repository": "https://github.com/rmculpepper/racket-gmp",
+      "revision": "768c33615a1c2414ccaf1a1e4ea1064bd5dd46af",
+      "sha256": "sha256-Z09YdkD6nzwF51CjF7405cf4ZGR/OGAnYJrVvbXidEU=",
+      "license": "LGPL (upstream package text does not specify a version)"
+    },
+    {
+      "name": "scramble-lib",
+      "collection": "scramble",
+      "version": "0.6",
+      "repository": "https://github.com/rmculpepper/racket-scramble",
+      "revision": "a2d1dfd8d249c63059bed2958e71dbb6e9098319",
+      "sha256": "sha256-GbniMHYktaaXLbc/CHNRxQvzisc2u5NAsUH2E4ZLYeY=",
+      "license": "Apache-2.0"
+    }
+  ]
+}

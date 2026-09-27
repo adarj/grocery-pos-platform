@@ -1,17 +1,23 @@
 #lang racket
 
 (require (prefix-in db: db)
+         file/sha1
+         racket/random
+         "../domain/security-audit-event.rkt"
          "../domain/money.rkt"
          "../domain/register-operations.rkt"
          "../domain/shift-cash-accountability.rkt"
          "../domain/transaction-operational-context.rkt"
+         "../security/authorization-policy.rkt"
          "operational-configuration-snapshot-codec.rkt"
+         "security-audit-store.rkt"
          "sqlite-shift-cash-accountability.rkt")
 
 (provide (struct-out operational-configuration-activation-succeeded)
          (struct-out operational-configuration-activation-rejected)
          activate-operational-configuration!
          load-register-context
+         load-shift-by-id
          load-active-cashiers
          open-register-shift!
          close-register-shift!
@@ -93,11 +99,31 @@ SQL
      (error 'load-register-context
             "operational state contains multiple open shifts")]))
 
-(define (activate-operational-configuration! connection snapshot)
+(define (activate-operational-configuration! connection snapshot
+                                             #:audit-append! [audit-append! #f])
   (define who 'activate-operational-configuration!)
   (check-connection who connection)
   (unless (operational-configuration-snapshot? snapshot)
     (raise-argument-error who "operational-configuration-snapshot?" snapshot))
+  ;; Provisioning and the root configuration CLI both create cashier/operator
+  ;; stubs through this boundary. Give each activation its own non-secret root
+  ;; source identity; callers may inject the append primitive for failure tests.
+  (define source-instance-id
+    (string-append "audit_root_cli_"
+                   (bytes->hex-string (crypto-random-bytes 16))))
+  (define effective-audit-append!
+    (or audit-append!
+        (lambda (writer-connection event)
+          (append-security-audit-event!/in-transaction!
+           writer-connection event
+           #:source-kind 'root_cli
+           #:source-instance-id source-instance-id
+           #:occurred-at-epoch-ms
+           (inexact->exact (floor (current-inexact-milliseconds)))))))
+  (unless (and (procedure? effective-audit-append!)
+               (procedure-arity-includes? effective-audit-append! 2))
+    (raise-argument-error who "two-argument audit append procedure?"
+                          effective-audit-append!))
 
   (db:call-with-transaction
    connection
@@ -124,6 +150,36 @@ SQL
         (for ([cashier
                (in-list
                 (operational-configuration-snapshot-cashiers snapshot))])
+          ;; Cashier snapshots are operational configuration, not the
+          ;; security-principal authority. Create a same-ID stub only when the
+          ;; operator is genuinely new; conflict handling deliberately leaves
+          ;; an existing role, credential, identity activation state, and
+          ;; display name untouched.
+          (db:query-exec
+           connection
+           #<<SQL
+INSERT INTO operators (operator_id, display_name, active)
+VALUES (?, ?, ?)
+ON CONFLICT(operator_id) DO NOTHING
+SQL
+           (operational-configuration-cashier-cashier-id cashier)
+           (operational-configuration-cashier-display-name cashier)
+           (if (operational-configuration-cashier-active? cashier) 1 0))
+          (define created? (= (db:query-value connection "SELECT changes()") 1))
+          (db:query-exec
+           connection
+           #<<SQL
+INSERT INTO operator_roles (operator_id, role)
+VALUES (?, 'cashier')
+ON CONFLICT(operator_id) DO NOTHING
+SQL
+           (operational-configuration-cashier-cashier-id cashier))
+          (when created?
+            (effective-audit-append!
+             connection
+             (operator-created-event
+              (operational-configuration-cashier-cashier-id cashier)
+              'cashier)))
           (db:query-exec
            connection
            #<<SQL
@@ -185,8 +241,31 @@ SQL
                 ))])
     (cashier-identity (vector-ref row 0) (vector-ref row 1))))
 
+(define (authoritative-shift-permission?
+         connection operator-id credential-revision permission)
+  (define row
+    (db:query-maybe-row
+     connection
+     #<<SQL
+SELECT assignment.role, credential.credential_revision
+FROM operators AS operator
+JOIN operator_roles AS assignment
+  ON assignment.operator_id = operator.operator_id
+JOIN operator_pin_credentials AS credential
+  ON credential.operator_id = operator.operator_id
+WHERE operator.operator_id = ? AND operator.active = 1
+SQL
+     operator-id))
+  (and row
+       (exact-integer? credential-revision)
+       (= (vector-ref row 1) credential-revision)
+       (operator-role-authorized?
+        (string->symbol (vector-ref row 0)) permission)))
+
 (define (open-register-shift!
-         connection cashier-id opening-cash current-epoch-ms generate-shift-id)
+         connection cashier-id opening-cash current-epoch-ms generate-shift-id
+         #:actor-credential-revision actor-credential-revision
+         #:audit-append! audit-append!)
   (define who 'open-register-shift!)
   (check-connection who connection)
   (unless (and (string? cashier-id) (positive? (string-length cashier-id)))
@@ -195,12 +274,21 @@ SQL
     (raise-argument-error who "money?" opening-cash))
   (check-procedure who current-epoch-ms "current-epoch-ms")
   (check-procedure who generate-shift-id "generate-shift-id")
+  (unless (and (procedure? audit-append!)
+               (procedure-arity-includes? audit-append! 2))
+    (raise-argument-error who "two-argument audit append procedure?"
+                          audit-append!))
 
   (db:call-with-transaction
    connection
    (lambda ()
+     (define (authorized-open?)
+       (authoritative-shift-permission?
+        connection cashier-id actor-credential-revision 'shift.open.own))
      (define context (load-register-context connection))
      (cond
+       [(not (authorized-open?))
+        (register-shift-open-rejected 'authorization-denied)]
        [(not (register-context-configured? context))
         (register-shift-open-rejected 'register-not-configured)]
        [(register-context-active-shift context)
@@ -257,6 +345,7 @@ SQL
             opened-at)
            (record-opening-float/in-transaction!
             connection shift-id opening-cash opened-at)
+           (audit-append! connection (shift-opened-event cashier-id shift-id))
            (define summary (load-shift-cash-summary connection shift-id))
            (unless (shift-cash-summary-found? summary)
              (error who "new shift opening cash could not be recovered"))
@@ -266,14 +355,23 @@ SQL
    #:option 'immediate))
 
 (define (close-register-shift!
-         connection shift-id counted-cash current-epoch-ms)
+         connection shift-id counted-cash current-epoch-ms
+         actor-operator-id actor-credential-revision
+         #:audit-append! audit-append!)
   (define who 'close-register-shift!)
   (check-connection who connection)
   (unless (and (string? shift-id) (positive? (string-length shift-id)))
     (raise-argument-error who "non-empty-string?" shift-id))
   (unless (money? counted-cash)
     (raise-argument-error who "money?" counted-cash))
+  (unless (and (string? actor-operator-id)
+               (positive? (string-length actor-operator-id)))
+    (raise-argument-error who "non-empty-string?" actor-operator-id))
   (check-procedure who current-epoch-ms "current-epoch-ms")
+  (unless (and (procedure? audit-append!)
+               (procedure-arity-includes? audit-append! 2))
+    (raise-argument-error who "two-argument audit append procedure?"
+                          audit-append!))
 
   (db:call-with-transaction
    connection
@@ -281,6 +379,13 @@ SQL
      (define shift (load-shift-by-id connection shift-id))
      (cond
        [(not shift) (register-shift-close-rejected 'shift-not-found)]
+       [(not (authoritative-shift-permission?
+              connection actor-operator-id actor-credential-revision
+              (if (operator-owns-resource?
+                   actor-operator-id (register-shift-cashier-id shift))
+                  'shift.close.own
+                  'shift.close.any)))
+        (register-shift-close-rejected 'authorization-denied)]
        [(register-shift-closed-at-epoch-ms shift)
         (define summary (load-shift-cash-summary connection shift-id))
         (cond
@@ -321,6 +426,12 @@ SQL
          shift-id)
         (unless (= (db:query-value connection "SELECT changes()") 1)
           (error who "shift state changed during close"))
+        (audit-append!
+         connection
+         (shift-closed-event
+          actor-operator-id (register-shift-cashier-id shift) shift-id
+          (not (operator-owns-resource?
+                actor-operator-id (register-shift-cashier-id shift)))))
         (define closed-summary-result
           (load-shift-cash-summary connection shift-id))
         (unless (shift-cash-summary-found? closed-summary-result)

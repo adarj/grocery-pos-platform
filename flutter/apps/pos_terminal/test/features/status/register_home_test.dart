@@ -4,6 +4,7 @@ import 'dart:collection';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pos_terminal/core/pos_core/models/canonical_receipt.dart';
+import 'package:pos_terminal/core/pos_core/models/authentication.dart';
 import 'package:pos_terminal/core/pos_core/models/command_result.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_failure.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_health.dart';
@@ -45,10 +46,11 @@ const withShift = RegisterContext(
 const openCashSummary = ShiftCashSummary(
   shiftId: 'shift-one',
   status: ShiftCashStatus.open,
-  openingCashMinorUnits: 10000,
-  completedCashSaleCount: 0,
-  cashSalesMinorUnits: 0,
-  expectedCashMinorUnits: 10000,
+  view: ShiftCashSummaryView.limited,
+  openingCashMinorUnits: null,
+  completedCashSaleCount: null,
+  cashSalesMinorUnits: null,
+  expectedCashMinorUnits: null,
   countedCashMinorUnits: null,
   overShortMinorUnits: null,
 );
@@ -67,11 +69,7 @@ final class FakeClient implements PosCoreClient {
   final Queue<RegisterContext> contexts = Queue();
   final Queue<ShiftCashSummary> summaries = Queue();
   List<CashierIdentity> cashiers = const [cashier];
-  Future<ShiftOperationResult> Function(
-    String cashierId,
-    int openingCashMinorUnits,
-  )?
-  onOpen;
+  Future<ShiftOperationResult> Function(int openingCashMinorUnits)? onOpen;
   Future<ShiftOperationResult> Function(
     String shiftId,
     int countedCashMinorUnits,
@@ -79,7 +77,6 @@ final class FakeClient implements PosCoreClient {
   onClose;
   int openCalls = 0;
   int closeCalls = 0;
-  final List<String> openedCashierIds = [];
   final List<int> openingCashValues = [];
   final List<int> countedCashValues = [];
 
@@ -102,14 +99,10 @@ final class FakeClient implements PosCoreClient {
   Future<List<CashierIdentity>> fetchActiveCashiers() async => cashiers;
 
   @override
-  Future<ShiftOperationResult> openShift(
-    String cashierId,
-    int openingCashMinorUnits,
-  ) {
+  Future<ShiftOperationResult> openShift(int openingCashMinorUnits) {
     openCalls += 1;
-    openedCashierIds.add(cashierId);
     openingCashValues.add(openingCashMinorUnits);
-    return onOpen!(cashierId, openingCashMinorUnits);
+    return onOpen!(openingCashMinorUnits);
   }
 
   @override
@@ -156,10 +149,25 @@ final class FixedIds implements CashierIdGenerator {
 Widget app(FakeClient client) => MaterialApp(
   home: PosCoreStatusScreen(
     client: client,
+    session: const AuthenticatedOperatorSession(
+      operatorId: 'cashier-one',
+      displayName: 'Alice',
+      role: 'cashier',
+      permissions: {
+        OperatorPermission.registerRead,
+        OperatorPermission.transactionOperateOwn,
+        OperatorPermission.shiftOpenOwn,
+        OperatorPermission.shiftCloseOwn,
+        OperatorPermission.shiftCashSummaryReadOwn,
+      },
+      idleTimeoutSeconds: 300,
+      absoluteExpiresAtEpochMs: 9999999999999,
+    ),
     cashierController: CashierSessionController(
       client: client,
       idGenerator: FixedIds(),
       sessionStore: MemoryStore(),
+      currentOperatorId: () => 'cashier-one',
     ),
   ),
 );
@@ -187,25 +195,25 @@ void main() {
   );
 
   testWidgets(
-    'Open Shift selects identity once and disables duplicate submission',
+    'Open Shift uses authenticated identity and disables duplicate submission',
     (tester) async {
       final completer = Completer<ShiftOperationResult>();
       final client = FakeClient()
         ..contexts.addAll([noShift, withShift])
         ..summaries.add(openCashSummary)
-        ..onOpen = (_, _) => completer.future;
+        ..onOpen = (_) => completer.future;
       await tester.pumpWidget(app(client));
       await tester.pumpAndSettle();
-      expect(find.text('Select Cashier'), findsOneWidget);
-      expect(find.text('Alice'), findsOneWidget);
+      expect(find.byKey(const Key('open-shift-button')), findsOneWidget);
+      expect(find.textContaining('Operator: Alice'), findsOneWidget);
+      expect(find.byKey(const Key('cashier-selection')), findsNothing);
       await tester.enterText(
         find.byKey(const Key('opening-cash-input')),
         '100.00',
       );
-      await tester.tap(find.text('Open Shift'));
+      await tester.tap(find.byKey(const Key('open-shift-button')));
       await tester.pump();
       expect(client.openCalls, 1);
-      expect(client.openedCashierIds, ['cashier-one']);
       expect(client.openingCashValues, [10000]);
       await tester.tap(find.text('Opening...'));
       await tester.pump();
@@ -220,7 +228,7 @@ void main() {
       expect(find.text('Shift Open'), findsOneWidget);
       expect(find.textContaining('Cashier: Alice'), findsOneWidget);
       expect(find.textContaining('1970-01-01 00:00:00 UTC'), findsOneWidget);
-      expect(find.textContaining('Opening Cash: \$100.00'), findsOneWidget);
+      expect(find.textContaining('Opening Cash:'), findsNothing);
       expect(find.text('Open Register'), findsOneWidget);
     },
   );
@@ -230,14 +238,14 @@ void main() {
     (tester) async {
       final client = FakeClient()
         ..contexts.add(noShift)
-        ..onOpen = (_, _) async => throw const PosCoreTransportFailure('lost');
+        ..onOpen = (_) async => throw const PosCoreTransportFailure('lost');
       await tester.pumpWidget(app(client));
       await tester.pumpAndSettle();
       await tester.enterText(
         find.byKey(const Key('opening-cash-input')),
         '0.00',
       );
-      await tester.tap(find.text('Open Shift'));
+      await tester.tap(find.byKey(const Key('open-shift-button')));
       await tester.pumpAndSettle();
       expect(
         find.text(
@@ -335,8 +343,7 @@ void main() {
     expect(find.text('\$22.23'), findsNothing);
     await tester.tap(find.text('Done'));
     await tester.pumpAndSettle();
-    expect(find.text('Select Cashier'), findsOneWidget);
-    expect(find.text('Open Shift'), findsOneWidget);
+    expect(find.byKey(const Key('open-shift-button')), findsOneWidget);
     expect(find.text('Open Register'), findsNothing);
     expect(find.text('Lookup Completed Sale'), findsOneWidget);
   });
@@ -351,7 +358,7 @@ void main() {
       find.byKey(const Key('opening-cash-input')),
       '1.999',
     );
-    await tester.tap(find.text('Open Shift'));
+    await tester.tap(find.byKey(const Key('open-shift-button')));
     await tester.pump();
     expect(client.openCalls, 0);
     expect(find.text('Enter a valid opening cash amount.'), findsOneWidget);

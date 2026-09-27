@@ -39,6 +39,7 @@ void main() {
 
     await store.save(
       PersistedCashierSession(
+        operatorId: 'operator-test',
         activeTransactionId: 'txn-1',
         pendingCommand: command,
       ),
@@ -58,6 +59,7 @@ void main() {
     () async {
       await store.save(
         PersistedCashierSession(
+          operatorId: 'operator-test',
           activeTransactionId: 'txn-1',
           pendingCommand: StartTransactionCommand(
             commandId: 'cmd-start',
@@ -67,7 +69,7 @@ void main() {
         ),
       );
 
-      await store.save(PersistedCashierSession(activeTransactionId: 'txn-1'));
+      await store.save(PersistedCashierSession(operatorId: 'operator-test', activeTransactionId: 'txn-1'));
 
       final raw = await File(filePath).readAsString();
       final decoded = jsonDecode(raw) as Map<String, Object?>;
@@ -89,6 +91,7 @@ void main() {
     );
     await store.save(
       PersistedCashierSession(
+        operatorId: 'operator-test',
         activeTransactionId: 'txn-1',
         pendingCommand: removal,
       ),
@@ -108,6 +111,7 @@ void main() {
     );
     await store.save(
       PersistedCashierSession(
+        operatorId: 'operator-test',
         activeTransactionId: 'txn-1',
         pendingCommand: voidCommand,
       ),
@@ -121,7 +125,7 @@ void main() {
   });
 
   test('clear removes the live record and is idempotent', () async {
-    await store.save(PersistedCashierSession(activeTransactionId: 'txn-1'));
+    await store.save(PersistedCashierSession(operatorId: 'operator-test', activeTransactionId: 'txn-1'));
 
     await store.clear();
     await store.clear();
@@ -218,6 +222,7 @@ void main() {
     );
     await firstProcessStore.save(
       PersistedCashierSession(
+        operatorId: 'operator-test',
         activeTransactionId: pending.transactionId,
         pendingCommand: pending,
       ),

@@ -53,6 +53,8 @@
    'operation_id (appliance-restore-success-operation-id restored)
    'restored_schema_version
    (appliance-restore-success-restored-schema-version restored)
+   'security_state_restored_from_backup #t
+   'reauthentication_required #t
    'recovery_evidence_directory
    (path->string (appliance-restore-success-recovery-directory restored))
    'service_status

@@ -88,6 +88,49 @@ a line index to the authoritative line list the caller observed. Structural
 index errors return `400`, while an exact nonnegative index that is not present
 is a durable domain rejection.
 
+### Scoped approval for a fresh whole-sale void
+
+Before a **fresh** `void_transaction`, the authenticated owning operator calls
+`POST /approvals/transaction-void` with `Content-Type: application/json` and
+exactly these fields:
+
+```json
+{
+  "command": {
+    "schema_version": 1,
+    "command_id": "cmd-void-001",
+    "transaction_id": "txn-001",
+    "expected_version": 3,
+    "command_type": "void_transaction",
+    "payload": {}
+  },
+  "approver_operator_id": "supervisor-01",
+  "approver_pin": "80421637"
+}
+```
+
+The approver must be a different active supervisor or manager with an enrolled
+PIN. No approver login or register-session switch occurs. The response uses
+`Cache-Control: no-store` and contains `ok: true` plus `approval` with
+`approval_token`, `expires_at_epoch_ms`, `approver_operator_id`, and
+`approver_display_name`. The opaque token expires after 90 monotonic seconds,
+is bound to the exact requester and command, and is unusable after POS Core
+restart or replacement by a new grant for the same command.
+
+The client first persists the exact command for recovery, then POSTs it to
+`/transaction-commands` with its normal bearer and one separate
+`X-Grocery-POS-Approval: gpos_a1_...` header. The approval token is never a
+Schema v1 command field. Supplying the header on a non-void command returns
+`400 unexpected_approval` without consuming a grant. A fresh void lacking a
+valid grant returns `403 approval_required` with
+`retry_same_command_id: true` and creates no durable command effect. The
+client keeps the exact pending command, discards the old token, and seeks a new
+approval for that same ID. An exact already-durable void retry by its original
+actor requires no new approval. Approval credential/role failures use generic
+`403 approval_not_granted`; malformed requests return 400, stale targets 409,
+and genuine security-state unavailability 503. See
+[Supervisor / Manager Approval](../security/scoped-manager-approval.md).
+
 ## Durable command result
 
 A resolved command returns only its durable original receipt metadata:
@@ -202,6 +245,7 @@ A successful response is:
   "ok": true,
   "transaction": {
     "transaction_id": "txn_001",
+    "owned_by_authenticated_operator": true,
     "version": 2,
     "status": "open",
     "line_items": [
@@ -228,6 +272,10 @@ All currency values are exact JSON integer minor units.
 Tender sufficiency and change use that tax-inclusive total. Tender and change
 fields remain present as JSON null before tender. The response contains no
 command receipts, event history, database row IDs, or journal metadata.
+`owned_by_authenticated_operator` is a server-derived exact relationship to
+the authenticated operator. It is used to bind legacy local recovery after a
+terminal command releases the active shift slot; it is not client authority,
+and every later mutation is independently authorized by Racket.
 
 An accepted line removal is visible only through a subsequent authoritative
 query. It removes exactly one current line and its stored price/tax
@@ -348,23 +396,27 @@ null or contains its snapshotted register/cashier identity,
 `opened_at_epoch_ms`, nullable `closed_at_epoch_ms`, and nullable
 `active_transaction_id`.
 
-`GET /cashiers` returns only current active cashier IDs/display names used for
-selection. These are attribution references, not authentication credentials.
+`GET /cashiers` returns only current active cashier IDs/display names to
+authorized supervisor and manager sessions. These are operational attribution
+references, not authentication credentials; ordinary shift opening does not
+use this directory to select another identity.
 
 `POST /shifts/open` requires exactly:
 
 ```json
 {
-  "cashier_id": "cashier-001",
   "opening_cash_minor_units": 10000
 }
 ```
 
-Opening cash is an exact nonnegative integer. POS Core supplies
-register/name/time/shift ID and atomically records the opening cash movement.
-A successful response contains both `shift` and authoritative `cash_summary`.
-Repeating the same-cashier open returns the existing shift and first opening
-amount; a different cashier conflicts. Stable errors
+Opening cash is an exact nonnegative integer. POS Core derives the cashier from
+the authenticated operator and configured same-ID active cashier, supplies
+register/name/time/shift ID, and atomically records the opening cash movement.
+A successful response contains both `shift` and an authoritative permission-
+scoped `cash_summary`: limited for an ordinary cashier's open shift, full for a
+read-any supervisor or manager. Repeating the same-cashier open resolves the
+existing shift without changing its opening amount; a different cashier
+conflicts. Stable errors
 include `register_not_configured`, `cashier_not_found`, `cashier_inactive`, and
 `shift_already_open`.
 
@@ -453,17 +505,21 @@ errors, corrupt journal contents, raw command JSON, or application persistence
 details.
 
 The server accepts only literal loopback addresses but is still an application
-trust boundary. Transaction HTTP API v1 does not add authentication,
-actor/session authorization, or remote-service security claims. The surrounding
-server now enforces a native 64 KiB request-body limit and exposes separate
+trust boundary. The surrounding server requires a current process-local bearer
+session and passes the server-derived principal to fixed authorization and
+durable ownership checks. Transaction Command Schema v1 still embeds no actor,
+role, session, or bearer identity. The
+server also enforces a native 64 KiB request-body limit and exposes separate
 `/ready` infrastructure state. ADR-0018 permits bounded connector-level SQLite
 busy retry, never whole-command retry. The transaction API still adds no
 payment behavior or external-effect exactly-once semantics. Flutter now has a
 typed client and the current start, scan, cash
 tender, pre-payment line removal/void, authoritative tax/change, completion,
 next-sale cashier slice, and exact completed-sale receipt lookup. Receipt
-printing, timestamps, broad sale search, paid reversal/refund, and manager
-authorization are not part of the current surface. Register/cashier selection
-is persistent attribution only; it is not PIN/password authentication. The current
+printing, timestamps, broad sale search, and paid reversal/refund are not part
+of the current surface. Shift identity is now server-derived from the
+authenticated operator, but the configured cashier snapshot remains durable
+business attribution. See [Authorization and Ownership](../security/authorization-and-ownership.md).
+The current
 single-category line-tax model and on-screen receipt are not claims of
 universal tax or fiscal compliance.

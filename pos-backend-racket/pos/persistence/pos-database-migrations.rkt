@@ -1,6 +1,7 @@
 #lang racket
 
-(require (prefix-in db: db))
+(require (prefix-in db: db)
+         "security-audit-store.rkt")
 
 (provide current-pos-database-schema-version
          read-pos-database-migration-history
@@ -17,6 +18,12 @@
 (define migration-4-name "create_tax_categories")
 (define migration-5-name "create_register_operations")
 (define migration-6-name "create_shift_cash_accountability")
+(define migration-7-name "create_operator_identity_credentials")
+(define migration-8-name "create_operator_login_throttle")
+(define migration-9-name "create_transaction_command_actor_attributions")
+(define migration-10-name "create_transaction_void_approvals")
+(define migration-11-name "create_security_audit_ledger")
+(define migration-12-name "bind_transaction_void_approvals_to_requester_credentials")
 (define stream-sequence-index-name
   "transaction_events_stream_sequence_unique")
 
@@ -420,6 +427,407 @@ WHERE movement_type = 'cash_sale'
 SQL
   )
 
+(define create-operators-table-sql
+  #<<SQL
+CREATE TABLE operators (
+  operator_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(operator_id) = 'text'
+      AND length(operator_id) > 0
+    ),
+  display_name TEXT NOT NULL
+    CHECK (
+      typeof(display_name) = 'text'
+      AND length(display_name) > 0
+    ),
+  active INTEGER NOT NULL
+    CHECK (
+      typeof(active) = 'integer'
+      AND active IN (0, 1)
+    )
+)
+SQL
+  )
+
+(define create-operator-roles-table-sql
+  #<<SQL
+CREATE TABLE operator_roles (
+  operator_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(operator_id) = 'text'
+      AND length(operator_id) > 0
+    ),
+  role TEXT NOT NULL
+    CHECK (
+      typeof(role) = 'text'
+      AND role IN ('cashier', 'supervisor', 'manager')
+    ),
+  FOREIGN KEY (operator_id)
+    REFERENCES operators(operator_id)
+    ON DELETE CASCADE
+)
+SQL
+  )
+
+(define create-operator-pin-credentials-table-sql
+  #<<SQL
+CREATE TABLE operator_pin_credentials (
+  operator_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(operator_id) = 'text'
+      AND length(operator_id) > 0
+    ),
+  password_hash TEXT NOT NULL
+    CHECK (
+      typeof(password_hash) = 'text'
+      AND length(password_hash) > 0
+      AND substr(password_hash, 1, 10) = '$argon2id$'
+    ),
+  credential_revision INTEGER NOT NULL
+    CHECK (
+      typeof(credential_revision) = 'integer'
+      AND credential_revision >= 1
+    ),
+  FOREIGN KEY (operator_id)
+    REFERENCES operators(operator_id)
+    ON DELETE CASCADE
+)
+SQL
+  )
+
+(define create-operator-login-throttle-table-sql
+  #<<SQL
+CREATE TABLE operator_login_throttle (
+  operator_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(operator_id) = 'text'
+      AND length(operator_id) > 0
+    ),
+  consecutive_failures INTEGER NOT NULL
+    CHECK (
+      typeof(consecutive_failures) = 'integer'
+      AND consecutive_failures >= 1
+    ),
+  last_failed_at_epoch_ms INTEGER NOT NULL
+    CHECK (
+      typeof(last_failed_at_epoch_ms) = 'integer'
+      AND last_failed_at_epoch_ms >= 0
+    ),
+  blocked_until_epoch_ms INTEGER NOT NULL
+    CHECK (
+      typeof(blocked_until_epoch_ms) = 'integer'
+      AND blocked_until_epoch_ms >= 0
+      AND blocked_until_epoch_ms >= last_failed_at_epoch_ms
+    ),
+  FOREIGN KEY (operator_id)
+    REFERENCES operators(operator_id)
+    ON DELETE CASCADE
+)
+SQL
+  )
+
+(define create-transaction-command-actor-attributions-table-sql
+  #<<SQL
+CREATE TABLE transaction_command_actor_attributions (
+  command_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(command_id) = 'text'
+      AND length(command_id) > 0
+    ),
+  operator_id TEXT NOT NULL
+    CHECK (
+      typeof(operator_id) = 'text'
+      AND length(operator_id) > 0
+    ),
+  FOREIGN KEY (command_id)
+    REFERENCES transaction_command_receipts(command_id)
+    ON DELETE CASCADE
+)
+SQL
+  )
+
+(define create-transaction-command-legacy-unattributed-receipts-table-sql
+  #<<SQL
+CREATE TABLE transaction_command_legacy_unattributed_receipts (
+  command_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(command_id) = 'text'
+      AND length(command_id) > 0
+    ),
+  FOREIGN KEY (command_id)
+    REFERENCES transaction_command_receipts(command_id)
+    ON DELETE CASCADE
+)
+SQL
+  )
+
+(define create-transaction-void-approval-grants-table-sql
+  #<<SQL
+CREATE TABLE transaction_void_approval_grants (
+  approval_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(approval_id) = 'text'
+      AND length(approval_id) > 0
+    ),
+  token_digest BLOB NOT NULL UNIQUE
+    CHECK (
+      typeof(token_digest) = 'blob'
+      AND length(token_digest) = 32
+    ),
+  issuer_instance_id TEXT NOT NULL
+    CHECK (
+      typeof(issuer_instance_id) = 'text'
+      AND length(issuer_instance_id) > 0
+    ),
+  requester_operator_id TEXT NOT NULL
+    CHECK (
+      typeof(requester_operator_id) = 'text'
+      AND length(requester_operator_id) > 0
+    ),
+  approver_operator_id TEXT NOT NULL
+    CHECK (
+      typeof(approver_operator_id) = 'text'
+      AND length(approver_operator_id) > 0
+    ),
+  approver_credential_revision INTEGER NOT NULL
+    CHECK (
+      typeof(approver_credential_revision) = 'integer'
+      AND approver_credential_revision >= 1
+    ),
+  command_id TEXT NOT NULL UNIQUE
+    CHECK (
+      typeof(command_id) = 'text'
+      AND length(command_id) > 0
+    ),
+  transaction_id TEXT NOT NULL
+    CHECK (
+      typeof(transaction_id) = 'text'
+      AND length(transaction_id) > 0
+    ),
+  command_schema_version INTEGER NOT NULL
+    CHECK (
+      typeof(command_schema_version) = 'integer'
+      AND command_schema_version = 1
+    ),
+  expected_version INTEGER NOT NULL
+    CHECK (
+      typeof(expected_version) = 'integer'
+      AND expected_version >= 0
+    ),
+  granted_at_monotonic_ms INTEGER NOT NULL
+    CHECK (
+      typeof(granted_at_monotonic_ms) = 'integer'
+      AND granted_at_monotonic_ms >= 0
+    ),
+  expires_at_monotonic_ms INTEGER NOT NULL
+    CHECK (
+      typeof(expires_at_monotonic_ms) = 'integer'
+      AND expires_at_monotonic_ms > granted_at_monotonic_ms
+    ),
+  expires_at_epoch_ms INTEGER NOT NULL
+    CHECK (
+      typeof(expires_at_epoch_ms) = 'integer'
+      AND expires_at_epoch_ms >= 0
+    ),
+  CHECK (requester_operator_id <> approver_operator_id)
+)
+SQL
+  )
+
+;; v12 deliberately rebuilds only unconsumed, process-bound capabilities.
+;; The v10 definition above remains frozen for historical-prefix validation.
+(define create-v12-transaction-void-approval-grants-table-sql
+  #<<SQL
+CREATE TABLE transaction_void_approval_grants (
+  approval_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(approval_id) = 'text'
+      AND length(approval_id) > 0
+    ),
+  token_digest BLOB NOT NULL UNIQUE
+    CHECK (
+      typeof(token_digest) = 'blob'
+      AND length(token_digest) = 32
+    ),
+  issuer_instance_id TEXT NOT NULL
+    CHECK (
+      typeof(issuer_instance_id) = 'text'
+      AND length(issuer_instance_id) > 0
+    ),
+  requester_operator_id TEXT NOT NULL
+    CHECK (
+      typeof(requester_operator_id) = 'text'
+      AND length(requester_operator_id) > 0
+    ),
+  requester_credential_revision INTEGER NOT NULL
+    CHECK (
+      typeof(requester_credential_revision) = 'integer'
+      AND requester_credential_revision >= 1
+    ),
+  approver_operator_id TEXT NOT NULL
+    CHECK (
+      typeof(approver_operator_id) = 'text'
+      AND length(approver_operator_id) > 0
+    ),
+  approver_credential_revision INTEGER NOT NULL
+    CHECK (
+      typeof(approver_credential_revision) = 'integer'
+      AND approver_credential_revision >= 1
+    ),
+  command_id TEXT NOT NULL UNIQUE
+    CHECK (
+      typeof(command_id) = 'text'
+      AND length(command_id) > 0
+    ),
+  transaction_id TEXT NOT NULL
+    CHECK (
+      typeof(transaction_id) = 'text'
+      AND length(transaction_id) > 0
+    ),
+  command_schema_version INTEGER NOT NULL
+    CHECK (
+      typeof(command_schema_version) = 'integer'
+      AND command_schema_version = 1
+    ),
+  expected_version INTEGER NOT NULL
+    CHECK (
+      typeof(expected_version) = 'integer'
+      AND expected_version >= 0
+    ),
+  granted_at_monotonic_ms INTEGER NOT NULL
+    CHECK (
+      typeof(granted_at_monotonic_ms) = 'integer'
+      AND granted_at_monotonic_ms >= 0
+    ),
+  expires_at_monotonic_ms INTEGER NOT NULL
+    CHECK (
+      typeof(expires_at_monotonic_ms) = 'integer'
+      AND expires_at_monotonic_ms > granted_at_monotonic_ms
+    ),
+  expires_at_epoch_ms INTEGER NOT NULL
+    CHECK (
+      typeof(expires_at_epoch_ms) = 'integer'
+      AND expires_at_epoch_ms >= 0
+    ),
+  CHECK (requester_operator_id <> approver_operator_id)
+)
+SQL
+  )
+
+(define create-transaction-command-approver-attributions-table-sql
+  #<<SQL
+CREATE TABLE transaction_command_approver_attributions (
+  command_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(command_id) = 'text'
+      AND length(command_id) > 0
+    ),
+  approval_id TEXT NOT NULL UNIQUE
+    CHECK (
+      typeof(approval_id) = 'text'
+      AND length(approval_id) > 0
+    ),
+  approver_operator_id TEXT NOT NULL
+    CHECK (
+      typeof(approver_operator_id) = 'text'
+      AND length(approver_operator_id) > 0
+    ),
+  approver_credential_revision INTEGER NOT NULL
+    CHECK (
+      typeof(approver_credential_revision) = 'integer'
+      AND approver_credential_revision >= 1
+    ),
+  approved_at_epoch_ms INTEGER NOT NULL
+    CHECK (
+      typeof(approved_at_epoch_ms) = 'integer'
+      AND approved_at_epoch_ms >= 0
+    ),
+  FOREIGN KEY (command_id)
+    REFERENCES transaction_command_receipts(command_id)
+    ON DELETE CASCADE
+)
+SQL
+  )
+
+(define create-transaction-command-legacy-unapproved-void-receipts-table-sql
+  #<<SQL
+CREATE TABLE transaction_command_legacy_unapproved_void_receipts (
+  command_id TEXT PRIMARY KEY NOT NULL
+    CHECK (
+      typeof(command_id) = 'text'
+      AND length(command_id) > 0
+    ),
+  FOREIGN KEY (command_id)
+    REFERENCES transaction_command_receipts(command_id)
+    ON DELETE CASCADE
+)
+SQL
+  )
+
+(define create-security-audit-events-table-sql
+  #<<SQL
+CREATE TABLE security_audit_events (
+  sequence INTEGER PRIMARY KEY
+    CHECK (typeof(sequence) = 'integer' AND sequence > 0),
+  schema_version INTEGER NOT NULL
+    CHECK (typeof(schema_version) = 'integer' AND schema_version = 1),
+  occurred_at_epoch_ms INTEGER NOT NULL
+    CHECK (typeof(occurred_at_epoch_ms) = 'integer' AND occurred_at_epoch_ms >= 0),
+  source_kind TEXT NOT NULL
+    CHECK (typeof(source_kind) = 'text' AND source_kind IN ('pos_core', 'root_cli')),
+  source_instance_id TEXT NOT NULL
+    CHECK (typeof(source_instance_id) = 'text' AND length(source_instance_id) > 0),
+  event_type TEXT NOT NULL
+    CHECK (typeof(event_type) = 'text' AND length(event_type) > 0),
+  event_json TEXT NOT NULL
+    CHECK (typeof(event_json) = 'text'),
+  previous_event_hash BLOB NOT NULL
+    CHECK (typeof(previous_event_hash) = 'blob' AND length(previous_event_hash) = 32),
+  event_hash BLOB NOT NULL UNIQUE
+    CHECK (typeof(event_hash) = 'blob' AND length(event_hash) = 32)
+)
+SQL
+  )
+
+(define create-security-audit-events-append-order-trigger-sql
+  #<<SQL
+CREATE TRIGGER security_audit_events_append_order
+BEFORE INSERT ON security_audit_events
+BEGIN
+  SELECT CASE
+    WHEN NEW.sequence <> COALESCE((SELECT MAX(sequence) FROM security_audit_events), 0) + 1
+    THEN RAISE(ABORT, 'security audit sequence is not append-only')
+  END;
+  SELECT CASE
+    WHEN NEW.previous_event_hash <> COALESCE(
+      (SELECT event_hash FROM security_audit_events ORDER BY sequence DESC LIMIT 1),
+      zeroblob(32))
+    THEN RAISE(ABORT, 'security audit previous hash does not match tail')
+  END;
+END
+SQL
+  )
+
+(define create-security-audit-events-no-update-trigger-sql
+  #<<SQL
+CREATE TRIGGER security_audit_events_no_update
+BEFORE UPDATE ON security_audit_events
+BEGIN
+  SELECT RAISE(ABORT, 'security audit events are append-only');
+END
+SQL
+  )
+
+(define create-security-audit-events-no-delete-trigger-sql
+  #<<SQL
+CREATE TRIGGER security_audit_events_no_delete
+BEFORE DELETE ON security_audit_events
+BEGIN
+  SELECT RAISE(ABORT, 'security audit events are append-only');
+END
+SQL
+  )
+
 (define (schema-object-exists? connection type name)
   (= 1
      (db:query-value
@@ -570,6 +978,74 @@ SQL
         (vector "counted_cash_minor_units" "INTEGER" 1 0)
         (vector "over_short_minor_units" "INTEGER" 1 0)))
 
+(define expected-operator-columns
+  (list (vector "operator_id" "TEXT" 1 1)
+        (vector "display_name" "TEXT" 1 0)
+        (vector "active" "INTEGER" 1 0)))
+
+(define expected-operator-role-columns
+  (list (vector "operator_id" "TEXT" 1 1)
+        (vector "role" "TEXT" 1 0)))
+
+(define expected-operator-pin-credential-columns
+  (list (vector "operator_id" "TEXT" 1 1)
+        (vector "password_hash" "TEXT" 1 0)
+        (vector "credential_revision" "INTEGER" 1 0)))
+
+(define expected-operator-login-throttle-columns
+  (list (vector "operator_id" "TEXT" 1 1)
+        (vector "consecutive_failures" "INTEGER" 1 0)
+        (vector "last_failed_at_epoch_ms" "INTEGER" 1 0)
+        (vector "blocked_until_epoch_ms" "INTEGER" 1 0)))
+
+(define expected-transaction-command-actor-attribution-columns
+  (list (vector "command_id" "TEXT" 1 1)
+        (vector "operator_id" "TEXT" 1 0)))
+
+(define expected-transaction-command-legacy-unattributed-receipt-columns
+  (list (vector "command_id" "TEXT" 1 1)))
+
+(define expected-transaction-void-approval-grant-columns
+  (list (vector "approval_id" "TEXT" 1 1)
+        (vector "token_digest" "BLOB" 1 0)
+        (vector "issuer_instance_id" "TEXT" 1 0)
+        (vector "requester_operator_id" "TEXT" 1 0)
+        (vector "approver_operator_id" "TEXT" 1 0)
+        (vector "approver_credential_revision" "INTEGER" 1 0)
+        (vector "command_id" "TEXT" 1 0)
+        (vector "transaction_id" "TEXT" 1 0)
+        (vector "command_schema_version" "INTEGER" 1 0)
+        (vector "expected_version" "INTEGER" 1 0)
+        (vector "granted_at_monotonic_ms" "INTEGER" 1 0)
+        (vector "expires_at_monotonic_ms" "INTEGER" 1 0)
+        (vector "expires_at_epoch_ms" "INTEGER" 1 0)))
+
+(define expected-v12-transaction-void-approval-grant-columns
+  (append (take expected-transaction-void-approval-grant-columns 4)
+          (list (vector "requester_credential_revision" "INTEGER" 1 0))
+          (drop expected-transaction-void-approval-grant-columns 4)))
+
+(define expected-transaction-command-approver-attribution-columns
+  (list (vector "command_id" "TEXT" 1 1)
+        (vector "approval_id" "TEXT" 1 0)
+        (vector "approver_operator_id" "TEXT" 1 0)
+        (vector "approver_credential_revision" "INTEGER" 1 0)
+        (vector "approved_at_epoch_ms" "INTEGER" 1 0)))
+
+(define expected-transaction-command-legacy-unapproved-void-receipt-columns
+  (list (vector "command_id" "TEXT" 1 1)))
+
+(define expected-security-audit-event-columns
+  (list (vector "sequence" "INTEGER" 0 1)
+        (vector "schema_version" "INTEGER" 1 0)
+        (vector "occurred_at_epoch_ms" "INTEGER" 1 0)
+        (vector "source_kind" "TEXT" 1 0)
+        (vector "source_instance_id" "TEXT" 1 0)
+        (vector "event_type" "TEXT" 1 0)
+        (vector "event_json" "TEXT" 1 0)
+        (vector "previous_event_hash" "BLOB" 1 0)
+        (vector "event_hash" "BLOB" 1 0)))
+
 (define (validate-owned-table-schema connection
                                      migration-version
                                      table-name
@@ -704,6 +1180,18 @@ SQL
     (error 'migrate-pos-database!
            "~a definition has drifted"
            index-name)))
+
+(define (validate-owned-trigger-schema connection name expected-sql)
+  (unless (schema-object-exists? connection "trigger" name)
+    (error 'migrate-pos-database! "security audit trigger is missing: ~a" name))
+  (define recorded-sql
+    (db:query-value
+     connection
+     "SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = ?"
+     name))
+  (unless (string=? (normalize-schema-sql recorded-sql)
+                    (normalize-schema-sql expected-sql))
+    (error 'migrate-pos-database! "security audit trigger has drifted: ~a" name)))
 
 (define (validate-register-operations-schema connection)
   (validate-owned-table-schema
@@ -860,6 +1348,286 @@ SQL
    create-cash-sale-transaction-index-sql)
   (validate-shift-cash-integrity connection))
 
+(define (validate-operator-relational-integrity connection)
+  (define cashier-without-operator-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM cashiers AS cashier
+LEFT JOIN operators AS operator
+  ON operator.operator_id = cashier.cashier_id
+WHERE operator.operator_id IS NULL
+SQL
+     ))
+  (define operator-without-one-role-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM (
+  SELECT operator.operator_id
+  FROM operators AS operator
+  LEFT JOIN operator_roles AS assignment
+    ON assignment.operator_id = operator.operator_id
+  GROUP BY operator.operator_id
+  HAVING COUNT(assignment.operator_id) <> 1
+)
+SQL
+     ))
+  (define orphan-role-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM operator_roles AS assignment
+LEFT JOIN operators AS operator
+  ON operator.operator_id = assignment.operator_id
+WHERE operator.operator_id IS NULL
+SQL
+     ))
+  (define orphan-credential-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM operator_pin_credentials AS credential
+LEFT JOIN operators AS operator
+  ON operator.operator_id = credential.operator_id
+WHERE operator.operator_id IS NULL
+SQL
+     ))
+  (unless (zero? cashier-without-operator-count)
+    (error 'migrate-pos-database!
+           "current cashiers require same-ID operator principals"))
+  (unless (zero? operator-without-one-role-count)
+    (error 'migrate-pos-database!
+           "every operator requires exactly one role"))
+  (unless (zero? orphan-role-count)
+    (error 'migrate-pos-database!
+           "operator roles reference missing operators"))
+  (unless (zero? orphan-credential-count)
+    (error 'migrate-pos-database!
+           "operator credentials reference missing operators")))
+
+(define (validate-operator-identity-schema connection)
+  (validate-owned-table-schema
+   connection 7 "operators"
+   expected-operator-columns
+   create-operators-table-sql)
+  (validate-owned-table-schema
+   connection 7 "operator_roles"
+   expected-operator-role-columns
+   create-operator-roles-table-sql)
+  (validate-owned-table-schema
+   connection 7 "operator_pin_credentials"
+   expected-operator-pin-credential-columns
+   create-operator-pin-credentials-table-sql)
+  (validate-operator-relational-integrity connection))
+
+(define (validate-operator-login-throttle-schema connection)
+  (validate-owned-table-schema
+   connection 8 "operator_login_throttle"
+   expected-operator-login-throttle-columns
+   create-operator-login-throttle-table-sql)
+  (define orphan-throttle-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM operator_login_throttle AS throttle
+LEFT JOIN operators AS operator
+  ON operator.operator_id = throttle.operator_id
+WHERE operator.operator_id IS NULL
+SQL
+     ))
+  (unless (zero? orphan-throttle-count)
+    (error 'migrate-pos-database!
+           "operator login throttle state references missing operators")))
+
+(define (validate-transaction-command-actor-attributions-schema connection)
+  (validate-owned-table-schema
+   connection 9 "transaction_command_legacy_unattributed_receipts"
+   expected-transaction-command-legacy-unattributed-receipt-columns
+   create-transaction-command-legacy-unattributed-receipts-table-sql)
+  (validate-owned-table-schema
+   connection 9 "transaction_command_actor_attributions"
+   expected-transaction-command-actor-attribution-columns
+   create-transaction-command-actor-attributions-table-sql)
+  (define orphan-attribution-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM transaction_command_actor_attributions AS attribution
+LEFT JOIN transaction_command_receipts AS receipt
+  ON receipt.command_id = attribution.command_id
+WHERE receipt.command_id IS NULL
+SQL
+     ))
+  (unless (zero? orphan-attribution-count)
+    (error 'migrate-pos-database!
+           "transaction command actor attribution references a missing receipt"))
+  (define orphan-legacy-classification-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM transaction_command_legacy_unattributed_receipts AS legacy
+LEFT JOIN transaction_command_receipts AS receipt
+  ON receipt.command_id = legacy.command_id
+WHERE receipt.command_id IS NULL
+SQL
+     ))
+  (unless (zero? orphan-legacy-classification-count)
+    (error 'migrate-pos-database!
+           "legacy command classification references a missing receipt"))
+  (define conflicting-classification-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM transaction_command_legacy_unattributed_receipts AS legacy
+JOIN transaction_command_actor_attributions AS attribution
+  ON attribution.command_id = legacy.command_id
+SQL
+     ))
+  (unless (zero? conflicting-classification-count)
+    (error 'migrate-pos-database!
+           "a command receipt cannot be both legacy-unattributed and attributed"))
+  (define unclassified-receipt-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM transaction_command_receipts AS receipt
+LEFT JOIN transaction_command_legacy_unattributed_receipts AS legacy
+  ON legacy.command_id = receipt.command_id
+LEFT JOIN transaction_command_actor_attributions AS attribution
+  ON attribution.command_id = receipt.command_id
+WHERE legacy.command_id IS NULL
+  AND attribution.command_id IS NULL
+SQL
+     ))
+  (unless (zero? unclassified-receipt-count)
+    (error 'migrate-pos-database!
+           "every command receipt must be attributed or explicitly classified as pre-v9")))
+
+(define (validate-transaction-void-approvals-schema connection)
+  ;; The v12 validator owns the replacement DDL. Historical v10/v11 prefixes
+  ;; still validate against exactly the original v10 definition.
+  (unless (db:query-maybe-value
+           connection
+           "SELECT 1 FROM pos_schema_migrations WHERE version = 12")
+    (validate-owned-table-schema
+     connection 10 "transaction_void_approval_grants"
+     expected-transaction-void-approval-grant-columns
+     create-transaction-void-approval-grants-table-sql))
+  (validate-owned-table-schema
+   connection 10 "transaction_command_approver_attributions"
+   expected-transaction-command-approver-attribution-columns
+   create-transaction-command-approver-attributions-table-sql)
+  (validate-owned-table-schema
+   connection 10 "transaction_command_legacy_unapproved_void_receipts"
+   expected-transaction-command-legacy-unapproved-void-receipt-columns
+   create-transaction-command-legacy-unapproved-void-receipts-table-sql)
+  (define orphan-approver-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM transaction_command_approver_attributions AS attribution
+LEFT JOIN transaction_command_receipts AS receipt
+  ON receipt.command_id = attribution.command_id
+WHERE receipt.command_id IS NULL
+SQL
+     ))
+  (unless (zero? orphan-approver-count)
+    (error 'migrate-pos-database!
+           "transaction command approver attribution references a missing receipt"))
+  (define orphan-legacy-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM transaction_command_legacy_unapproved_void_receipts AS legacy
+LEFT JOIN transaction_command_receipts AS receipt
+  ON receipt.command_id = legacy.command_id
+WHERE receipt.command_id IS NULL
+SQL
+     ))
+  (unless (zero? orphan-legacy-count)
+    (error 'migrate-pos-database!
+           "legacy void approval classification references a missing receipt"))
+  (define conflicting-void-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM transaction_command_legacy_unapproved_void_receipts AS legacy
+JOIN transaction_command_approver_attributions AS attribution
+  ON attribution.command_id = legacy.command_id
+SQL
+     ))
+  (unless (zero? conflicting-void-count)
+    (error 'migrate-pos-database!
+           "a void receipt cannot be both approved and legacy-unapproved"))
+  (define unclassified-void-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM transaction_command_receipts AS receipt
+LEFT JOIN transaction_command_legacy_unapproved_void_receipts AS legacy
+  ON legacy.command_id = receipt.command_id
+LEFT JOIN transaction_command_approver_attributions AS attribution
+  ON attribution.command_id = receipt.command_id
+WHERE receipt.command_type = 'void_transaction'
+  AND legacy.command_id IS NULL
+  AND attribution.command_id IS NULL
+SQL
+     ))
+  (unless (zero? unclassified-void-count)
+    (error 'migrate-pos-database!
+           "every void receipt must be approved or explicitly classified as pre-v10"))
+  (define classified-non-void-count
+    (db:query-value
+     connection
+     #<<SQL
+SELECT COUNT(*)
+FROM transaction_command_receipts AS receipt
+LEFT JOIN transaction_command_legacy_unapproved_void_receipts AS legacy
+  ON legacy.command_id = receipt.command_id
+LEFT JOIN transaction_command_approver_attributions AS attribution
+  ON attribution.command_id = receipt.command_id
+WHERE receipt.command_type <> 'void_transaction'
+  AND (legacy.command_id IS NOT NULL OR attribution.command_id IS NOT NULL)
+SQL
+     ))
+  (unless (zero? classified-non-void-count)
+    (error 'migrate-pos-database!
+           "non-void receipts cannot carry void approval provenance")))
+
+(define (validate-security-audit-schema connection)
+  (validate-owned-table-schema
+   connection 11 "security_audit_events"
+   expected-security-audit-event-columns
+   create-security-audit-events-table-sql)
+  (validate-owned-trigger-schema
+   connection "security_audit_events_append_order"
+   create-security-audit-events-append-order-trigger-sql)
+  (validate-owned-trigger-schema
+   connection "security_audit_events_no_update"
+   create-security-audit-events-no-update-trigger-sql)
+  (validate-owned-trigger-schema
+   connection "security_audit_events_no_delete"
+   create-security-audit-events-no-delete-trigger-sql)
+  (define verification (verify-security-audit-ledger connection))
+  (unless (security-audit-ledger-valid? verification)
+    (error 'migrate-pos-database!
+           "security audit ledger failed integrity verification at sequence ~a"
+           (security-audit-ledger-invalid-sequence verification))))
+
 (define (apply-migration-1! connection)
   (db:query-exec connection create-events-table-sql)
   (db:query-exec connection create-stream-sequence-index-sql))
@@ -912,6 +1680,87 @@ SQL
   (db:query-exec connection create-shift-opening-index-sql)
   (db:query-exec connection create-cash-sale-transaction-index-sql))
 
+(define (apply-migration-7! connection)
+  (db:query-exec connection create-operators-table-sql)
+  (db:query-exec connection create-operator-roles-table-sql)
+  (db:query-exec connection create-operator-pin-credentials-table-sql)
+  (db:query-exec
+   connection
+   #<<SQL
+INSERT INTO operators (operator_id, display_name, active)
+SELECT cashier_id, display_name, active
+FROM cashiers
+SQL
+   )
+  (db:query-exec
+   connection
+   #<<SQL
+INSERT INTO operator_roles (operator_id, role)
+SELECT cashier_id, 'cashier'
+FROM cashiers
+SQL
+   ))
+
+(define (apply-migration-8! connection)
+  (db:query-exec connection create-operator-login-throttle-table-sql))
+
+(define (apply-migration-9! connection)
+  ;; Historical receipts deliberately remain unattributed because their
+  ;; transaction context cannot prove which authenticated operator submitted
+  ;; the command. Classify exactly the receipts present at the v9 boundary so
+  ;; a missing actor on a later receipt can never inherit legacy compatibility.
+  (db:query-exec
+   connection
+   create-transaction-command-legacy-unattributed-receipts-table-sql)
+  (db:query-exec
+   connection
+   #<<SQL
+INSERT INTO transaction_command_legacy_unattributed_receipts (command_id)
+SELECT command_id
+FROM transaction_command_receipts
+SQL
+   )
+  (db:query-exec
+   connection create-transaction-command-actor-attributions-table-sql))
+
+(define (apply-migration-10! connection)
+  (db:query-exec connection create-transaction-void-approval-grants-table-sql)
+  (db:query-exec
+   connection create-transaction-command-approver-attributions-table-sql)
+  (db:query-exec
+   connection create-transaction-command-legacy-unapproved-void-receipts-table-sql)
+  ;; These rows are historical truth: they prove only that the void receipt
+  ;; existed before CP4, never that a particular operator approved it.
+  (db:query-exec
+   connection
+   #<<SQL
+INSERT INTO transaction_command_legacy_unapproved_void_receipts (command_id)
+SELECT command_id
+FROM transaction_command_receipts
+WHERE command_type = 'void_transaction'
+SQL
+   ))
+
+(define (apply-migration-11! connection)
+  ;; No historical events are inferred or fabricated at the v11 boundary.
+  (db:query-exec connection create-security-audit-events-table-sql)
+  (db:query-exec connection create-security-audit-events-append-order-trigger-sql)
+  (db:query-exec connection create-security-audit-events-no-update-trigger-sql)
+  (db:query-exec connection create-security-audit-events-no-delete-trigger-sql))
+
+(define (apply-migration-12! connection)
+  ;; A migration requires a POS Core restart. Existing unconsumed grants are
+  ;; bound to that old process instance and cannot authorize future commands.
+  ;; Do not copy them into the revision-bound table or invent security history.
+  (db:query-exec connection "DROP TABLE transaction_void_approval_grants")
+  (db:query-exec connection create-v12-transaction-void-approval-grants-table-sql))
+
+(define (validate-v12-transaction-void-approvals-schema connection)
+  (validate-owned-table-schema
+   connection 12 "transaction_void_approval_grants"
+   expected-v12-transaction-void-approval-grant-columns
+   create-v12-transaction-void-approval-grants-table-sql))
+
 (define migrations
   (list
    (pos-database-migration 1
@@ -937,7 +1786,31 @@ SQL
    (pos-database-migration 6
                            migration-6-name
                            apply-migration-6!
-                           validate-shift-cash-accountability-schema)))
+                           validate-shift-cash-accountability-schema)
+   (pos-database-migration 7
+                           migration-7-name
+                           apply-migration-7!
+                           validate-operator-identity-schema)
+   (pos-database-migration 8
+                           migration-8-name
+                           apply-migration-8!
+                           validate-operator-login-throttle-schema)
+   (pos-database-migration 9
+                           migration-9-name
+                           apply-migration-9!
+                           validate-transaction-command-actor-attributions-schema)
+   (pos-database-migration 10
+                           migration-10-name
+                           apply-migration-10!
+                           validate-transaction-void-approvals-schema)
+   (pos-database-migration 11
+                           migration-11-name
+                           apply-migration-11!
+                           validate-security-audit-schema)
+   (pos-database-migration 12
+                           migration-12-name
+                           apply-migration-12!
+                           validate-v12-transaction-void-approvals-schema)))
 
 (define current-pos-database-schema-version (length migrations))
 

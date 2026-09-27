@@ -8,9 +8,17 @@
          "../pos/domain/money.rkt"
          "../pos/domain/transaction-event.rkt"
          "../pos/persistence/sqlite-transaction-event-store.rkt"
+         "../pos/persistence/sqlite-connection.rkt"
          "../pos/persistence/transaction-command-receipt-store.rkt"
-         "../pos/persistence/transaction-command-unit-of-work.rkt"
+         (rename-in "../pos/persistence/transaction-command-unit-of-work.rkt"
+                    [transaction-command-commit-plan
+                     transaction-command-commit-plan/without-actor])
          "../pos/persistence/pos-database-migrations.rkt")
+
+(define (transaction-command-commit-plan . fields)
+  (transaction-command-commit-plan-with-actor
+   (apply transaction-command-commit-plan/without-actor fields)
+   "unit-of-work-test-operator" 1))
 
 (define apples
   (sale-item-added "049000001234" "Test Apples" (money 199)))
@@ -31,8 +39,22 @@
     void
     (lambda ()
       (migrate-pos-database! connection)
+      (db:query-exec connection
+                      "INSERT INTO operators VALUES ('unit-of-work-test-operator', 'Test', 1)")
+      (db:query-exec connection
+                      "INSERT INTO operator_roles VALUES ('unit-of-work-test-operator', 'cashier')")
+      (db:query-exec connection
+                      "INSERT INTO operator_pin_credentials VALUES ('unit-of-work-test-operator', '$argon2id$fixture', 1)")
       (procedure connection))
     (lambda () (db:disconnect connection))))
+
+(define (seed-file-backed-actor! connection)
+  (db:query-exec connection
+                  "INSERT INTO operators VALUES ('unit-of-work-test-operator', 'Test', 1)")
+  (db:query-exec connection
+                  "INSERT INTO operator_roles VALUES ('unit-of-work-test-operator', 'cashier')")
+  (db:query-exec connection
+                  "INSERT INTO operator_pin_credentials VALUES ('unit-of-work-test-operator', '$argon2id$fixture', 1)"))
 
 (define (append! connection transaction-id expected-version events)
   (define result
@@ -58,6 +80,12 @@
     (load-transaction-command-receipt connection command-id))
   (check-pred receipt-load-found? result)
   (receipt-load-found-receipt result))
+
+(define (mark-receipt-as-pre-v9! connection command-id)
+  (db:query-exec
+   connection
+   "INSERT INTO transaction_command_legacy_unattributed_receipts (command_id) VALUES (?)"
+   command-id))
 
 (define (resolved-receipt result)
   (check-pred transaction-command-commit-resolved? result)
@@ -343,6 +371,7 @@
        (check-pred
         receipt-insert-succeeded?
         (insert-transaction-command-receipt! connection original))
+       (mark-receipt-as-pre-v9! connection "cmd-duplicate")
 
        (define result
          (commit-transaction-command-outcome!
@@ -366,6 +395,7 @@
        (define original
          (transaction-command-receipt command 'accepted "accepted" 2))
        (insert-transaction-command-receipt! connection original)
+       (mark-receipt-as-pre-v9! connection "cmd-delayed")
 
        (define result
          (commit-transaction-command-outcome!
@@ -390,6 +420,7 @@
          (transaction-command-receipt
           original-command 'accepted "accepted" 2))
        (insert-transaction-command-receipt! connection original-receipt)
+       (mark-receipt-as-pre-v9! connection "cmd-reuse")
        (define reused-command
          (scan-barcode-command
           "cmd-reuse" "txn-reuse" 1 "000000000002"))
@@ -588,6 +619,7 @@ SQL
           void
           (lambda ()
             (migrate-pos-database! writer)
+            (seed-file-backed-actor! writer)
             (check-pred
              transaction-command-commit-resolved?
              (commit-transaction-command-outcome!
@@ -612,6 +644,85 @@ SQL
         (when (file-exists? database-path)
           (delete-file database-path)))))
 
+  (test-case "stale actor waiting for writer cannot commit after credential revision changes"
+    (define directory
+      (make-temporary-file "grocery-pos-credential-race-~a" 'directory))
+    (dynamic-wind
+      void
+      (lambda ()
+        (define path (build-path directory "pos.db"))
+        (define holder (open-pos-sqlite-connection path 'create))
+        (define contender (open-pos-sqlite-connection path 'read/write))
+        (dynamic-wind
+          void
+          (lambda ()
+            (migrate-pos-database! holder)
+            (seed-file-backed-actor! holder)
+            (define command
+              (start-transaction-command
+               "cmd-credential-race" "txn-credential-race" 0))
+            (define (plan revision)
+              (transaction-command-commit-plan-with-actor
+               (transaction-command-commit-plan/without-actor
+                command 0 'accepted "accepted"
+                (list (started "txn-credential-race")))
+               "unit-of-work-test-operator" revision))
+            (define started-channel (make-channel))
+            (define result-channel (make-channel))
+            (db:call-with-transaction
+             holder
+             (lambda ()
+               (thread
+                (lambda ()
+                  (channel-put started-channel #t)
+                  (channel-put
+                   result-channel
+                   (with-handlers ([exn:fail? values])
+                     (commit-transaction-command-outcome!
+                      contender (plan 1))))))
+               (channel-get started-channel)
+               ;; This models the root rotation committing while an already
+               ;; authenticated rev-1 command is waiting for the writer.
+               (db:query-exec
+                holder
+                "UPDATE operator_pin_credentials SET credential_revision = 2 WHERE operator_id = 'unit-of-work-test-operator'"))
+             #:option 'immediate)
+            (check-pred transaction-command-commit-authorization-denied?
+                        (channel-get result-channel))
+            (check-equal?
+             (db:query-value holder
+                             "SELECT COUNT(*) FROM transaction_command_receipts")
+             0)
+            (check-equal?
+             (db:query-value holder "SELECT COUNT(*) FROM transaction_events")
+             0)
+            (check-equal?
+             (db:query-value holder
+                             "SELECT COUNT(*) FROM transaction_command_actor_attributions")
+             0)
+            (check-pred transaction-command-commit-resolved?
+                        (commit-transaction-command-outcome!
+                         contender (plan 2)))
+            ;; A later credential rotation does not rewrite history: a
+            ;; currently authenticated same actor still recovers the exact
+            ;; durable command before fresh writer authorization is evaluated.
+            (db:query-exec
+             holder
+             "UPDATE operator_pin_credentials SET credential_revision = 3 WHERE operator_id = 'unit-of-work-test-operator'")
+            (check-pred transaction-command-commit-resolved?
+                        (commit-transaction-command-outcome!
+                         contender (plan 3)))
+            (check-equal?
+             (db:query-value holder "SELECT COUNT(*) FROM transaction_events") 1)
+            (check-equal?
+             (db:query-value holder
+                             "SELECT COUNT(*) FROM transaction_command_receipts")
+             1))
+          (lambda ()
+            (db:disconnect contender)
+            (db:disconnect holder))))
+      (lambda () (delete-directory/files directory))))
+
   (test-case "second connection cannot see command writes before outer commit"
     (define database-path
       (make-temporary-file "grocery-pos-command-visibility-~a.sqlite"))
@@ -626,6 +737,7 @@ SQL
           void
           (lambda ()
             (migrate-pos-database! writer)
+            (seed-file-backed-actor! writer)
             (define command
               (start-transaction-command
                "cmd-visibility" "txn-visibility" 0))

@@ -1,8 +1,11 @@
 #lang racket
 
+(require "support/seed-authenticated-operator.rkt")
+
 (require (prefix-in db: db)
          racket/file
          rackunit
+         "../pos/application/authentication-service.rkt"
          "../pos/application/register-operations-service.rkt"
          "../pos/application/transaction-command-receipt.rkt"
          "../pos/application/transaction-command.rkt"
@@ -18,6 +21,10 @@
          "../pos/persistence/sqlite-restore.rkt"
          "../pos/persistence/transaction-command-unit-of-work.rkt"
          "../pos/runtime.rkt")
+
+(define acceptance-principal
+  (authenticated-operator
+   "acceptance-cashier" "Acceptance Cashier" 'cashier 1))
 
 (define configuration-json
   "{\"schema_version\":1,\"register\":{\"register_id\":\"acceptance-register\",\"display_name\":\"Acceptance Register\"},\"cashiers\":[{\"cashier_id\":\"acceptance-cashier\",\"display_name\":\"Acceptance Cashier\",\"active\":true}]}")
@@ -52,7 +59,9 @@
    #:current-epoch-ms (lambda () (next-time clock))))
 
 (define (execute-accepted! service command)
-  (define result (transaction-service-execute-command service command))
+  (define result
+    (transaction-service-execute-command
+     service acceptance-principal command))
   (check-pred transaction-service-command-resolved? result)
   (define receipt (transaction-service-command-resolved-receipt result))
   (check-equal? (transaction-command-receipt-outcome-kind receipt) 'accepted)
@@ -60,13 +69,15 @@
 
 (define (open-acceptance-shift! connection clock)
   (activate-operational-configuration! connection (configuration))
+  (seed-authenticated-test-operator!
+   connection "acceptance-cashier" 'cashier)
   (define result
     (register-operations-open-shift
      (make-register-operations-service
       connection
       #:current-epoch-ms (lambda () (next-time clock))
       #:generate-shift-id (lambda () "acceptance-shift"))
-     "acceptance-cashier"
+     acceptance-principal
      (money 10000)))
   (check-pred register-shift-opened? result))
 
