@@ -2198,7 +2198,11 @@ void main() {
         }
       }
     },
-    timeout: Timeout(Duration(seconds: 30 + (15 * crashCampaignIterations))),
+    // Every iteration kills/restarts real POS Core, whose readiness remains
+    // bounded at 30 seconds. GitHub runners nearly exhausted the old default
+    // 75-second campaign budget, so allow outer scheduling/runtime headroom
+    // without relaxing per-start readiness or any recovery assertions.
+    timeout: Timeout(Duration(seconds: 90 + (15 * crashCampaignIterations))),
   );
 
   test('known active session restores through GET only', () async {
