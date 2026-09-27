@@ -1,290 +1,120 @@
 # Grocery POS Platform — Codex Guidance
 
-## Purpose
-
-This repository is both a serious software-engineering project and a learning project.
-
-Optimize for:
-
-1. correctness;
-2. security;
-3. clear architecture;
-4. testability;
-5. developer understanding.
-
-Do not optimize merely for producing the largest amount of code in the shortest time.
-
-## Collaboration Mode
-
-Prefer pair-programming and teaching over wholesale implementation.
-
-For a non-trivial or unfamiliar change:
-
-1. explain the relevant design and language concepts;
-2. identify the domain invariants involved;
-3. identify the files expected to change;
-4. propose the smallest independently testable checkpoint;
-5. implement only the agreed scope.
-
-Keep changes small enough that the developer can meaningfully inspect and understand them.
-
-When introducing a significant Racket, Dart/Flutter, Rust, SQL, Nix, security, networking, or distributed-systems concept, explain why it fits the problem rather than merely generating code that uses it.
-
-Do not hide important architectural choices inside implementation details.
-
-## Test-Driven Development
-
-Use test-driven development where practical, especially for POS domain behavior.
-
-For domain changes:
-
-1. identify the expected behavior or invariant;
-2. write or update the focused test;
-3. observe the appropriate failure when useful;
-4. implement the smallest correct behavior;
-5. run the focused tests;
-6. refactor only after behavior is protected;
-7. run the wider relevant test suite.
-
-Do not weaken, delete, skip, or rewrite a legitimate failing test solely to make a change pass.
-
-## Canonical Commands
-
-Use `just` as the normal project command surface.
-
-Important commands include:
-
-```text
-just doctor
-just check
-just analyze-flutter
-just test
-just test-racket
-just test-flutter
-just run-racket
-just run-pos
-just run-pos-plain
-```
-
-Prefer existing `just` recipes over inventing undocumented command sequences when an equivalent recipe exists.
-
-Before considering a code change complete, run the relevant focused tests.
-
-Run the complete local quality gate:
-
-```text
-just check
-```
-
-before a change is considered broadly ready for commit unless there is a documented reason that a portion of the suite cannot run.
-
-## Architecture Boundaries
-
-### Flutter owns presentation
-
-Flutter handles human-facing interfaces and interaction.
-
-Flutter must not independently become authoritative for:
-
-* transaction totals;
-* tax;
-* promotions;
-* payment completion;
-* refund validity;
-* authorization;
-* transaction lifecycle;
-* receipt truth.
-
-### Racket owns POS meaning
-
-The local Racket POS Core owns:
-
-* transaction state;
-* business rules;
-* catalog interpretation;
-* pricing;
-* taxation;
-* promotion logic;
-* tender orchestration;
-* payment orchestration;
-* receipt semantics;
-* authorization decisions;
-* persistence semantics;
-* synchronization semantics.
-
-### SQLite owns local durability
-
-SQLite is the implemented durable local journal for accepted transaction facts
-in the current cash-sale slice. Racket reconstructs authoritative transaction
-state from that journal.
-
-As additional subsystems are implemented, SQLite will also hold other local
-durable register concerns such as payment recovery, receipts, drawers, catalog
-cache, and synchronization state. SQLite owns durability, not business
-semantics.
-
-Racket is the normal application writer.
-
-Do not allow arbitrary components to mutate transaction truth directly.
-
-### Rust owns system edges
-
-Rust is appropriate for:
-
-* hardware and peripheral protocols;
-* low-level system integration;
-* payment-terminal bridges;
-* update agents;
-* support agents;
-* native protocol parsers and adapters.
-
-Rust agents must not independently redefine POS business truth.
-
-### Cloud coordinates; local validates
-
-Supabase and DigitalOcean provide cloud coordination and auxiliary infrastructure.
-
-Normal local checkout must not depend on cloud availability.
-
-Remote commands must be validated locally before application.
-
-## Transaction Safety
-
-Treat the transaction state machine as a critical correctness boundary.
-
-Invalid state transitions must be rejected explicitly.
-
-Consequential transaction mutations must use the typed, idempotent application
-command boundary with a stable command identity and caller-supplied expected
-stream version. Do not bypass that boundary with identity-free mutation paths.
-
-Retry the same logical command with the same command ID. Transaction events
-remain authoritative transaction truth; command receipts are retry identity
-and original-outcome metadata, not transaction snapshots.
-
-Never represent money with binary floating-point values.
-
-### Payment invariant
-
-If payment outcome is unknown:
-
-**never blindly retry the charge.**
-
-Persist enough payment intent and correlation information to support inquiry, reconciliation, and safe recovery.
-
-## Security Expectations
-
-Treat the following as security-sensitive boundaries:
-
-* payment handling;
-* manager authorization;
-* employee authentication;
-* remote commands;
-* support access;
-* software updates;
-* inventory imports;
-* cloud synchronization;
-* receipt and transaction integrity;
-* logging and support bundles.
-
-Call out security consequences when modifying these areas.
-
-Never place the following in ordinary logs, test fixtures derived from real production data, or support bundles:
-
-* full PAN;
-* CVV/CVC;
-* magnetic-stripe track data;
-* sensitive raw EMV data;
-* PINs;
-* private keys;
-* passwords;
-* long-lived tokens;
-* unsanitized secret-bearing device responses.
-
-Do not weaken validation, authorization, sandboxing, audit behavior, cryptographic verification, or other security controls simply to make a test pass.
-
-## Local-First Reliability
-
-Checkout-critical behavior should work from local components whenever possible.
-
-A cloud outage must not silently become a checkout outage.
-
-External inventory integration, telemetry, reporting, update infrastructure, or cloud synchronization must not be introduced into the synchronous checkout-critical path without an explicit architectural decision.
-
-## API Work
-
-Consult:
-
-```text
-docs/architecture/local-api.md
-```
-
-before modifying the Flutter ↔ Racket API boundary.
-
-Prefer explicit commands and structured errors.
-
-Do not expose raw backend exceptions directly to Flutter.
-
-Do not create a broad speculative API surface ahead of tested domain requirements.
-
-## Documentation
-
-Consult relevant ADRs before changing architectural boundaries.
-
-When behavior, architecture, or operational requirements change, update the corresponding documentation in the same change.
-
-Create an ADR for consequential architectural decisions rather than silently replacing an accepted design.
-
-## Dependencies
-
-Do not add or replace production dependencies casually.
-
-Before adding a meaningful dependency:
-
-1. explain the capability it provides;
-2. explain why existing project dependencies are insufficient;
-3. identify security and maintenance implications;
-4. keep the dependency surface as small as practical.
-
-Do not update unrelated dependencies as part of a focused feature change.
+## Purpose and priorities
+
+This is serious engineering and a learning project. Prioritize correctness,
+security, clear architecture, testability, and developer understanding—in that
+order—not code volume or speed alone.
+
+For consequential or unfamiliar work, explain the important invariant,
+language/architecture concept, and tradeoff needed for human review. Keep the
+developer able to explain important code; do not hide design decisions or give
+ritual tutorials for familiar local work.
+
+## Core architecture
+
+**Flutter presents. Racket decides. SQLite remembers. Rust talks to edges.
+The cloud coordinates.**
+
+- Flutter owns presentation, never authoritative totals, tax, promotions,
+  payment completion/refund validity, authorization, transaction lifecycle, or
+  receipt truth.
+- Racket owns POS/domain decisions, persistence/synchronization semantics, and
+  normal authoritative application writes. Other components must not directly
+  mutate transaction truth.
+- SQLite owns local durability, not business semantics. Racket reconstructs
+  transaction state from the durable journal.
+- Rust owns system/device/protocol edges, not POS business truth.
+- Cloud coordinates; ordinary checkout must not depend on cloud availability.
+  Validate remote commands locally. Do not silently introduce cloud, inventory,
+  reporting, telemetry, or update dependencies into the synchronous checkout
+  path; such a change requires an explicit architectural decision.
+
+## Critical correctness invariants
+
+- Represent money exactly in authoritative integer units, never binary floating
+  point. Reject invalid state transitions explicitly.
+- Consequential transaction mutations use the typed, idempotent command boundary
+  with a stable command ID and caller-supplied expected stream version. Do not
+  bypass it with identity-free writes or silently refresh `expected_version`.
+- Retry the same logical command with the same command ID. Transaction events
+  are authoritative business truth; command receipts record retry identity and
+  original outcomes, not authoritative transaction snapshots or replay input.
+
+> **Unknown payment outcome: never blindly retry the charge.** Persist enough
+> intent and correlation information for inquiry, reconciliation, and recovery.
+
+## Security
+
+Authentication and authorization are server-side Racket authority, not UI
+visibility. Treat payments, operator authentication, manager approval, remote
+commands, support, updates, imports, synchronization, transaction/receipt
+integrity, logging, and support bundles as security-sensitive; call out security
+consequences when changing them.
+
+Never weaken validation, authorization, audit, sandboxing, cryptographic
+verification, or other security controls merely to make tests pass. Never expose
+secrets or prohibited data—PINs, passwords, private keys, credential verifiers,
+tokens/capability digests, full PAN, CVV/CVC, track data, sensitive raw EMV, or
+unsanitized secret-bearing device responses—in logs, fixtures, support bundles,
+agent output, or external documentation queries. Give external tools only
+necessary non-secret context.
+
+## Development discipline
+
+- Prefer narrow, independently reviewable slices: one invariant → one focused
+  test → smallest implementation → review → next invariant. Implement only the
+  agreed scope, with explicit invariants and limited blast radius.
+- Use TDD where practical, especially for domain behavior; start with the
+  smallest relevant test. Never weaken, delete, skip, or rewrite a legitimate
+  failing test solely to make work pass. Widen validation with blast radius.
+- Use existing `just` recipes as the normal command surface; run `just --list`
+  for current commands. Prefer the narrowest relevant recipe during development
+  over inventing an equivalent undocumented command.
+- Run relevant focused checks before completion and `just check` when broadly
+  ready, unless scope-specific documentation provides a justified different or
+  stronger gate. Report unavailable validation honestly. Acceptance campaigns
+  are qualification evidence, not ordinary development tests.
+
+## Context routes
+
+Read only the routes relevant to the task—not every linked document up front.
+
+- Flutter ↔ Racket API: [local API](docs/architecture/local-api.md), before
+  changing that boundary.
+- Transaction behavior, schemas, replay, and receipts: [journal](docs/architecture/transaction-journal.md),
+  [command schema](docs/architecture/transaction-command-schema.md),
+  [event schemas](docs/architecture/transaction-event-schema.md),
+  [command receipts](docs/architecture/transaction-command-receipts.md), and
+  [canonical receipts](docs/architecture/receipts.md), as applicable.
+- Persistence/durability/backup/restore: [runtime](docs/architecture/racket-runtime.md),
+  [maintenance](docs/operations/database-maintenance.md),
+  [restore](docs/operations/database-restore.md), and ADRs 0018–0019/0022 in the
+  [ADR index](docs/adr/README.md).
+- Authentication/authorization/approval/audit/credentials: relevant
+  [security documentation](docs/security/), ADRs 0027–0032 in the ADR index, and
+  [M7 acceptance](docs/acceptance/m7/README.md).
+- Appliance/reliability/operational qualification: [appliance operations](docs/operations/kinoite-appliance.md),
+  relevant ADRs 0020–0026, [M6 evidence](docs/acceptance/m6/README.md), and M7 evidence.
+- Integration testing: [integration guide](docs/development/integration-testing.md).
+- Agent/Codex workflow: [progressive-disclosure workflow](docs/development/codex-workflow.md).
+
+## Documentation, decisions, and dependencies
+
+Consult relevant ADRs before changing architectural boundaries. Update affected
+behavior/architecture/operational documentation in the same change. Create an
+ADR for consequential decisions rather than silently replacing an accepted
+design. Prefer explicit commands and structured API errors; never expose raw
+backend exceptions to Flutter or invent a speculative API ahead of tested need.
+
+Do not casually add/replace production dependencies. Explain the needed
+capability, why existing dependencies are insufficient, and security/maintenance
+implications; keep the surface small. Do not update unrelated dependencies.
 
 ## Git
 
-Do not commit, push, force-push, rebase, reset branches, create releases, or alter Git history unless explicitly requested.
-
-The developer normally reviews changes and creates signed commits manually.
-
-When suggesting commit messages, use Conventional Commits.
-
-Examples:
-
-```text
-feat(pos-core): add transaction creation
-test(pos-core): cover invalid tender transition
-fix(pos-terminal): handle unavailable backend
-docs(api): document transaction command contract
-chore(dev): update development tooling
-```
-
-## Scope Discipline
-
-Avoid large “complete subsystem” implementations when a smaller vertical slice will establish the design.
-
-Prefer:
-
-```text
-one invariant
-→ one focused test
-→ smallest implementation
-→ review
-→ next invariant
-```
-
-over:
-
-```text
-generate the entire POS subsystem
-→ debug a large unfamiliar codebase afterward
-```
-
-The developer should remain able to explain the important code and architectural decisions produced during collaboration.
+Do not commit, push, force-push, rebase, reset, merge, rewrite history, or create
+releases unless explicitly instructed. Do not discard unrelated work or stage
+merely for tooling. The developer normally reviews changes and creates signed
+commits manually. Suggest Conventional Commits; a suggestion is not permission
+to perform the operation.
