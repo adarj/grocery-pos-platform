@@ -6,6 +6,10 @@ default:
 doctor:
     ./scripts/dev/doctor.sh
 
+# Optional, offline and sanitized checks for the qualified agent setup.
+agent-doctor:
+    ./scripts/dev/agent-doctor.sh
+
 test:
     just test-racket
     just test-flutter
