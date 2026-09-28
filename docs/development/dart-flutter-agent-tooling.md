@@ -138,7 +138,7 @@ automatically reduce exploration cost. CP7.5.6 should route semantic tools to
 real semantic uncertainty or expensive exploration, not mechanically before
 ordinary source/search. The original trial was not rerun to improve its numbers.
 
-The verified path runs through `HttpPosCoreClient._serverFailure`,
+The verified path runs through `HttpPosCoreClient._serverFailureFrom`,
 `AuthenticationController._handleSessionMemoryChanged`, the protected
 `PosTerminalApp` subtree, and `CashierSessionController.retryPendingCommand`.
 A 401/authentication-required response clears session memory while retaining

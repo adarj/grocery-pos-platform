@@ -15,13 +15,19 @@ for dependency in timeout jq git stat python3; do
 done
 if (( failed )); then exit 1; fi
 
+run_bounded() {
+  local deadline="$1"
+  shift
+  timeout --kill-after=2s "$deadline" "$@"
+}
+
 version_check() {
   local label="$1" expected="$2" pattern="$3" command="$4" output version
   if ! command -v "$command" >/dev/null 2>&1; then
     fail "$label unavailable"
     return
   fi
-  if ! output="$(timeout 20 "$command" --version 2>&1)"; then
+  if ! output="$(run_bounded 20 "$command" --version 2>&1)"; then
     fail "$label version check failed or timed out"
   elif [[ "$output" =~ $pattern ]]; then
     version="${BASH_REMATCH[1]}"
@@ -41,12 +47,12 @@ version_check 'Flutter' '3.41.9' 'Flutter ([0-9]+\.[0-9]+\.[0-9]+)' flutter
 version_check 'Dart' '3.11.5' 'Dart SDK version: ([0-9]+\.[0-9]+\.[0-9]+)' dart
 version_check 'DCM' '1.39.2' 'DCM version: ([0-9]+\.[0-9]+\.[0-9]+)' dcm
 version_check 'codebase-memory' '0.11.0' 'codebase-memory-mcp ([0-9]+\.[0-9]+\.[0-9]+)' codebase-memory-mcp
-if timeout 20 dart mcp-server --help >/dev/null 2>&1; then
+if run_bounded 20 dart mcp-server --help >/dev/null 2>&1; then
   ok 'Dart MCP SDK command available; protocol version not probed offline'
 else
   fail 'Dart MCP SDK command unavailable'
 fi
-if timeout 20 codex login status >/dev/null 2>&1; then
+if run_bounded 20 codex login status >/dev/null 2>&1; then
   ok 'Codex login present (status only; store contents not inspected)'
 else
   fail 'Codex login absent or status unavailable'
@@ -61,9 +67,10 @@ for profile in base work learn; do
   args=(codex)
   if [[ "$profile" != base ]]; then args+=(--profile "$profile"); fi
   # Projection removes transport/CWD/env/header fields before any persistence/output.
-  if ! inventory="$(timeout 20 "${args[@]}" mcp list --json 2>/dev/null | jq -ce '
-    if type != "array" then error("invalid inventory") else
-      map({name, enabled, enabled_tools, disabled_tools, required, auth_status})
+  if ! inventory="$(run_bounded 20 "${args[@]}" mcp list --json 2>/dev/null | jq -sce '
+    if length != 1 then error("invalid inventory")
+    elif (.[0] | type) != "array" then error("invalid inventory") else
+      .[0] | map({name, enabled, enabled_tools, disabled_tools, required, auth_status})
     end' 2>/dev/null)"; then
     fail "$profile MCP inventory unavailable or invalid"
     continue
@@ -89,9 +96,10 @@ for profile in base work learn; do
       codebase_memory) expected="$cbm_tools" ;;
       context7) expected="$context_tools" ;;
     esac
-    if ! details="$(timeout 20 codex --profile work mcp get "$server" --json 2>/dev/null | jq -ce '
-      if type != "object" then error("invalid server") else
-        {name, enabled_tools, disabled_tools}
+    if ! details="$(run_bounded 20 codex --profile work mcp get "$server" --json 2>/dev/null | jq -sce '
+      if length != 1 then error("invalid server")
+      elif (.[0] | type) != "object" then error("invalid server") else
+        .[0] | {name, enabled_tools, disabled_tools}
       end' 2>/dev/null)" || ! jq -e --arg name "$server" --argjson expected "$expected" '
       .name == $name and (.enabled_tools | type == "array") and
       ((.enabled_tools | sort) == ($expected | sort)) and
@@ -116,7 +124,7 @@ printf '[info] Live active-session catalog is not verified by this offline diagn
 
 # The installed MCP CLI omits `required`; inspect only non-secret policy flags
 # in user config, never credential stores or arbitrary configuration output.
-if ! timeout 10 python3 - <<'PY'
+if ! run_bounded 10 python3 - <<'PY'
 import os, pathlib, sys, tomllib
 try:
     state = pathlib.Path(os.environ.get('CODEX_HOME', str(pathlib.Path.home()/'.codex')))

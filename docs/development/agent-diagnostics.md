@@ -22,9 +22,12 @@ The [script](../../scripts/dev/agent-doctor.sh), exposed through the
 Output uses fixed status messages and extracted version numbers, not raw command
 output, config JSON, transport URLs, environment values, account names, personal
 paths, or credentials. Unexpected/malformed output is a diagnostic failure, not
-something echoed for debugging. Commands are bounded; no `eval` or execution of
-configuration values is used. Prerequisites include Bash, timeout, jq, Git, stat,
-and Python 3 with `tomllib`.
+something echoed for debugging. CLI probes retain their 20-second deadlines;
+the Python configuration probe retains its 10-second deadline. GNU `timeout`
+sends TERM at expiry, then KILL after a 2-second grace if necessary. This bounds
+directly monitored probes, not universal process-tree supervision. No `eval` or
+execution of configuration values is used. Prerequisites include Bash, timeout,
+jq, Git, stat, and Python 3 with `tomllib`.
 
 Default operation starts no MCP servers and performs no analysis, license check,
 index refresh, GUI launch, product test, update, or Context7 documentation query.
