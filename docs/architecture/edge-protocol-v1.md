@@ -74,7 +74,7 @@ HTTP describes request/protocol acceptance, not physical success:
 | `409` | Agent/binding precondition conflict or same-ID/different-semantics conflict |
 | `413` | Request body exceeds its bound |
 | `415` | Unsupported request media type |
-| `422` | Invalid semantic kind/payload/capability or expired new/forgotten submission |
+| `422` | Invalid semantic kind/payload/capability, expired new/forgotten submission, or submission beyond the permitted future horizon |
 | `503` | Bounded resource cannot accept work or runtime cannot safely admit new work |
 
 Unsupported endpoint methods use `405` and an appropriate `Allow` header.
@@ -128,7 +128,7 @@ boundaries. Clients must bound their framing buffers too.
 | `agent_instance_id` | Rust at startup; opaque UUID-like ID for exactly one daemon lifetime |
 | `device_id` | Privileged configuration; stable logical slot surviving hardware replacement |
 | `binding_instance_id` | Rust on successful bind; random opaque ID for one physical attachment/binding epoch |
-| `command_id` | Racket; one intended semantic physical operation attempt, stable across transport retries |
+| `command_id` | Racket; fresh unpredictable ID for each new semantic physical-operation attempt, stable across transport retries |
 | `request_id` | Racket; one HTTP request attempt, changed across transport retries |
 
 Identifiers are opaque; clients MUST NOT derive ordering or time from them.
@@ -210,9 +210,26 @@ raw-byte payload. A new operation must target the current agent and exact
 successful binding; logical device ID alone is insufficient.
 
 `not_after_agent_uptime_ms` limits admission of a new or forgotten command ID.
-Racket obtains agent uptime and chooses a finite submission window. It is not
-a wall-clock timestamp, execution timeout, or permission to repeat an effect.
-`timeout_ms` independently runs from acceptance, including queue time.
+Racket obtains agent uptime and chooses a submission window within the permitted
+maximum submission horizon. It is not a wall-clock timestamp, execution timeout,
+or permission to repeat an effect. `timeout_ms` independently runs from
+acceptance, including queue time.
+
+Each new semantic physical-operation attempt MUST receive a fresh unpredictable
+`command_id` from Racket. A transport retry MUST preserve the same command ID,
+semantic command, and original `not_after_agent_uptime_ms`, while using a new
+`request_id`. Racket MUST NOT recycle an old command ID to change the payload,
+kind, device, binding, timeout, or freshness deadline. A genuinely new operation
+requires a new command ID; creating it remains subject to Racket's retry policy
+and uncertainty handling.
+
+For new submissions with no retained record, the protocol MUST bound how far
+`not_after_agent_uptime_ms` may lie beyond current agent monotonic uptime. A
+deadline exceeding the maximum submission horizon is rejected before
+acceptance/effect. The initial M8.2 target is approximately 60 seconds, subject
+to qualification. This admission bound is separate from `timeout_ms`, even if
+their initial numerical maxima are similar. It prevents callers from forcing
+arbitrarily long freshness retention.
 
 ## Acceptance ordering and execution fence
 
@@ -225,7 +242,7 @@ agent-instance precondition
         ↓
 existing command_id lookup
         ↓
-submission freshness check
+submission freshness + maximum submission horizon check
         ↓
 device lookup
         ↓
@@ -264,10 +281,11 @@ binding invalidation, but MUST NOT cause new execution.
 
 ## Deduplication, freshness, and cache retention
 
-Within one agent epoch, same `command_id` plus same semantic command returns
-existing state and never executes again. Same ID with different semantics
-returns conflict, preserving the original record. `request_id` is excluded
-from semantic identity. Identity includes at least:
+While compact command identity is retained, same `command_id` plus same semantic
+command returns existing state and never executes again. Same ID with different
+semantics returns conflict, preserving the original record. After safe eviction,
+an exact replay of the accepted submission is expired and cannot execute again.
+`request_id` is excluded from semantic identity. Identity includes at least:
 
 ```text
 device_id
@@ -289,42 +307,59 @@ Freshness rules are:
 | Record lookup | Deadline condition | Result |
 | --- | --- | --- |
 | Existing record | Any, including expired | Deduplicate or conflict; no new execution |
-| New/forgotten ID | Agent uptime <= `not_after_agent_uptime_ms` | May continue admission checks |
 | New/forgotten ID | Agent uptime > `not_after_agent_uptime_ms` | Reject before effect |
+| New/forgotten ID | Agent uptime <= `not_after_agent_uptime_ms` <= agent uptime + maximum submission horizon | May continue admission checks |
+| New/forgotten ID | `not_after_agent_uptime_ms` > agent uptime + maximum submission horizon | Reject before acceptance/effect |
+
+The agent evaluates these admission bounds against its current monotonic uptime
+after existing-record lookup. Retained duplicates do not become new admissions.
 
 The freshness value is semantic identity. A transport retry cannot extend it.
 Expiration does not cancel an already accepted command; its
 acceptance-relative timeout governs execution.
 
-Within the live agent epoch, records MUST remain while nonterminal. A terminal
-record MUST remain until both its submission deadline has passed and the
-terminal recovery minimum has elapsed. The initial recovery target is at least
-120 seconds after terminal completion. Restart loses ephemeral cache state;
-this minimum is not a durability guarantee across restart.
+Within the live agent epoch, every accepted nonterminal record MUST remain
+retained; it cannot be evicted to make room. A terminal record MUST remain until
+**both** its original submission freshness deadline has passed and the terminal
+recovery minimum has elapsed. The initial recovery target is at least 120
+seconds after terminal completion. Restart loses ephemeral cache state; this
+minimum is not a durability guarantee across restart.
 
-Freshness alone cannot detect changed semantics under a forgotten ID. To
-preserve the per-epoch conflict guarantee as well, compact accepted-command
-identity, fingerprint, and terminal state MUST remain for the entire agent
-epoch within the command-record bound. Sensitive payload disposal is not
-identity disposal. v1 must not silently forget accepted identities and permit
-their reuse; loss of this Core-owned evidence requires process termination and
-a new agent epoch. The new/forgotten-ID freshness check still applies to delayed
-submissions with no record, including requests that were never accepted.
+At current monotonic uptime `U`, with original freshness deadline `D`, terminal
+time `T`, and recovery minimum `R`, eviction eligibility requires a terminal
+record **and** `U > D` **and** `U - T >= R`. At `U == D`, the original submission
+is still fresh and its identity cannot be evicted.
 
-No eviction policy may remove correctness evidence to accept more work.
-Cache-full returns an explicit pre-acceptance failure, including when compact
-epoch retention consumes capacity. M8.2 must qualify sustained lane throughput
-against that bound; the initial 4096 target may need adjustment. Long deadlines
-cannot produce unbounded allocation. An implementation must not weaken ID
-conflict detection as an undocumented cache optimization.
+After both conditions hold, the compact terminal record MAY be evicted under
+bounded cache policy. An implementation may retain it somewhat longer, but
+retention for the entire agent epoch is not required. Full sensitive payloads
+may be discarded after terminal completion while the compact record still
+supports semantic equality/conflict, safe lookup, outcome/effect evidence, and
+timing metadata. Payload disposal does not permit early compact-record eviction.
 
-A command lookup returns 404 only when no record is retained in the current
-agent. Expiration or payload disposal must not make an accepted command's
-compact state disappear within its epoch. **404 is not evidence that an effect
-did not happen**, including in an earlier agent epoch. Racket must use its own
-correlation/recovery policy, never infer a safe replacement operation from cache
-absence. This differs deliberately from
-the durable business receipts in
+While a submission remains admissible, its accepted identity is retained and
+deduplicates exact retries. Once safely evicted, its original
+`not_after_agent_uptime_ms` is already expired: an exact delayed replay fails the
+freshness check before effect. The server cannot indefinitely detect deliberate
+reuse of an evicted ID with changed semantics or extended freshness without
+durable/unbounded identity history. Such reuse violates the Racket client
+contract; it is not a server conflict guarantee after eviction.
+
+Cache capacity is a sliding bounded working set, not a process-lifetime command
+quota. Bounded policy must support reclaiming safely expired terminal records
+so capacity is reusable. Admission fails before acceptance if a new record
+would violate nonterminal, freshness, or terminal recovery retention; protected
+evidence MUST NOT be evicted early to admit work. The initial 4096-record target
+counts records retained at once. M8.2 must qualify capacity, command rate,
+recovery horizon, freshness horizon, and memory use. Normal finite command
+throughput no longer implies permanent exhaustion after a lifetime count of
+commands.
+
+After safe eviction, `GET /v1/commands/{command_id}` may return 404. **404 is not
+evidence that no physical effect occurred**, either in this or an earlier agent
+epoch. Racket must preserve uncertainty and use its own correlation/recovery
+policy, never infer a safe replacement operation from cache absence. This
+differs deliberately from the durable business receipts in
 [ADR-0011](../adr/0011-use-durable-command-receipts-and-expected-stream-versions.md).
 
 ## Lifecycle, outcomes, and effect evidence
@@ -417,8 +452,9 @@ These are initial defaults to qualify in M8.2, not immutable protocol constants:
 | Non-stream JSON response | Approximately 256 KiB |
 | One event record, including initial snapshot | Approximately 64 KiB |
 | Command timeout maximum | 60 seconds |
+| Maximum submission horizon | Approximately 60 seconds beyond current agent monotonic uptime; separate from command timeout |
 | Executor queue | 32 waiting commands per physical resource |
-| Command records | 4096 per agent, including nonterminal and retained terminal records |
+| Command records | 4096 retained at once per agent, including nonterminal and retained terminal records; safely expired terminal records may be evicted |
 | Terminal recovery minimum | 120 seconds after terminal completion, also subject to freshness retention |
 | Operational event streams | One Racket subscriber |
 
@@ -510,7 +546,8 @@ workflow, authorization, and retry decisions.
 Typed payloads may be needed while queued/executing. Terminal retention should
 discard full sensitive payload content while keeping bounded metadata, private
 semantic fingerprint, outcome, effect evidence, safe result/error, and timing.
-Strict equality/conflict detection must still work after payload disposal.
+Strict equality/conflict detection must still work after payload disposal while
+the compact record is retained.
 Receipt content, barcode values, raw device packets, customer content, and
 credential-like values must not enter ordinary logs or support metadata.
 [ADR-0023](../adr/0023-build-support-bundles-from-allowlisted-operational-metadata.md)

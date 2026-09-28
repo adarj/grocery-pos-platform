@@ -118,31 +118,45 @@ cause all keyboard/input nodes to be opened or captured.
 ## Stale commands, duplicate effects, and uncertainty
 
 Agent and binding preconditions fence process restarts and hardware replacement.
-Stable Racket-generated command IDs distinguish transport retries from new
-physical attempts; request IDs change per HTTP attempt. Duplicate equality is
-typed/canonical, excludes request ID, and includes device/binding, freshness,
-kind, timeout, and payload. Changed semantics conflict rather than reinterpret
-an old intended operation.
+Fresh unpredictable Racket-generated command IDs identify new semantic physical
+attempts. Transport retries preserve command ID and exact semantics, including
+the original freshness deadline; request IDs change per HTTP attempt. Duplicate
+equality is typed/canonical, excludes request ID, and includes device/binding, freshness,
+kind, timeout, and payload. While identity is retained, changed semantics
+conflict rather than reinterpret an old intended operation. Racket must not
+recycle an old command ID with changed semantics or extended freshness.
 
 A monotonic `not_after_agent_uptime_ms` prevents an unaccepted or forgotten
 unchanged submission from becoming a new arbitrarily late effect. Existing
 records deduplicate even after expiration; retry cannot extend freshness.
-Admission timeout is separate from execution timeout. Wall clock is irrelevant
-to both protocol safety and cache-retention timing.
+New admission must also bound how far the deadline lies beyond current agent
+monotonic uptime. A maximum submission horizon, initially approximately 60
+seconds subject to qualification, rejects excessively distant deadlines before
+acceptance/effect. It is separate from `timeout_ms` and prevents callers forcing
+arbitrarily long freshness retention. Wall clock is irrelevant to protocol
+safety and cache-retention timing.
 
-There is a retention tension worth making explicit: freshness alone prevents
-an unchanged expired request from re-executing, but cannot detect changed
-semantics once its identity has been forgotten. The per-epoch conflict rule
-therefore requires compact accepted-command identity and terminal state for
-the whole epoch. Full sensitive payloads can be discarded. All retention stays
-within the command-record bound; when full, new admission fails. Loss of Core
-identity evidence requires a new process epoch, not silent reuse. Initial
-capacity/throughput needs M8.2 qualification; changing this guarantee would
-require an explicit architectural decision.
+Every accepted nonterminal record must remain retained. A terminal record must
+remain until both its original freshness deadline has passed and the terminal
+recovery minimum has elapsed. Only then may bounded policy evict it. Sensitive
+payloads may be discarded after completion while compact equality/conflict,
+safe lookup, outcome/effect evidence, and timing metadata remain. Compact
+identity need not survive the entire agent epoch; this is a sliding bounded
+working set whose safely expired terminal capacity can be reused.
+
+Before safe eviction, retained identity deduplicates exact retries and conflicts
+on changed semantics. After eviction, an exact replay is already stale and
+cannot produce a new effect. Lookup may return 404, which is not evidence that
+no effect occurred. Deliberate reuse of a forgotten ID with changed semantics
+or a new freshness deadline violates the Racket client contract; the bounded
+ephemeral server cannot detect it indefinitely without durable/unbounded history.
+Admission must fail before acceptance if required nonterminal, freshness, or
+recovery retention cannot fit; no protected evidence may be evicted early.
+M8.2 must qualify capacity, command rate, both horizons, and memory use.
 
 Core must reserve capacity and create a record before physical execution. Queue,
-cache, stale epoch, invalid payload, and freshness failures happen before
-acceptance/effect. Binding/deadline checks also fence already-queued commands.
+cache, stale epoch, invalid payload, freshness, and submission-horizon failures
+happen before acceptance/effect. Binding/deadline checks also fence already-queued commands.
 One resource runs one command at a time, even when printer and drawer operations
 share a transport; different resources may run concurrently.
 
@@ -182,14 +196,16 @@ cannot be contained.
 
 All requests, queues, caches, observations, subscribers, and framing buffers are
 bounded. v1 initial targets are approximately 16 KiB headers, 256 KiB command
-body/non-stream response, 64 KiB event record, 60-second maximum timeout,
-32 waiting commands per resource, 4096 command records, at least 120-second
-terminal recovery, and one operational stream. These are implementation
-defaults to qualify, not eternal protocol constants. Aggregate configured
+body/non-stream response, 64 KiB event record, 60-second maximum timeout, a
+separate approximately 60-second maximum submission horizon, 32 waiting commands
+per resource, 4096 records retained at once, at least 120-second terminal recovery,
+and one operational stream. These are implementation defaults to qualify, not
+eternal protocol constants. Aggregate configured
 devices/resources and connection/parser work also need bounds.
 
-Memory exhaustion must not cause silent loss of command identity or event
-continuity. Cache/queue overflow rejects new commands before acceptance.
+Memory exhaustion must not cause premature loss of protected command identity or
+silent loss of event continuity. Safely expired terminal records may be reclaimed;
+cache/queue overflow otherwise rejects new commands before acceptance.
 Subscriber overflow closes the stream for a new snapshot; internal observation
 overflow becomes an explicit continuity/binding fault. If safe failure reporting
 is impossible, fail the control plane. Repeated churn may deny availability;
@@ -294,9 +310,16 @@ The following constrain all future implementation and qualification:
 6. **E6:** Commands target an agent epoch and binding epoch.
 7. **E7:** A stale agent/binding command cannot produce a physical effect.
 8. **E8:** A command record exists before its physical effect can begin.
-9. **E9:** Same command ID plus same semantics executes at most once per agent epoch.
-10. **E10:** Same command ID plus different semantics is rejected; compact identity must survive the epoch to enforce this.
-11. **E11:** Expired, forgotten submissions cannot become arbitrarily late effects.
+9. **E9:** An accepted semantic command submission cannot execute twice through
+   an exact transport replay within the agent epoch. While it remains admissible,
+   its identity is retained; after safe eviction, the original submission is stale.
+10. **E10:** While identity is retained, same command ID plus changed semantics
+    is rejected as a conflict. A new semantic operation must use a fresh
+    unpredictable command ID; recycling an evicted ID with extended freshness
+    is prohibited client behavior, not an indefinitely enforceable server guarantee.
+11. **E11:** Before a terminal identity may be forgotten, its original submission
+    freshness deadline has passed and its recovery minimum has elapsed; an exact
+    delayed replay cannot become a new physical effect.
 12. **E12:** Physical outcomes distinguish known failure from uncertainty.
 13. **E13:** `unknown` is never silently converted into success or failure.
 14. **E14:** Rust does not decide business retry policy.
@@ -345,12 +368,17 @@ configuration, simulation, client behavior, and at least these cases:
 | --- | --- |
 | Old agent command | Rejected before effect |
 | Old binding command, including already queued work | Rejected/fenced; cannot reach replacement hardware |
-| Same ID/same semantics, including lost response/concurrent submissions | One execution; existing state returned |
-| Same ID/different semantics | Conflict; original command preserved |
-| Expired unseen/forgotten submission | New execution rejected before effect; retained identities still deduplicate/conflict |
+| Same ID/same semantics while retained, including lost response/concurrent submissions | One execution; existing state returned |
+| Same ID/different semantics while retained | Conflict; original command preserved |
+| Recovery minimum elapsed but original freshness remains open, with bounds permitting this ordering | Record retained; exact retry deduplicates |
+| Original freshness expired but recovery minimum not elapsed | Record retained; exact retry deduplicates |
+| Both terminal retention conditions hold, followed by safe eviction | Exact original replay rejected by freshness before effect; lookup may return 404 without proving non-effect |
+| New deadline beyond maximum submission horizon | Pre-acceptance rejection; no record or effect |
+| Forgotten ID deliberately recycled with extended freshness | Client contract violation; no claim of indefinite server conflict detection |
 | Record-before-effect | Effect start observes the already-created record |
 | Queue overflow | Pre-acceptance failure; no effect or accepted record |
-| Cache guarantee/capacity | Nonterminal/fresh/recovery evidence and epoch identity preserved; reject new work when full |
+| Cache guarantee/capacity | Nonterminal/freshness/recovery evidence retained; reject new work when protected records fill capacity |
+| Capacity reuse after safe terminal expiration | Eligible records reclaimed; new IDs admitted without an agent restart or a lifetime command quota |
 | Timeout before effect | Known non-effect, such as `failed + none`; fenced execution cannot act later |
 | Timeout after possible effect | `unknown + possible`; binding invalidated |
 | Panic before effect | Known non-effect; binding invalidated if driver execution began |
@@ -365,10 +393,10 @@ configuration, simulation, client behavior, and at least these cases:
 | Replug | New binding ID even for identical hardware |
 | Malformed/duplicate-key/unknown-field JSON | Strict rejection at all relevant nesting levels |
 | Oversized request/record/configuration | Explicit bounded failure; no incomplete snapshot or unbounded buffers |
-| Terminal payload privacy | Full sensitive payload discarded; equality/conflict and safe terminal state retained |
+| Terminal payload privacy | Full sensitive payload discarded; equality/conflict and safe terminal state work while compact identity is retained |
 | Production simulator guard | Simulated adapter fails without explicit launch permission |
 | Strict configuration/binding | Unknown adapter/version/field and ambiguous or duplicate candidate claims fail closed |
-| Racket client | Epoch/gap/wire-error handling and cache absence preserve uncertainty; business retry is not invented |
+| Racket client | Fresh unpredictable IDs for new attempts; exact retries preserve semantics/deadline with new request IDs; epoch/gap/wire-error handling and 404 preserve uncertainty |
 
 Deterministic adapter scenarios must include connect/disconnect, barcode input,
 stable/unstable weight, paper-out, pre-effect failure, possible-effect crash,
@@ -446,10 +474,12 @@ customer data, raw packets, or sensitive host metadata. M8.1 creates no ledger.
 Physical compromise can spoof observations, misdirect hardware, or attack the
 kernel; compromised edge can lie about effects. In-process adapters share a
 daemon compromise boundary. Crashes can leave irrecoverably uncertain effects,
-and transient disconnected input can be lost. Compact per-epoch command identity
-consumes bounded capacity; sustained throughput and safe recovery on restart
-need implementation qualification. Correct workflow and retry policy in Racket
-remain essential.
+and transient disconnected input can be lost. Required nonterminal/freshness/
+recovery retention can temporarily exhaust bounded capacity; safe terminal
+eviction permits reuse. Capacity, command rate, both horizons, memory, and
+restart recovery need implementation qualification. Deliberate recycling of
+an evicted command ID cannot be detected indefinitely by this ephemeral server;
+Racket's fresh-ID contract, workflow, and retry policy remain essential.
 
 Edge Protocol v1 does not provide:
 

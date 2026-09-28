@@ -36,9 +36,16 @@ device-cgroup restrictions under a separate edge service identity.
 
 Commands name a semantic capability, logical device, agent epoch, binding
 epoch, stable command ID, and monotonic submission deadline. A command record
-must exist before its physical effect can begin. Same-ID transport retries
-return existing state; changed semantics conflict. Compact command identity
-remains for the agent epoch; payloads need not. Outcomes distinguish known
+must exist before its physical effect can begin. While compact identity is
+retained, same-ID transport retries return existing state and changed semantics
+conflict. Nonterminal records remain retained; terminal records may be evicted
+only after both the original freshness deadline has passed and the terminal
+recovery minimum has elapsed. Exact replay after safe eviction is stale and
+cannot execute. A bounded maximum submission horizon prevents arbitrarily long
+freshness retention. Racket must use a fresh unpredictable command ID for each
+new semantic attempt; it must not recycle forgotten IDs with changed semantics
+or extended freshness. Bounded ephemeral state cannot enforce infinite ID
+uniqueness. Full terminal payloads need not remain. Outcomes distinguish known
 failure from `unknown`, and effect evidence guides Racket's retry decision.
 Rust does not decide business retry policy or automatically repeat uncertain
 discrete effects.
@@ -77,6 +84,8 @@ presentation projection; a legacy serial pole display may need an edge adapter.
   resource bounds, and physical-device security policy.
 - Epoch checks, record-before-effect, freshness, and explicit uncertainty
   prevent stale or transport-retried commands from silently repeating effects.
+- Safe terminal eviction makes cache capacity reusable during long-running
+  service operation without allowing exact stale replay to execute.
 - Device replacement and availability remain separate from business truth.
 - Deterministic simulation supports ordinary CI without claiming hardware
   qualification; tiered evidence keeps deployment claims honest.
@@ -87,8 +96,12 @@ presentation projection; a legacy serial pole display may need an edge adapter.
   qualification in addition to protocol tests.
 - Bounded ephemeral records constrain recovery; restart can leave physical
   outcomes unresolved, requiring Racket-owned recovery and human decisions.
-- Preserving ID conflicts throughout an epoch consumes bounded cache capacity;
-  admission stops when evidence cannot be retained, so sizing needs qualification.
+- Conflicts are detectable only while identity is retained. Racket must preserve
+  exact retries and generate fresh IDs for new operations; deliberate reuse after
+  safe eviction cannot be detected indefinitely by the ephemeral server.
+- Required retention can temporarily exhaust the cache and reject admission.
+  Capacity, command rate, recovery/freshness horizons, and memory need
+  qualification.
 - A shared daemon makes Core failure a lane-wide edge restart. Future hardware
   may justify out-of-process adapter isolation through a separate decision.
 - Semantic adapters and command-specific success criteria cost more design work

@@ -214,12 +214,17 @@ binding cannot update its replacement.
 
 ## Command acceptance and bounded execution
 
-Racket creates the stable edge `command_id` and fresh per-request `request_id`.
-These edge identities are distinct from durable transaction-command receipts:
-an edge command describes one physical operation attempt, not a sale mutation.
-Commands target both agent and binding epochs and carry
-`not_after_agent_uptime_ms`, a monotonic submission deadline that transport
-retry cannot extend.
+Racket creates a fresh unpredictable edge `command_id` for each new semantic
+physical-operation attempt. Transport retries preserve that ID, the same
+semantic command, and the original `not_after_agent_uptime_ms`, with a new
+per-request `request_id`. Racket must not recycle an old ID with changed
+semantics or extended freshness to represent a new operation. These edge
+identities are distinct from durable transaction-command receipts: an edge
+command describes one physical attempt, not a sale mutation. Commands target
+both agent and binding epochs; the submission deadline uses agent monotonic
+uptime and cannot exceed a bounded maximum future horizon for new admission.
+The initial horizon target is approximately 60 seconds, qualified separately
+from the acceptance-relative execution timeout.
 
 Core must preserve this logical acceptance order:
 
@@ -227,7 +232,7 @@ Core must preserve this logical acceptance order:
 parse + structural validation
   → agent-instance precondition
   → existing command_id lookup
-  → submission freshness check
+  → submission freshness + maximum submission horizon check
   → device lookup
   → binding-instance precondition
   → capability/payload validation
@@ -239,7 +244,8 @@ parse + structural validation
 ```
 
 **A command record exists before its physical effect can begin.** Freshness,
-binding, cache-full, and queue-full failures precede acceptance and effect.
+submission-horizon, binding, cache-full, and queue-full failures precede
+acceptance and effect.
 Lookup/reservation/record creation must be arbitrated so concurrent requests
 cannot bypass deduplication. Reservation or handoff failure must not start an
 unrecorded effect. Detailed duplicate and retention semantics are normative in
@@ -313,15 +319,29 @@ barcode history, or second business store. It must not persist sales, payments,
 cash movements, catalog, operator identity, shifts, or business retry policy.
 If a fact matters after edge restart, it belongs to Racket/SQLite.
 
-Terminal command records can retain metadata, a private semantic fingerprint,
+Every accepted nonterminal command record must remain retained. A terminal
+record must remain until both its original submission freshness deadline has
+passed and the terminal recovery minimum has elapsed, initially at least 120
+seconds after completion. After both conditions hold, bounded policy may evict
+the compact terminal record; it need not survive the entire agent epoch.
+While retained, it supports metadata, private semantic fingerprint,
 outcome/effect evidence, safe result/error, and timings without full receipt or
-other sensitive payload content. Compact identity and terminal state remain
-for the agent epoch to preserve both identical-command deduplication and
-changed-semantics conflicts; payload disposal is not identity disposal.
-The recovery/freshness minimum and bounded-capacity consequences are specified
-in [Edge Protocol v1](edge-protocol-v1.md). Capacity exhaustion rejects new work
-rather than evicting correctness evidence; M8.2 must qualify the initial cache
-size against lane throughput.
+other sensitive payload content. Payload disposal cannot bypass required
+compact-record retention.
+
+Retained identities deduplicate identical commands and conflict on changed
+semantics. After safe eviction, an exact replay carries an expired original
+deadline and is rejected before effect. Deliberate recycling of an evicted ID
+with extended freshness is prohibited client behavior; a bounded ephemeral
+server cannot detect it indefinitely. Lookup may return 404 after eviction,
+which never proves non-effect.
+
+Cache capacity is a sliding bounded working set with reusable capacity, not a
+process-lifetime identity count. Admission fails before acceptance when required
+nonterminal/freshness/recovery retention leaves insufficient room; no protected
+evidence may be evicted early. Safely expired terminal records may be reclaimed.
+The detailed rules are in [Edge Protocol v1](edge-protocol-v1.md). M8.2 must
+qualify capacity, command rate, recovery/freshness horizons, and memory use.
 
 Future Racket integration will maintain a conceptual `EdgeSession` containing
 agent ID, current event cursor, current device snapshots, stream health, and
