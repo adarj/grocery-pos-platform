@@ -1,6 +1,13 @@
 # Flutter Linux VM Notes
 
-The development VM is an aarch64 Fedora Kinoite guest running in VMware Fusion on Apple Silicon. The project runs Flutter from the `dev` Distrobox through the Nix development shell.
+This document describes one tested VM environment and its graphics workaround;
+it is not the canonical development architecture for every contributor. See the
+[README development environment](../../README.md#development-environment) for
+the portable Linux/Nix project contract.
+
+In this environment, the development VM is an aarch64 Fedora Kinoite guest
+running in VMware Fusion on Apple Silicon. Flutter runs from the `dev` Distrobox
+through the Nix development shell.
 
 ## Known issue
 

@@ -1,68 +1,17 @@
 # Grocery POS Platform
 
-A local-first retail point-of-sale platform for small-to-medium grocery stores.
+A **pre-production, local-first single-register grocery POS foundation** for
+small-to-medium stores. The implemented checkout path is cash: durable sales,
+replay, idempotent command recovery, shift/cash accountability, and local
+operator security are in place, alongside Fedora Kinoite appliance foundations.
 
-The project is an early-stage implementation of a grocery POS system designed around reliable local checkout, explicit transaction state, test-driven development, hardware interoperability, and a cloud control plane that coordinates without becoming a hard dependency for ordinary register operation.
+This is **not suitable for production retail use**. M7 repository/Tier A security
+qualification passed, but booted appliance, physical kiosk, and abrupt-power
+qualification remain pending. Physical device I/O, substantial Rust edge work,
+card payments, refunds, inventory integration, and cloud synchronization are
+not implemented.
 
-The project is currently in the **walking-skeleton / early domain-development phase**. It is not production-ready.
-
-## Project Goals
-
-The platform is being designed to provide:
-
-* fast and reliable grocery checkout;
-* local-first operation during internet or cloud outages;
-* durable transaction, payment, receipt, and drawer state;
-* cashier-facing touchscreen and customer-facing display workflows;
-* interoperability with existing grocery inventory systems;
-* clean manager, technician, and support workflows;
-* test-driven development and explicit domain invariants;
-* reproducible development and deployment tooling;
-* infrastructure-as-code and GitOps-based change management;
-* controlled software updates and support tooling;
-* strong security boundaries around payments, authorization, remote operations, and sensitive data.
-
-## Architecture
-
-```text
-Fedora Kinoite POS Terminal
-  ├── Flutter Cashier UI
-  ├── Flutter Customer Display
-  ├── Racket POS Core
-  ├── SQLite Local Store
-  ├── Rust System/Device Agents
-  ├── Supabase Sync/Control-Plane Integration
-  └── KDE/Kinoite Appliance Layer
-
-Cloud Platform
-  ├── Supabase
-  │   ├── PostgreSQL
-  │   ├── Auth
-  │   ├── RLS policies
-  │   ├── register health snapshots
-  │   ├── remote command coordination
-  │   └── reporting/control-plane data
-  │
-  └── DigitalOcean
-      ├── support services
-      ├── update artifact distribution
-      ├── support bundle storage
-      └── auxiliary platform services
-```
-
-### Responsibility Boundaries
-
-| Component            | Primary responsibility                                            |
-| -------------------- | ----------------------------------------------------------------- |
-| Flutter              | Human-facing applications and presentation                        |
-| Racket               | POS domain semantics, transaction state, rules, and orchestration |
-| SQLite               | Durable local register state and recovery data                    |
-| Rust                 | Hardware, protocol, system, update, and support edges             |
-| Supabase             | Primary cloud database and control plane                          |
-| DigitalOcean         | Auxiliary cloud services and artifact infrastructure              |
-| Fedora Kinoite / KDE | Atomic POS appliance substrate                                    |
-
-The central design rule is:
+## Architecture and principles
 
 ```text
 Flutter presents.
@@ -72,483 +21,290 @@ Rust talks to edges.
 The cloud coordinates.
 ```
 
-## Core Principles
+Flutter renders authoritative state and collects input; it does not decide
+totals, tax, authorization, payment validity, or transaction lifecycle. Racket
+owns POS meaning and normal authoritative writes. SQLite stores durable facts,
+not business rules; Rust's intended role is system/device/protocol edges, not
+transaction authority.
 
-### Local-First Checkout
+Supabase and DigitalOcean are intended cloud coordination/auxiliary components,
+not prerequisites for ordinary local checkout. Validate remote commands locally;
+do not silently add external services to the checkout-critical path.
 
-Normal checkout must not require Supabase, DigitalOcean, or another cloud service to be reachable.
+Use exact integer money, explicit state transitions, and typed idempotent
+commands. Retry a logical command with its original command ID and expected
+version. Transaction events are business truth; command receipts retain original
+outcomes. **An unknown payment outcome must never trigger a blind charge retry.**
 
-Cloud outages may reduce synchronization, reporting, management, or support capabilities, but should not prevent local checkout when the required local hardware and payment path remain available.
+Accepted decisions and future architecture are in the
+[ADR index](docs/adr/README.md); the implemented Flutter ↔ Racket boundary is in
+the [local API contract](docs/architecture/local-api.md).
 
-### Racket Owns POS Meaning
+## Current implementation
 
-Flutter clients may request actions and render the resulting state, but they are not authoritative for:
+### Core transaction and checkout
 
-* transaction totals;
-* tax calculations;
-* promotion eligibility;
-* payment completion;
-* refunds;
-* manager authorization;
-* receipt truth;
-* transaction-state transitions.
+- Flutter cashier flow: start, scan, remove line, cash tender, complete,
+  approval-controlled open-sale void, canonical receipt display, and explicit
+  next sale.
+- Racket's exact-money/tax domain, deterministic replay, strict command/event
+  codecs, durable idempotency, and expected-version checks.
+- Explicit local catalog/tax activation with sale-time snapshots; later reference
+  changes do not reinterpret historical transactions.
 
-Those decisions belong to the local Racket POS Core.
+See [transaction commands](docs/architecture/transaction-command-schema.md),
+[journal/replay](docs/architecture/transaction-journal.md), and
+[receipts](docs/architecture/receipts.md).
 
-### Durable Explicit State
+### Persistence and recovery
 
-Transaction, tender, payment, receipt, drawer, synchronization, and recovery state should be represented explicitly rather than inferred from UI state.
+- Current SQLite schema v12; WAL/FULL durability, foreign keys, bounded busy
+  handling, and request connection ownership.
+- Accepted events and command outcomes commit atomically. Flutter persists exact,
+  operator-bound pending intent in recovery files, not bearer/PIN capabilities.
+- Validated live backups, explicit offline restore preserving displaced state,
+  and privacy-minimized local support bundles. Restore selects a historical
+  security/business recovery point; it never merges newer displaced rows.
 
-For the implemented cash-sale slice, SQLite is now the durable local journal
-of accepted transaction facts, and Racket replay reconstructs authoritative
-transaction state and canonical completed-sale receipts. A second materialized
-receipt store is not required. SQLite also persists cashier command recovery,
-shift cash movements, and immutable drawer reconciliation. Card-payment,
-synchronization, and external-device recovery remain future work.
+See [runtime](docs/architecture/racket-runtime.md),
+[maintenance/backup](docs/operations/database-maintenance.md),
+[restore](docs/operations/database-restore.md), and
+[support diagnostics](docs/operations/support-diagnostics.md).
 
-### Specialized Rust Edges
+### Register, shift, and cash accountability
 
-Rust is intended for components where low-level system integration, protocol handling, concurrency, hardware access, or robust native binaries provide clear value.
+- Explicit register/cashier configuration, operator-owned shifts, and one active
+  transaction slot.
+- Append-only opening/completed-sale cash movements and immutable close
+  reconciliation.
+- Server-derived shift identity, manager-authorized foreign close, and
+  blind-count-safe cashier summaries.
 
-Rust agents must not independently become authorities over transaction truth.
+See [register operations](docs/architecture/register-operations.md) and
+[cash accountability](docs/architecture/cash-accountability.md).
 
-## Current Implementation Status
+### Authentication and security
 
-The initial development environment and walking skeleton are operational.
+- Local operator identities, fixed cashier/supervisor/manager permissions,
+  Argon2id PIN credentials, durable login throttling, and process-local bounded
+  register sessions.
+- Server-side ownership enforcement, durable command actor/approver evidence,
+  and separately authenticated Supervisor / Manager Approval for fresh whole-sale
+  voids. A requester cannot self-approve; approval does not switch the cashier.
+- Separate hash-chained local security audit history with root-only inspection.
+- Authenticated PIN change, explicit root recovery reset, credential revisions,
+  grant revocation, and final-writer stale-credential rejection.
+- Flutter starts locked and retains unresolved transaction recovery through
+  reauthentication. No default manager, hidden credential, or master PIN exists.
 
-Verified capabilities currently include:
+See [security documentation](docs/security/) and M7 ADRs 0027–0032 in the ADR index.
 
-* Fedora Kinoite development VM on Apple Silicon through VMware Fusion;
-* a Fedora-based `dev` Distrobox development environment;
-* native VSCodium inside the `dev` Distrobox as the primary editor;
-* Nix flakes with `direnv` / `nix-direnv`;
-* `just` as the canonical development command interface;
-* Racket POS Core process;
-* separate `GET /health` process liveness and `GET /ready` authoritative
-  SQLite readiness endpoints;
-* strict literal-loopback API binding and native bounded HTTP request/resource
-  safety limits, including a 64 KiB request-body ceiling;
-* RackUnit backend tests;
-* exact-money, immutable cash-sale transaction domain behavior;
-* transaction domain events and deterministic replay;
-* strict, language-independent Transaction Event Schema v1/v2 JSON with
-  backward-compatible untaxed history and exact sale-time line-tax snapshots;
-* strict, language-independent Transaction Command Schema v1 with typed logical
-  request identity, caller-supplied expected stream versions, and append-only
-  open-sale remove/void corrections;
-* append-only SQLite transaction journal with migration v1, per-stream
-  sequencing, atomic batch append, and optimistic stream-version checks;
-* migration v2 durable command receipts with database-global command IDs and
-  atomic accepted-event/command-outcome persistence;
-* migration v3/v4 persistent local catalog and tax-reference tables with strict
-  Catalog Snapshot v1/v2 validation, atomic full replacement, SQLite runtime
-  checkout lookup, and sale-time price/tax snapshot isolation;
-* migration v5 current register/cashier configuration and durable shifts with
-  one active-transaction slot, POS-Core-recorded epoch-millisecond times, and
-  historical identity snapshotting;
-* migration v6 append-only opening/completed-sale cash movements and immutable
-  shift close reconciliation with exact signed over/short;
-* migration v7 local operator principals, fixed cashier/supervisor/manager
-  roles, same-ID cashier compatibility, and optional Argon2id PIN credentials
-  with no default identities or credentials;
-* root-only packaged operator bootstrap administration with no-echo PIN entry,
-  a fixed canonical database target, and no HTTP enrollment escape hatch;
-* schema v12 credential-revision-bound void grants, authenticated Change PIN,
-  interactive root PIN reset, final-writer stale-credential rejection, and
-  root-only appliance authentication-readiness reporting;
-* migration v8 durable per-known-operator login throttling, process-local
-  single-register bearer sessions, five-minute idle/twelve-hour absolute
-  expiry, credential-revision binding, and generic anti-enumeration failures;
-* authenticated local business routes plus a Flutter register lock with
-  memory-only bearer state, manual/inactivity locking, and exact-command
-  recovery preserved across reauthentication and POS Core restart;
-* migration v9 atomic transaction-command actor attribution plus fixed,
-  deny-by-default cashier/supervisor/manager permissions and durable
-  transaction/shift ownership enforcement;
-* server-derived shift identity, manager-only close-any, blind-count-safe open
-  cash summaries, and operator-bound Flutter transaction recovery;
-* idempotent persistent transaction application service with deterministic
-  two-connection concurrency and file-backed restart/retry coverage;
-* explicit SQLite WAL/FULL connection policy with foreign-key enforcement,
-  bounded connector busy handling, a bounded SQLite pool, thread-mapped virtual
-  request connections, and explicit shutdown ownership;
-* read-only SQLite inspection and migration/schema reporting, explicit quick
-  and full integrity checks, and validated live `VACUUM INTO` backups with
-  same-directory partial staging and atomic non-overwriting publication;
-* an internal noarch Fedora RPM for POS Core source, systemd/sysusers policy,
-  isolated persistent state, rootless package inspection, and extracted-package
-  SIGTERM/restart durability testing without an appliance Nix dependency;
-* explicit double-validated offline database restore with displaced
-  DB/WAL/SHM/journal evidence preservation, plus privacy-minimized local support
-  bundles built from allowlisted operational metadata;
-* a Fedora Kinoite 44 x86_64 appliance contract with transactional local-RPM
-  bootstrap, resumable first provisioning, separate backend/kiosk identities,
-  Plasma Login Manager lifecycle, and a source-pinned system Flatpak terminal;
-* an evidence-tiered Milestone 6 reliability acceptance framework with
-  deterministic repository qualification and explicitly pending booted,
-  hardware, and destructive-power campaigns;
-* Transaction HTTP API v1 with one strict idempotent command route,
-  authoritative transaction-state reads, and exact completed-sale canonical
-  receipt lookup derived from journal replay, plus narrow register/shift
-  operations;
-* Flutter Linux POS terminal with ordinary windowed development and explicit
-  fullscreen kiosk mode;
-* typed Flutter POS Core client models for transaction commands, durable command
-  outcomes, authoritative transaction snapshots, Receipt Schemas v1/v2,
-  register/shift context, authoritative shift cash summaries, and safe failures;
-* Flutter cashier session orchestration and a
-  start/scan/remove/void/cash-tender/complete interface rendering authoritative
-  basket, subtotal, tax, total, payment, and change;
-* Flutter widget tests;
-* isolated Flutter-to-Racket real-process integration tests covering complete
-  cash sales, restart recovery, uncertain transport, durable same-command
-  receipt resolution, net drawer movements, shift reconciliation, and mixed
-  one-shift endurance;
-* Flutter-to-Racket public health/readiness plus local operator authentication;
-* nixGL-based Flutter GUI launch in the current VM environment;
-* GitHub Actions workflow definitions for scaffold/Nix validation, Racket
-  tests, and Flutter analysis/tests;
-* Architecture Decision Records under `docs/adr/`.
+### Appliance and operations
 
-Milestone 6 acceptance evidence and the current deliberately conservative
-status are documented under [`docs/acceptance/m6`](docs/acceptance/m6/README.md).
-Repository-side green tests do not by themselves qualify a booted appliance or
-physical power-loss behavior.
+- Internal Fedora Core/appliance RPMs, loopback-only API, separate backend/kiosk
+  Unix identities, and a source-pinned system Flatpak terminal.
+- Fedora Kinoite 44 x86_64 provisioning/recovery foundations, windowed development
+  and explicit fullscreen kiosk mode, and root-only auth-readiness diagnostics.
 
-Milestone 7 security acceptance has a separate [requirements and evidence
-record](docs/acceptance/m7/README.md). `just accept-m7` runs deterministic
-repository qualification and records the tested uncommitted worktree; booted
-x86_64 Kinoite, selected kiosk hardware, and abrupt physical interruption
-still require their own observed evidence before the milestone can be called
-fully qualified.
+See [appliance operations](docs/operations/kinoite-appliance.md) and
+[provisioning](docs/operations/appliance-provisioning.md). Built artifacts and
+rootless package tests do not establish deployed appliance behavior.
 
-## Development Environment
+### Testing and qualification
 
-The current primary environment is:
+Racket, Flutter unit/widget, and isolated real-process integration tests protect
+the checkout/security/recovery boundaries. CI checks repository and artifact
+contracts. [M6 reliability](docs/acceptance/m6/README.md) and
+[M7 security](docs/acceptance/m7/README.md) have separate evidence records.
+
+M7's committed record has passing Tier A evidence, including x86_64 artifact
+contracts, but its overall status remains **conditional**: booted Kinoite
+(Tier B), physical kiosk (Tier C), and physical interruption (Tier D) have not
+run. Repository-green or emulated/process-crash evidence is not physical
+production qualification. Do not regenerate historical evidence for unrelated
+developer-surface changes.
+
+### Deferred major capabilities
+
+Card/payment-terminal integration, refunds, promotions, inventory integration,
+customer-display workflows, Rust hardware agents, cloud synchronization and
+remote management remain separately scoped future work. Rust, Supabase CLI,
+and OpenTofu tooling in the development shell are preparation, not evidence of
+implemented agents or cloud infrastructure. There is currently no Rust workspace
+or canonical cloud start/stop/plan workflow.
+
+## Development environment
+
+The repository-owned contract is a Linux development environment using the
+pinned Nix flake toolchain. No particular editor, hypervisor, laptop, container
+runtime, or host architecture is mandatory; target-specific artifact execution
+still requires a capable builder.
 
 ```text
-Apple Silicon host
-  ↓
-VMware Fusion
-  ↓
-Fedora Kinoite aarch64 VM
-  ↓
-Distrobox: dev
-  ├── Native VSCodium
-  │   └── project extensions / language servers
-  └── Nix flake development environment
-      ├── Racket
-      ├── Flutter / Dart
-      ├── Rust
-      ├── SQLite
-      ├── Supabase CLI
-      ├── OpenTofu
-      └── nixd
+Linux development environment
+  → Nix flake / optional direnv activation
+      ├─ Racket
+      ├─ Flutter / Dart
+      ├─ Rust toolchain
+      ├─ SQLite
+      ├─ Supabase CLI
+      ├─ OpenTofu
+      └─ project utilities and language tooling
+  → just: canonical project command interface
 ```
 
-VSCodium, its project extensions, the integrated terminal, and Codex run in
-the same `dev` Distrobox and observe the project toolchain activated by
-Nix/direnv.
-
-Enter the project normally through the native VSCodium terminal or:
+From the repository root, allow the checked-in direnv configuration:
 
 ```bash
-cd ~/Projects/grocery-pos-platform
 direnv allow
 ```
 
-Run the environment preflight check with:
+Alternatively enter the same toolchain explicitly:
 
 ```bash
+nix develop
+```
+
+The development shell prepares ignored local state and exports the development
+database/listener settings. Optional `.env.local` configuration must stay
+uncommitted. Inspect available commands and check the substrate with:
+
+```bash
+just --list
 just doctor
 ```
 
-## Running the Walking Skeleton
+Any editor can use that activated environment. The checked-in VS Code tasks
+expose a small set of operational `just` recipes, not a separate command policy.
 
-Use two terminals.
+The [Flutter Linux VM notes](docs/development/flutter-linux-vm-notes.md)
+describe one tested Apple Silicon/VMware/Fedora/Distrobox environment and its
+nixGL workaround. That setup is not mandatory for other contributors.
 
-### Prepare development reference data
+## Running the local POS development stack
 
-For a fresh development database, validate and atomically activate the small
-version-controlled catalog fixture first:
+Use two terminals in the project development environment.
+
+### Prepare development reference data and operator credentials
+
+For a fresh development database, validate and activate the version-controlled
+catalog and register/cashier fixtures:
 
 ```bash
 just catalog-validate pos-backend-racket/fixtures/development/catalog-snapshot-v2.json
 just catalog-activate pos-backend-racket/fixtures/development/catalog-snapshot-v2.json .local/sqlite/pos-dev.db
-```
-
-Activation replaces the complete current catalog in the explicitly selected
-database. The development shell provisions `.local/sqlite`; other database
-parents must already exist. POS Core startup never seeds or rewrites catalog
-data automatically.
-
-Also validate and activate the development register/cashier attribution
-fixture into the same explicit database:
-
-```bash
 just register-config-validate fixtures/development/register-configuration-v1.json
 just register-config-activate fixtures/development/register-configuration-v1.json .local/sqlite/pos-dev.db
 ```
 
-POS Core does not auto-seed identities or credentials. Before the Checkpoint 2
-terminal can unlock, an administrator must explicitly create/enroll at least
-one active operator through the root-only appliance bootstrap tool described in
-[Operator Identity and PIN Credentials](docs/security/operator-identity-and-pin-credentials.md).
-Cashier selection and shift attribution remain distinct from authentication;
-the authenticated operator now supplies shift identity, while Racket enforces
-the fixed role and resource-ownership policy documented in
-[Authorization and Ownership](docs/security/authorization-and-ownership.md).
-Fresh whole-sale voids now require a different supervisor/manager's local PIN
-approval, scoped to the exact command without replacing the cashier's register
-session. See [Supervisor / Manager Approval](docs/security/scoped-manager-approval.md).
-Security-sensitive local activity now has a separate hash-chained audit ledger,
-inspectable through a root-only CLI and validated with database backups; it is
-not transaction replay input or a Flutter/HTTP audit feed. See
-[Local Security Audit Ledger](docs/security/security-audit-ledger.md).
+Activation replaces current reference data in the explicitly selected database.
+The development shell prepares its parent directory; other parents must already
+exist. Runtime startup never implicitly seeds reference data or credentials.
+
+Configuration activation can create same-ID cashier operator stubs, but no PINs.
+Before the terminal can unlock, a usable active operator must be explicitly
+enrolled; register operations require same-ID active cashier configuration.
+Fresh whole-sale voids require a different approval-capable supervisor/manager.
+
+See [operator identity/bootstrap](docs/security/operator-identity-and-pin-credentials.md)
+and [credential lifecycle](docs/security/credential-lifecycle-and-recovery.md).
+The packaged root bootstrap tool targets the installed appliance's canonical
+database, not the development database above. Real-process integration fixtures
+separately establish isolated synthetic credentials; never use store credentials
+as development fixtures.
 
 ### Terminal 1 — POS Core
-
-Start the Racket backend:
 
 ```bash
 just run-racket
 ```
 
-The development server listens on:
-
-```text
-http://127.0.0.1:7340
-```
-
-The current health endpoint is:
-
-```text
-GET http://127.0.0.1:7340/health
-```
-
-It can also be tested manually:
+The development listener is `http://127.0.0.1:7340`. Check liveness and
+persistence readiness separately:
 
 ```bash
 curl http://127.0.0.1:7340/health
+curl http://127.0.0.1:7340/ready
 ```
 
-A healthy development response currently resembles:
+`/health` is process liveness. `/ready` verifies the lightweight current
+SQLite/runtime contract, not staffing, credential bootstrap, or full database
+integrity. Ordinary listener configuration permits only literal `127.0.0.1`
+or `::1`, with no remote-listener mode.
 
-```json
-{
-  "environment": "dev",
-  "ok": true,
-  "service": "grocery-pos-core",
-  "version": "0.0.0-dev"
-}
-```
+### Terminal 2 — Flutter POS terminal
 
-Operational readiness is separate:
-
-```text
-GET http://127.0.0.1:7340/ready
-```
-
-`/ready` returns 200 only while POS Core can establish its current production
-SQLite contract; a live process returns a sanitized 503 state when that
-boundary is unavailable. The ordinary API accepts only literal `127.0.0.1` or
-`::1` listener configuration and does not support remote access.
-
-### Terminal 2 — Flutter POS Terminal
-
-In the current Fedora Kinoite / VMware / Distrobox / Nix environment:
-
-```bash
-just run-pos
-```
-
-This launches Flutter through nixGL to provide the graphics-driver bridge required by the development VM.
-
-On systems that do not require that workaround:
+Use the ordinary Linux launcher when graphics work normally:
 
 ```bash
 just run-pos-plain
 ```
 
-When the backend is healthy, the Flutter application should report:
-
-```text
-POS Core Connected
-```
-
-If the backend becomes unavailable and the client retries, it should report:
-
-```text
-POS Core Unavailable
-```
-
-## Testing
-
-Run backend tests:
+In environments requiring the documented nixGL graphics bridge:
 
 ```bash
-just test-racket
+just run-pos
 ```
 
-Run Flutter tests:
+Both launch the same terminal. The nixGL variant remains the existing
+VM-specific workaround; it is not a universal requirement. The terminal starts
+locked and requires operator authentication before protected checkout navigation.
 
-```bash
-just test-flutter
-```
+## Validation and package development
 
-Run the isolated real POS Core integration suite (it starts and owns the Racket
-process automatically):
+Use the narrowest relevant existing recipe:
 
-```bash
-just test-pos-integration
-```
+| Command | Purpose |
+| --- | --- |
+| `just test-racket` | Backend tests |
+| `just test-flutter` | Flutter unit/widget tests |
+| `just test-pos-integration` | Isolated Flutter ↔ Racket ↔ SQLite process tests |
+| `just analyze-flutter` | Flutter analysis |
+| `just test` | Racket and Flutter tests, without real-process integration |
+| `just check` | Analysis, both test suites, and real-process integration |
 
-Run Flutter static analysis:
+The integration suite starts/owns its backend and temporary state; no separately
+started server or cloud service is needed. See the
+[integration guide](docs/development/integration-testing.md).
+Acceptance commands have qualification/evidence semantics and are not routine
+extra validation for small edits.
 
-```bash
-just analyze-flutter
-```
-
-Run the combined project test suite:
-
-```bash
-just test
-```
-
-Run the complete local quality gate, including Flutter static analysis, the
-fast Racket/Flutter suites, and the real-process POS integration suite:
-
-```bash
-just check
-```
-
-Canonical database inspection, integrity-check, and live-backup commands are
-documented in [Local POS Database Maintenance](docs/operations/database-maintenance.md).
-Explicit recovery is documented in the
-[Offline POS Database Restore](docs/operations/database-restore.md) runbook;
-automatic backup selection/fallback remains intentionally absent. See
-[POS Support Diagnostics](docs/operations/support-diagnostics.md) for the local,
-non-uploading diagnostic bundle contract.
-
-On Linux, build and validate the internal Fedora POS Core artifact with:
+Build and inspect native host packages without installing them:
 
 ```bash
 just build-pos-core-rpm
-just check-pos-core-package
-```
-
-These rootless commands do not install, enable, or start the package. See
-[POS Core Fedora Service](docs/operations/pos-core-service.md) for its
-filesystem/service contract. The x86_64 appliance artifacts are exposed through:
-
-```bash
 just build-pos-appliance-rpm
-just build-pos-terminal-flatpak
-just build-appliance-bundle
+just check-pos-core-package
 just check-pos-appliance
 ```
 
-See [Fedora Kinoite Grocery POS Appliance](docs/operations/kinoite-appliance.md)
-and [Appliance Provisioning](docs/operations/appliance-provisioning.md). These
-commands build/test artifacts rootlessly; they do not mutate the developer's
-host deployment or provision a register.
+The x86_64 terminal/bundle targets require a capable build environment:
 
-The canonical development command surface is the repository `justfile`; prefer adding reusable commands there rather than relying on undocumented shell invocations.
-
-## Repository Layout
-
-```text
-.
-├── docs/
-│   ├── adr/
-│   ├── architecture/
-│   ├── development/
-│   └── operations/
-├── flutter/
-│   └── apps/
-│       └── pos_terminal/
-├── pos-backend-racket/
-├── packaging/
-│   ├── fedora/
-│   └── tests/
-├── scripts/
-│   └── dev/
-├── .github/
-│   └── workflows/
-├── flake.nix
-├── flake.lock
-├── justfile
-└── README.md
+```bash
+just build-pos-terminal-flatpak
+just build-appliance-bundle
 ```
 
-Some directories describe the intended project organization and will grow as their corresponding subsystems are implemented.
+These commands do not provision a register or mutate the host deployment.
+See the [Core service contract](docs/operations/pos-core-service.md) and appliance
+runbooks. `just --list` is the live command inventory; do not assume Rust tests,
+a multi-language formatter, or cloud orchestration exists before implemented
+recipes establish their contracts.
 
-## Documentation
+## Repository and deeper guidance
 
-Architecture decisions are recorded under:
+Production application code lives under `pos-backend-racket/` and
+`flutter/apps/pos_terminal/`; `packaging/` contains appliance delivery and
+`scripts/` contains developer/qualification helpers.
 
-```text
-docs/adr/
-```
+- [ADRs](docs/adr/README.md): accepted architecture and rationale.
+- [Architecture contracts](docs/architecture/): domain, persistence, and API truth.
+- [Security](docs/security/): identity, sessions, ownership, approval, audit, and recovery.
+- [Operations](docs/operations/): appliance, database, backup/restore, and support.
+- [Development notes](docs/development/): environment-specific guidance and integration.
+- [Agent constitution](AGENTS.md) and [Codex workflow](docs/development/codex-workflow.md):
+  focused scope, learning-first collaboration, context routing, and proportional validation.
 
-Development-environment notes are stored under:
-
-```text
-docs/development/
-```
-
-Architecture and interface contracts are stored under:
-
-```text
-docs/architecture/
-```
-
-Operational procedures are stored under:
-
-```text
-docs/operations/
-```
-
-Documentation should evolve in the same change as the behavior or architectural decision it describes.
-
-## Development Practices
-
-The project follows:
-
-* test-driven development where practical;
-* small, independently testable changes;
-* Conventional Commits;
-* signed Git commits;
-* architecture decision records for consequential choices;
-* reproducible development environments;
-* explicit security and recovery invariants;
-* Git-based review and CI before changes become production candidates.
-
-Generated local state, credentials, secrets, databases, support bundles, and other environment-specific data must not be committed.
-
-## Implemented Transaction Milestones
-
-The first cash-sale vertical slice now includes the pure in-memory Racket
-transaction domain and its durable local transaction journal. Accepted live
-commands emit domain events, SQLite stores those events in ordered per-
-transaction streams, and deterministic replay recovers state after a process
-or connection restart.
-
-Mutations now enter through strict typed commands carrying durable command
-identity and caller-observed stream versions. SQLite command receipts preserve
-the original deterministic outcome across retries, while accepted events remain
-the authoritative transaction facts. Concurrent and lost-response tests prove
-that retrying the same command cannot duplicate the current cash-sale facts.
-
-This transaction workflow is exposed through the narrow Transaction HTTP API
-v1 command and query routes. Flutter now implements the current cash-sale
-cashier slice through authoritative completion or pre-payment void, persists
-exact pending command identity before mutation POSTs for process-restart
-recovery, and starts the next sale only through an explicit terminal-session
-action. Corrections append durable facts; Flutter never deletes a basket row or
-marks a sale voided optimistically. Post-payment refund/reversal and broader
-production checkout capabilities remain separately scoped work.
-
-## Status
-
-This repository is under active development and is **not suitable for production retail use**.
+Use TDD where practical, small reviewable changes, ADRs for consequential choices,
+and signed Conventional Commits after human review. Generated local state,
+credentials, secrets, databases, and support archives must not be committed.

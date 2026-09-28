@@ -164,13 +164,15 @@ explicit offline restore carry the PHC verifier and revision; there is no
 separate unbacked credential file or pepper. Protect backups as sensitive POS
 data.
 
-Startup and backup validation check current migration 11 DDL and the audit
-chain. Ordinary `/ready` remains a lightweight migration-history probe; it
-performs no Argon2 hashing or full audit scan and does not require every
-operator to be enrolled. Fresh M7 appliance provisioning reaches schema 11 and creates cashier operator
-stubs. An unenrolled register can be persistence-ready, but the Checkpoint 2
-terminal remains locked until an administrator explicitly enrolls a usable
-active operator.
+Startup and backup validation check canonical migration history and
+schema/application invariants through v12, including the audit chain. Ordinary
+`/ready` remains a lightweight migration-history probe; it performs no Argon2
+hashing or full audit scan and does not require every operator to be enrolled.
+Fresh M7 appliance provisioning reaches schema v12. Operational configuration
+activation creates missing same-ID cashier/operator stubs without replacing
+existing operator security state. An unenrolled register can be persistence-ready,
+but the terminal remains locked until an administrator explicitly enrolls a
+usable active operator.
 
 The ordinary support bundle excludes operator IDs, operator display names,
 role rosters, PINs, credential verifiers, and credential rows. Regression tests
@@ -187,8 +189,10 @@ current role and applies fixed server-side permissions and resource ownership;
 see [Authorization and Ownership](authorization-and-ownership.md). Manager
 approval for whole-sale void is now defined by
 [Supervisor / Manager Approval](scoped-manager-approval.md). Checkpoint 5 adds
-the [local security audit ledger](security-audit-ledger.md); credential reset
-remains deferred.
+the [local security audit ledger](security-audit-ledger.md). Initial enrollment,
+authenticated self-change, and root recovery/reset are distinct operations
+defined by [Credential Lifecycle and Recovery](credential-lifecycle-and-recovery.md).
+Reset requires an existing credential; an unenrolled operator needs enrollment.
 
-The files under `docs/acceptance/m6` remain historical evidence for the schema
-6 M6 baseline. They are not regenerated to describe current schema 11 code.
+The files under `docs/acceptance/m6` remain historical evidence for the schema 6
+M6 baseline and are not regenerated to describe current runtime behavior.

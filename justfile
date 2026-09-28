@@ -6,6 +6,10 @@ default:
 doctor:
     ./scripts/dev/doctor.sh
 
+# Optional, offline and sanitized checks for the qualified agent setup.
+agent-doctor:
+    ./scripts/dev/agent-doctor.sh
+
 test:
     just test-racket
     just test-flutter
@@ -133,9 +137,3 @@ db-restore-offline BACKUP DB:
 # Creates a local, allowlisted diagnostic archive without stopping POS Core.
 support-bundle DB OUTPUT:
     racket pos-backend-racket/scripts/support-diagnostics.rkt collect {{quote(DB)}} {{quote(OUTPUT)}}
-
-supabase-start:
-    @echo "TODO: start local Supabase"
-
-tofu-plan ENV:
-    @echo "TODO: OpenTofu plan for {{ENV}}"
