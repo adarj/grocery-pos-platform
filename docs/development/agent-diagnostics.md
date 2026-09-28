@@ -13,7 +13,8 @@ The [script](../../scripts/dev/agent-doctor.sh), exposed through the
 
 - Installed CLI/SDK versions, SDK MCP command availability, and login status.
 - Exactly `dart`, `dcm`, `codebase_memory`, and `context7` in work; none in base
-  or learn. It checks enabled status, exact allowlists, and optional-server policy.
+  or learn in configured profiles. It checks enabled status, exact allowlists,
+  and optional-server policy on disk, not the active thread's live tool catalog.
 - Ignored/writable project pub cache and existence of derived graph state.
 - Regular owner-matching credential files with mode 0600 and a protected parent,
   when present. It never reads their contents or retrieves keyring entries.
@@ -30,6 +31,24 @@ index refresh, GUI launch, product test, update, or Context7 documentation query
 It uses local CLI status/configuration interfaces, not remote health retrieval.
 It performs no repairs or intentional configuration/source/index writes. A
 fresh-session smoke is separate qualification, not a doctor side effect.
+
+### Configured policy versus live session
+
+A passing `just agent-doctor` proves configured topology/allowlists, not that an
+already-running Codex thread has refreshed its live catalog after config changes.
+Verify available tools in the active session separately (for example, the active
+tool registry or the TUI `/mcp` surface). `mcp list`/`get` establish configured
+policy; do not derive live counts from them. When reload behavior is uncertain,
+start a fresh Codex session; a VM restart is not normally required. Current
+[official MCP guidance](https://learn.chatgpt.com/docs/extend/mcp) distinguishes
+configured servers from the TUI's active servers; the
+[App Server documentation](https://learn.chatgpt.com/docs/app-server) describes a
+supported reload surface, whose availability must be verified for the client in
+use. The offline doctor does not attach to it or acquire a new dependency.
+
+CP8R independently observed 7/4/8/2 = 21 tools in the restarted active registry.
+The initial evaluation's 58-tool live catalog, despite 21 configured tools, was
+a session/configuration-lifecycle mismatch; the failed attempt remains evidence.
 
 Exit 0 means structurally healthy, possibly with nonblocking warnings. Missing
 tools/login, invalid diagnostics/configuration, wrong profile topology, missing
@@ -207,3 +226,19 @@ Validation uses Bash syntax, `just agent-doctor`, ordinary `just doctor`, recipe
 integrity, links/privacy and whitespace checks, plus explicit tooling smoke.
 No product suite, M6/M7 acceptance campaign, or CP8 evaluation was run. CP1–CP6
 historical evidence, product schema v12 and runtime behavior remain unchanged.
+
+## Final requalification prerequisite
+
+After the developer reviews and commits CP8R remediation, final CP8Q must start
+in a **new top-level `codex --profile work` session** created after that commit,
+not resume the failed conversation or recursively launch Codex inside an agent.
+Verify the actual live 7/4/8/2 = 21-tool catalog before Scenario A, separately from
+the offline configuration checks. Run the fixed A–E corpus exactly once, in order,
+only when separately authorized. Retain the
+[failed attempt](m7-5-evaluation-attempt-1.md); the new `m7-5-final-evaluation.md`
+must reference it and compare CP1, attempt 1, and requalification.
+
+Disclose the session difference: CP1 used an ongoing warm session; attempt 1 used
+an ongoing warm session with a stale/pre-CP7 live catalog; CP8Q will use a fresh
+post-remediation top-level session. Fresh startup is catalog provenance, not a
+claim of cold filesystem/package caches or statistical comparability.

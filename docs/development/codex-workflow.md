@@ -50,11 +50,11 @@ is part of this policy.
 | Route | Trigger and action | Non-trigger / authority limit | Fallback |
 | --- | --- | --- | --- |
 | 0 — Known source | Known file/symbol → read relevant source and nearby tests/contracts if needed → stop | Do not search or invoke a specialist just to reconfirm a known location | Narrow search if the location proves wrong |
-| 1 — Lexical discovery | Unknown location, searchable name/error/route/event/config/test description → `rg` / `rg --files` → source/tests | Prefer one or two narrow searches when likely sufficient; avoid whole-tree browsing | Structural discovery if hits remain ambiguous |
+| 1 — Lexical discovery | Unknown location, searchable name/error/route/event/config/test description → `rg` / `rg --files` → exact path → source/tests | Locate uncertain paths once rather than repeatedly guessing; avoid whole-tree browsing | Structural discovery if hits remain ambiguous |
 | 2 — codebase-memory | Genuinely unclear location, cross-cutting relationships, ambiguous lexical hits, or impact topology → verify root/relevant coverage → graph narrows → source confirms | Not required for every Racket task; missing graph callers do not prove no callers exist | `rg` + source when unavailable, stale, or incomplete |
-| 3 — Dart MCP | Unresolved symbol/type/overload/signature/hover, analyzer, package-URI, or explicitly needed runtime question | Not automatic for Dart/Flutter tasks or simple textual relationships; runtime capabilities exposed but not smoke-qualified | Source + canonical Flutter/Dart analyzer/tests when semantic evidence is needed |
+| 3 — Dart MCP | Unresolved symbol/type/overload/signature/hover, analyzer, package-URI, or explicitly scoped runtime question | Not automatic for Dart/Flutter tasks or simple textual relationships; runtime tools are excluded by the routine allowlist and need separate qualification | Source + canonical Flutter/Dart analyzer/tests when semantic evidence is needed |
 | 4 — DCM Free | Explicit complexity, coupling, nesting, maintainability, or qualified structural-quality question | Optional quality lens, not analyzer/test replacement, correctness proof, project gate, or post-edit ritual | Free CLI for qualified capabilities; defer metrics if unavailable, continue ordinary correctness work |
-| 5 — Context7 | Genuine current upstream/version-sensitive question not already answered by installed help/source → minimal generic query | Not Grocery POS discovery; latest material is not exact pinned-version evidence | Installed/versioned upstream source/help or official documentation |
+| 5 — External documentation | Establish installed/pinned version first → known, accessible authoritative first-party docs/source directly; Context7 may help when identity is uncertain, docs fragmented, or discovery useful | Context7 is not mandatory for external/version-sensitive questions or Grocery POS discovery; latest is not exact pinned-version evidence | Installed/versioned upstream source/help or official documentation |
 
 Repository questions—login throttling storage, shift-close authorization, command
 idempotency, transaction totals—stay local. For an upstream question such as
@@ -63,6 +63,21 @@ Before changing the Flutter ↔ Racket boundary, read the
 [local API](../architecture/local-api.md). Prefer explicit commands and structured
 errors; do not invent speculative APIs, duplicate backend semantics in Flutter,
 or expose raw backend exceptions.
+
+### Navigation and bounded excerpts
+
+When a path is uncertain, locate it once with narrow `rg`, `rg --files`, or a
+justified graph search, then read the exact path and relevant symbol/range. A
+failed guess can happen; repeated neighboring guesses when search is available
+are unnecessary work.
+
+For a behavioral trace, keep the unresolved evidence links explicit—for example,
+event/error → state transition → persistence → recovery → protecting test.
+Once a link is established, read another file only to answer a remaining link or
+verify authority, not because an adjacent model/helper looks related. Prefer exact
+symbol ranges, targeted search context, and bounded sections. Expand deliberately
+when insufficient; avoid overlapping broad rereads or hundreds of unrelated lines.
+Apply the security-output filtering below before emitting sensitive-shaped ranges.
 
 ### Evidence behind the routes
 
@@ -105,16 +120,20 @@ enable background watchers as an incidental repair.
 ### External versions and quota
 
 Context7's qualified Free allowance is 1,000 calls/month; CP5 used three calls.
-Determine the local version first, resolve a library once, reuse its ID, and ask
-one focused public upstream question. Check the returned version/source. CP5
-found no exact `package:http 1.6.0` corpus and received `/latest/` material;
+Determine the local version **before external retrieval**. If authoritative
+first-party documentation/source is already known and directly accessible, use
+it directly. Otherwise Context7 may help discover a public upstream corpus,
+resolve uncertain library identity, or navigate fragmented docs. Resolve a library
+once, reuse its ID, and ask one focused generic question. Check the returned
+version/source. CP5 found no exact `package:http 1.6.0` corpus and received `/latest/` material;
 installed pinned source supplied exact-version truth.
 
 If exact material is unavailable, stop paraphrasing duplicate queries to coerce
 a version match. Fall back to installed help/source, official versioned docs,
 or other appropriate official upstream evidence. Do not query usage repeatedly
-or use Context7 when installed evidence already answers the question. Necessary
-current-doc retrieval is legitimate; intentional use is not quota hoarding.
+or use Context7 when installed evidence or known first-party docs already answer
+the question. Necessary current-doc retrieval is legitimate; intentional use is
+not quota hoarding.
 
 ### Combination, duplication, and mutation
 
@@ -265,6 +284,21 @@ secret-bearing device/exception output. Synthetic privacy sentinels must be deli
 isolated, never copied from real secrets or into ordinary/external diagnostics.
 Inspect environment names rather than values where possible; names-only inventories
 belong in ignored local evidence, not committed dumps.
+
+Public synthetic test credentials/capabilities are not live secrets, and their
+display is not a credential compromise. Still treat PIN/password, bearer/session
+token, approval/capability, verifier/key, and payment/authentication fixtures as
+sensitive-shaped output: do not emit literal payloads unless the literal itself
+is required by the task and permitted by the root security rules. Unnecessary
+display is a process defect, not harmless merely because a fixture is public.
+
+Prevent exposure **before tool output reaches model context**, not just by omitting
+values from the final answer. When only location is needed, prefer filename-only
+discovery such as `rg -l '<behavior-or-symbol>' relevant/path`. For security tests,
+select structural/symbol/assertion ranges and reason about assertion semantics;
+if irrelevant credential-shaped literals would appear, filter/redact their payloads
+locally before emitting the bounded range. Do not rely on final-answer omission
+after a tool has already exposed them, or build a speculative universal scrubber.
 
 Grocery POS questions stay local. Context7 receives only minimal generic public
 upstream queries: no source excerpts, internal identifiers, uncommitted design,

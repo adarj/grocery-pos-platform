@@ -101,7 +101,7 @@ for profile in base work learn; do
     fi
   done
   if (( allowlists_ok )); then
-    ok 'work MCP allowlists match qualified 7/4/8/2 surface'
+    ok 'configured work MCP allowlists match qualified 7/4/8/2 surface'
   else
     fail 'work MCP allowlist missing, broadened, or qualified tool disabled'
   fi
@@ -111,6 +111,8 @@ for profile in base work learn; do
     warn 'Context7 authentication not confirmed by offline status; verify privately if needed'
   fi
 done
+
+printf '[info] Live active-session catalog is not verified by this offline diagnostic\n'
 
 # The installed MCP CLI omits `required`; inspect only non-secret policy flags
 # in user config, never credential stores or arbitrary configuration output.
