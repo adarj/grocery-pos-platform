@@ -1,0 +1,13 @@
+[package]
+name = "edge-adapter-api"
+description = "Bounded device-semantic adapter contract for Grocery POS edges"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+edge-protocol = { path = "../edge-protocol" }
+
+[lints]
+workspace = true

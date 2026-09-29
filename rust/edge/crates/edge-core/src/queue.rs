@@ -11,6 +11,7 @@ use crate::ResourceId;
 /// Typed, already-recorded handoff. Only Core constructs it; no request ID,
 /// freshness deadline, raw JSON, or business decision travels to execution.
 pub struct QueuedCommand<P> {
+    resource: ResourceId,
     command_id: CommandId,
     device_id: DeviceId,
     binding_instance_id: BindingInstanceId,
@@ -22,11 +23,13 @@ pub struct QueuedCommand<P> {
 
 impl<P> QueuedCommand<P> {
     pub(crate) fn new(
+        resource: ResourceId,
         state: &NonterminalCommandState,
         timeout_ms: CommandTimeoutMs,
         payload: Arc<P>,
     ) -> Self {
         Self {
+            resource,
             command_id: state.command_id.clone(),
             device_id: state.device_id.clone(),
             binding_instance_id: state.binding_instance_id.clone(),
@@ -64,6 +67,18 @@ impl<P> QueuedCommand<P> {
     pub fn payload(&self) -> &P {
         &self.payload
     }
+
+    pub(crate) fn resource(&self) -> ResourceId {
+        self.resource
+    }
+
+    pub(crate) fn owns_payload(&self, payload: &Arc<P>) -> bool {
+        Arc::ptr_eq(&self.payload, payload)
+    }
+
+    pub(crate) fn shared_payload(&self) -> Arc<P> {
+        Arc::clone(&self.payload)
+    }
 }
 
 impl<P> fmt::Debug for QueuedCommand<P> {
@@ -92,7 +107,7 @@ pub enum QueueCommitError {
     GuaranteedNotEnqueued,
 }
 
-/// Future bounded FIFO executor seam. A successful reserve holds exactly one
+/// Bounded FIFO executor seam. A successful reserve holds exactly one
 /// waiting slot; dropping an unused reservation releases it. Before commit,
 /// the executor cannot observe the command. Successful commit makes it visible
 /// exactly once. An error guarantees no executor ever observed that command.

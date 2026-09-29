@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use edge_protocol::{
     AgentInstanceId, AgentUptimeMs, BindingInstanceId, Capability, CommandId, CommandKind,
-    CommandState, CommandSubmission, CommandTimeoutMs, DeviceId, DeviceSnapshot, EffectEvidence,
-    ErrorCode, NonterminalCommandState, ProtocolError, TerminalCommandState, TerminalOutcome,
+    CommandState, CommandSubmission, CommandTimeoutMs, DeviceId, DeviceSnapshot, ErrorCode,
+    NonterminalCommandState, ProtocolError, TerminalCommandState,
 };
 
 use crate::model::{
@@ -15,6 +15,7 @@ use crate::model::{
 use crate::queue::{ExecutorQueuePort, QueueCommitError, QueueReservationError, QueuedCommand};
 
 struct CoreDevice {
+    execution_fenced: bool,
     snapshot: DeviceSnapshot,
     resources: BTreeMap<Capability, ResourceId>,
 }
@@ -50,6 +51,7 @@ enum CommandRecord<P: CoreCommand> {
     Active {
         state: NonterminalCommandState,
         _payload: Arc<P>,
+        executing: bool,
         identity: RetainedIdentity<P::PayloadFingerprint>,
         admission_sequence: u64,
     },
@@ -69,14 +71,22 @@ impl<P: CoreCommand> CommandRecord<P> {
 
     fn public_state(&self) -> CommandState {
         match self {
-            Self::Active { state, .. } => CommandState::Accepted(state.clone()),
+            Self::Active {
+                state, executing, ..
+            } => {
+                if *executing {
+                    CommandState::Executing(state.clone())
+                } else {
+                    CommandState::Accepted(state.clone())
+                }
+            }
             Self::Terminal { state, .. } => CommandState::Terminal(state.clone()),
         }
     }
 }
 
 /// One exclusive owner of admission truth. A later daemon may run this value
-/// inside one task; this crate has no scheduler, locks, executor, or device I/O.
+/// inside one task; this actor has no locks, scheduling tasks, or device I/O.
 pub struct CoreActor<P, C, Q>
 where
     P: CoreCommand,
@@ -181,6 +191,7 @@ where
             devices.insert(
                 snapshot.device_id.clone(),
                 CoreDevice {
+                    execution_fenced: false,
                     snapshot,
                     resources,
                 },
@@ -280,6 +291,11 @@ where
                 AdmissionRejection::BindingInstanceConflict,
             ));
         }
+        if device.execution_fenced {
+            return Ok(AdmissionDecision::Rejected(
+                AdmissionRejection::BindingFenced,
+            ));
+        }
         let capability = Capability::new(submission.payload.required_capability())
             .map_err(|_| CoreFatalError::InvalidCompiledCommand)?;
         if !device.snapshot.capabilities.contains(&capability) {
@@ -325,13 +341,19 @@ where
             accepted_agent_uptime_ms: now,
         };
         let payload = Arc::new(submission.payload);
-        let queued = QueuedCommand::new(&state, submission.timeout_ms, Arc::clone(&payload));
+        let queued = QueuedCommand::new(
+            resource,
+            &state,
+            submission.timeout_ms,
+            Arc::clone(&payload),
+        );
         // 11. The record exists before commit can make the queued command visible.
         match self.records.entry(command_id.clone()) {
             Entry::Vacant(entry) => {
                 entry.insert(CommandRecord::Active {
                     state,
                     _payload: payload,
+                    executing: false,
                     identity,
                     admission_sequence: sequence,
                 });
@@ -358,7 +380,7 @@ where
         }
     }
 
-    fn observe_uptime(&mut self) -> Result<AgentUptimeMs, CoreFatalError> {
+    pub(crate) fn observe_uptime(&mut self) -> Result<AgentUptimeMs, CoreFatalError> {
         let now = self.clock.now();
         if self.last_observed_uptime.is_some_and(|last| now < last) {
             return Err(CoreFatalError::ClockRegression);
@@ -400,13 +422,104 @@ where
     }
 
     // Narrow Core-owned transition used for the guaranteed non-enqueue failure.
-    // M8.2.4 will define execution-result transitions and effect evidence.
+    // Reuses the validated Core terminal-result machinery.
     fn terminalize_non_effect(
         &mut self,
         command_id: &CommandId,
         terminal_at: AgentUptimeMs,
     ) -> Result<CommandState, CoreFatalError> {
-        let code = ErrorCode::new("edge.queue_commit_not_enqueued")
+        self.finish_record(
+            command_id,
+            terminal_at,
+            crate::effect::Completion::FailedNone,
+            Some("edge.queue_commit_not_enqueued"),
+        )
+    }
+
+    /// Fence only this exact current epoch. No rebind or public snapshot mutation
+    /// occurs here. A delayed old-epoch report cannot fence a replacement.
+    pub fn fence_binding(&mut self, device_id: &DeviceId, binding: &BindingInstanceId) -> bool {
+        let Some(device) = self.devices.get_mut(device_id) else {
+            return false;
+        };
+        if device.snapshot.binding_instance_id.as_ref() != Some(binding) {
+            return false;
+        }
+        device.execution_fenced = true;
+        true
+    }
+
+    pub(crate) fn resource_executable(&self, resource: ResourceId) -> bool {
+        self.devices.values().any(|device| {
+            !device.execution_fenced
+                && device.snapshot.binding_instance_id.is_some()
+                && device.resources.values().any(|id| *id == resource)
+        })
+    }
+
+    pub(crate) fn binding_executable(&self, command: &QueuedCommand<P>) -> bool {
+        self.devices.get(command.device_id()).is_some_and(|device| {
+            !device.execution_fenced
+                && device.snapshot.binding_instance_id.as_ref()
+                    == Some(command.binding_instance_id())
+        })
+    }
+
+    pub(crate) fn execution_witness(
+        &self,
+        command: &QueuedCommand<P>,
+        executing: bool,
+    ) -> Result<&NonterminalCommandState, CoreFatalError> {
+        match self.records.get(command.command_id()) {
+            Some(CommandRecord::Active {
+                state,
+                _payload,
+                executing: phase,
+                identity,
+                ..
+            }) if *phase == executing
+                && command.owns_payload(_payload)
+                && state.device_id == *command.device_id()
+                && state.binding_instance_id == *command.binding_instance_id()
+                && state.kind == *command.kind()
+                && state.accepted_agent_uptime_ms == command.accepted_agent_uptime_ms()
+                && identity.timeout_ms == command.timeout_ms() =>
+            {
+                Ok(state)
+            }
+            _ => Err(CoreFatalError::ExecutionInvariant),
+        }
+    }
+
+    pub(crate) fn start_execution(
+        &mut self,
+        command: &QueuedCommand<P>,
+    ) -> Result<(), CoreFatalError> {
+        self.execution_witness(command, false)?;
+        match self.records.get_mut(command.command_id()) {
+            Some(CommandRecord::Active { executing, .. }) => {
+                *executing = true;
+                Ok(())
+            }
+            _ => Err(CoreFatalError::ExecutionInvariant),
+        }
+    }
+
+    pub(crate) fn finish_record(
+        &mut self,
+        command_id: &CommandId,
+        terminal_at: AgentUptimeMs,
+        completion: crate::effect::Completion,
+        code: Option<&'static str>,
+    ) -> Result<CommandState, CoreFatalError> {
+        let error = code
+            .map(|value| {
+                ErrorCode::new(value).map(|code| ProtocolError {
+                    code,
+                    message: None,
+                })
+            })
+            .transpose()
             .map_err(|_| CoreFatalError::InvalidCompiledCommand)?;
         let record = self
             .records
@@ -415,15 +528,31 @@ where
         let (state, identity, admission_sequence) = match record {
             CommandRecord::Active {
                 state,
+                executing,
                 identity,
                 admission_sequence,
                 ..
-            } => (state, identity, admission_sequence),
-            CommandRecord::Terminal { .. } => return Err(CoreFatalError::RecordInvariant),
+            } => {
+                if !*executing
+                    && !matches!(
+                        completion,
+                        crate::effect::Completion::Rejected | crate::effect::Completion::FailedNone
+                    )
+                {
+                    return Err(CoreFatalError::ExecutionInvariant);
+                }
+                (state, identity, admission_sequence)
+            }
+            CommandRecord::Terminal { .. } => return Err(CoreFatalError::ExecutionInvariant),
         };
-        if terminal_at < state.accepted_agent_uptime_ms {
+        if terminal_at < state.accepted_agent_uptime_ms
+            || self
+                .last_observed_uptime
+                .is_none_or(|last| terminal_at > last)
+        {
             return Err(CoreFatalError::RecordInvariant);
         }
+        let (outcome, effect_evidence) = completion.public_pair();
         let terminal = TerminalCommandState {
             agent_instance_id: state.agent_instance_id.clone(),
             command_id: state.command_id.clone(),
@@ -431,12 +560,9 @@ where
             binding_instance_id: state.binding_instance_id.clone(),
             kind: state.kind.clone(),
             accepted_agent_uptime_ms: state.accepted_agent_uptime_ms,
-            outcome: TerminalOutcome::Failed,
-            effect_evidence: EffectEvidence::None,
-            error: Some(ProtocolError {
-                code,
-                message: None,
-            }),
+            outcome,
+            effect_evidence,
+            error,
             terminal_agent_uptime_ms: terminal_at,
         };
         *record = CommandRecord::Terminal {

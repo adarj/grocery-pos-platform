@@ -5,7 +5,8 @@ use std::sync::{Arc, Weak};
 
 use edge_protocol::{
     AdapterKind, AgentInstanceId, BindingInstanceId, CommandKind, CommandTimeoutMs,
-    DeviceAvailability, EffectEvidence, RequestId, StateRevision, TypedCommandPayload,
+    DeviceAvailability, EffectEvidence, RequestId, StateRevision, TerminalOutcome,
+    TypedCommandPayload,
 };
 
 use super::*;
@@ -59,6 +60,10 @@ struct PrivateFingerprint(String);
 
 impl CoreCommand for SyntheticCommand {
     type PayloadFingerprint = PrivateFingerprint;
+
+    fn effect_class(&self) -> edge_adapter_api::EffectClass {
+        edge_adapter_api::EffectClass::DiscreteEffect
+    }
 
     fn required_capability(&self) -> &'static str {
         self.command_kind()
@@ -345,6 +350,59 @@ fn defaults_and_registry_seed_are_bounded_and_consistent() {
         make(vec![two_resources], tiny).unwrap_err(),
         CoreFatalError::TooManyResources
     );
+}
+
+#[test]
+fn terminal_result_cannot_be_rewritten_by_a_late_execution_report() {
+    let clock = FakeClock::new(100);
+    let mut core = core(clock.clone(), limits(), FakeQueue::default());
+    let request = command("late", "attempt", 105, 10);
+    accepted(core.submit_command(request).unwrap());
+    terminate_without_effect(&mut core, &clock, "late", 101);
+    let before = core.command_status(&CommandId::new("late").unwrap());
+    assert_eq!(
+        core.finish_record(
+            &CommandId::new("late").unwrap(),
+            AgentUptimeMs::new(101),
+            crate::effect::Completion::Succeeded,
+            None
+        ),
+        Err(CoreFatalError::ExecutionInvariant)
+    );
+    assert_eq!(
+        core.command_status(&CommandId::new("late").unwrap()),
+        before
+    );
+}
+
+#[test]
+fn a_never_started_record_cannot_claim_effect_or_success() {
+    let clock = FakeClock::new(100);
+    let mut core = core(clock, limits(), FakeQueue::default());
+    accepted(
+        core.submit_command(command("never-started", "attempt", 105, 10))
+            .unwrap(),
+    );
+    let before = core.command_status(&CommandId::new("never-started").unwrap());
+    for completion in [
+        crate::effect::Completion::Succeeded,
+        crate::effect::Completion::Unknown,
+        crate::effect::Completion::FailedPossible,
+    ] {
+        assert_eq!(
+            core.finish_record(
+                &CommandId::new("never-started").unwrap(),
+                AgentUptimeMs::new(100),
+                completion,
+                None
+            ),
+            Err(CoreFatalError::ExecutionInvariant)
+        );
+        assert_eq!(
+            core.command_status(&CommandId::new("never-started").unwrap()),
+            before
+        );
+    }
 }
 
 #[test]

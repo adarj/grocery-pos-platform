@@ -11,14 +11,17 @@ impl ResourceId {
 }
 
 /// A compiled semantic command supplies admission metadata and an in-memory
-/// compact payload identity. The required capability is fixed by the compiled
-/// command variant, never selected by an arbitrary request field. Fingerprints
+/// compact payload identity. Capability and effect class are fixed by the
+/// compiled command variant, never independently selected by request fields.
+/// Payload semantics and metadata must stay immutable throughout retention and
+/// execution; effect class grants no permission to retry. Fingerprints
 /// must preserve the command's qualified equality semantics; they are never
 /// public status or ordinary diagnostics.
 pub trait CoreCommand: TypedCommandPayload + Eq + Send + Sync + 'static {
     type PayloadFingerprint: Clone + Eq + Send + Sync + 'static;
 
     fn required_capability(&self) -> &'static str;
+    fn effect_class(&self) -> edge_adapter_api::EffectClass;
     fn retained_payload_fingerprint(&self) -> Self::PayloadFingerprint;
 }
 
@@ -85,6 +88,7 @@ pub enum AdmissionRejection {
     TimeoutTooLarge,
     UnknownDevice,
     BindingInstanceConflict,
+    BindingFenced,
     CapabilityUnavailable,
     CommandCacheFull,
     ExecutorQueueFull,
@@ -118,4 +122,6 @@ pub enum CoreFatalError {
     ClockRegression,
     RecordSequenceOverflow,
     RecordInvariant,
+    QueueInvariant,
+    ExecutionInvariant,
 }

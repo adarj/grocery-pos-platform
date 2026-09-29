@@ -3,10 +3,19 @@
 version = 4
 
 [[package]]
-name = "edge-core"
+name = "edge-adapter-api"
 version = "0.1.0"
 dependencies = [
  "edge-protocol",
+]
+
+[[package]]
+name = "edge-core"
+version = "0.1.0"
+dependencies = [
+ "edge-adapter-api",
+ "edge-protocol",
+ "edge-sim",
 ]
 
 [[package]]
@@ -15,6 +24,13 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "edge-sim"
+version = "0.1.0"
+dependencies = [
+ "edge-adapter-api",
 ]
 
 [[package]]
