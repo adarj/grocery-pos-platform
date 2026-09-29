@@ -110,7 +110,7 @@ See [appliance operations](docs/operations/kinoite-appliance.md) and
 [provisioning](docs/operations/appliance-provisioning.md). Built artifacts and
 rootless package tests do not establish deployed appliance behavior.
 
-### Rust edge protocol foundation
+### Rust edge foundation
 
 The Rust 2024 [edge workspace](rust/edge/Cargo.toml) contains the
 dependency-minimal `edge-protocol` library: distinct opaque IDs, exact time and
@@ -118,18 +118,21 @@ sequence domains, device snapshots, typed command vocabulary and semantic
 equality, lifecycle/outcome/effect evidence, safe errors, and generic event
 values. Its strict codec bounds JSON input and output, rejects duplicate decoded
 keys and excessive structural work, and binds recognized command kinds to
-compiled payload schemas. This implements the M8.2.1 type foundation and M8.2.2
-codec under [ADR-0033](docs/adr/0033-use-a-semantic-local-edge-protocol-for-pos-hardware.md).
+compiled payload schemas. The `edge-core` library now owns deterministic
+command admission, retained-attempt deduplication, bounded terminal retention,
+and the record-before-queue handoff. These are M8.2.1–M8.2.3 foundations under
+[ADR-0033](docs/adr/0033-use-a-semantic-local-edge-protocol-for-pos-hardware.md).
 
-The daemon, CoreActor, command admission/cache/executors, simulator, UDS server,
-Racket client, real adapters, Linux deployment, and physical hardware I/O remain
-unimplemented. Codec tests do not establish M8 Tier A qualification.
+The actual executor, EffectTracker, simulator, binding lifecycle and events,
+UDS HTTP daemon, Racket client, real adapters, Linux deployment, and physical
+hardware I/O remain unimplemented. These foundation tests do not establish M8
+Tier A qualification.
 
 ### Testing and qualification
 
 Racket, Flutter unit/widget, and isolated real-process integration tests protect
-the checkout/security/recovery boundaries. Rust tests protect the edge protocol
-types and codec. CI checks source, repository, and artifact contracts.
+the checkout/security/recovery boundaries. Rust tests protect protocol types,
+codec, and Core admission. CI checks source, repository, and artifact contracts.
 [M6 reliability](docs/acceptance/m6/README.md) and
 [M7 security](docs/acceptance/m7/README.md) have separate evidence records.
 

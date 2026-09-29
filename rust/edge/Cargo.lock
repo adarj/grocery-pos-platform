@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "edge-core"
+version = "0.1.0"
+dependencies = [
+ "edge-protocol",
+]
+
+[[package]]
 name = "edge-protocol"
 version = "0.1.0"
 dependencies = [

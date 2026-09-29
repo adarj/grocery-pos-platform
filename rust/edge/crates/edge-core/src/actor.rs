@@ -1,0 +1,452 @@
+use std::collections::{BTreeMap, btree_map::Entry};
+use std::fmt;
+use std::sync::Arc;
+
+use edge_protocol::{
+    AgentInstanceId, AgentUptimeMs, BindingInstanceId, Capability, CommandId, CommandKind,
+    CommandState, CommandSubmission, CommandTimeoutMs, DeviceId, DeviceSnapshot, EffectEvidence,
+    ErrorCode, NonterminalCommandState, ProtocolError, TerminalCommandState, TerminalOutcome,
+};
+
+use crate::model::{
+    AdmissionDecision, AdmissionRejection, AgentClock, CoreCommand, CoreDeviceSeed, CoreFatalError,
+    CoreLimits, ResourceId,
+};
+use crate::queue::{ExecutorQueuePort, QueueCommitError, QueueReservationError, QueuedCommand};
+
+struct CoreDevice {
+    snapshot: DeviceSnapshot,
+    resources: BTreeMap<Capability, ResourceId>,
+}
+
+// Command ID is the map key; request ID and agent precondition are deliberately
+// absent. No raw JSON or full payload is needed after terminal compaction.
+#[derive(Clone, Eq, PartialEq)]
+struct RetainedIdentity<F> {
+    device_id: DeviceId,
+    binding_instance_id: BindingInstanceId,
+    not_after_agent_uptime_ms: AgentUptimeMs,
+    kind: CommandKind,
+    timeout_ms: CommandTimeoutMs,
+    payload_fingerprint: F,
+}
+
+impl<F> RetainedIdentity<F> {
+    fn from_submission<P: CoreCommand<PayloadFingerprint = F>>(
+        submission: &CommandSubmission<P>,
+    ) -> Self {
+        Self {
+            device_id: submission.device_id.clone(),
+            binding_instance_id: submission.expected_binding_instance_id.clone(),
+            not_after_agent_uptime_ms: submission.not_after_agent_uptime_ms,
+            kind: submission.kind.clone(),
+            timeout_ms: submission.timeout_ms,
+            payload_fingerprint: submission.payload.retained_payload_fingerprint(),
+        }
+    }
+}
+
+enum CommandRecord<P: CoreCommand> {
+    Active {
+        state: NonterminalCommandState,
+        _payload: Arc<P>,
+        identity: RetainedIdentity<P::PayloadFingerprint>,
+        admission_sequence: u64,
+    },
+    Terminal {
+        state: TerminalCommandState,
+        identity: RetainedIdentity<P::PayloadFingerprint>,
+        admission_sequence: u64,
+    },
+}
+
+impl<P: CoreCommand> CommandRecord<P> {
+    fn identity(&self) -> &RetainedIdentity<P::PayloadFingerprint> {
+        match self {
+            Self::Active { identity, .. } | Self::Terminal { identity, .. } => identity,
+        }
+    }
+
+    fn public_state(&self) -> CommandState {
+        match self {
+            Self::Active { state, .. } => CommandState::Accepted(state.clone()),
+            Self::Terminal { state, .. } => CommandState::Terminal(state.clone()),
+        }
+    }
+}
+
+/// One exclusive owner of admission truth. A later daemon may run this value
+/// inside one task; this crate has no scheduler, locks, executor, or device I/O.
+pub struct CoreActor<P, C, Q>
+where
+    P: CoreCommand,
+    C: AgentClock,
+    Q: ExecutorQueuePort<P>,
+{
+    agent_instance_id: AgentInstanceId,
+    limits: CoreLimits,
+    clock: C,
+    last_observed_uptime: Option<AgentUptimeMs>,
+    devices: BTreeMap<DeviceId, CoreDevice>,
+    records: BTreeMap<CommandId, CommandRecord<P>>,
+    next_admission_sequence: u64,
+    queue: Q,
+}
+
+impl<P, C, Q> fmt::Debug for CoreActor<P, C, Q>
+where
+    P: CoreCommand,
+    C: AgentClock,
+    Q: ExecutorQueuePort<P>,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CoreActor")
+            .field("agent_instance_id", &self.agent_instance_id)
+            .field("device_count", &self.devices.len())
+            .field("retained_command_count", &self.records.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<P, C, Q> CoreActor<P, C, Q>
+where
+    P: CoreCommand,
+    C: AgentClock,
+    Q: ExecutorQueuePort<P>,
+{
+    pub fn new(
+        agent_instance_id: AgentInstanceId,
+        seeds: Vec<CoreDeviceSeed>,
+        limits: CoreLimits,
+        clock: C,
+        queue: Q,
+    ) -> Result<Self, CoreFatalError> {
+        if limits.max_devices == 0
+            || limits.max_resources == 0
+            || limits.max_capabilities_per_device == 0
+            || limits.max_conditions_per_device == 0
+            || limits.max_command_records == 0
+            || limits.max_command_timeout_ms == 0
+        {
+            return Err(CoreFatalError::InvalidLimits);
+        }
+        if seeds.len() > limits.max_devices {
+            return Err(CoreFatalError::TooManyDevices);
+        }
+        let mut devices = BTreeMap::new();
+        let mut resource_owners = BTreeMap::new();
+        for seed in seeds {
+            let snapshot = seed.snapshot;
+            if snapshot.agent_instance_id != agent_instance_id {
+                return Err(CoreFatalError::RegistryAgentMismatch);
+            }
+            if devices.contains_key(&snapshot.device_id) {
+                return Err(CoreFatalError::DuplicateDevice);
+            }
+            if snapshot.capabilities.len() > limits.max_capabilities_per_device {
+                return Err(CoreFatalError::TooManyCapabilities);
+            }
+            if snapshot.conditions.len() > limits.max_conditions_per_device {
+                return Err(CoreFatalError::TooManyConditions);
+            }
+            if snapshot.binding_instance_id.is_none() && !seed.capability_resources.is_empty() {
+                return Err(CoreFatalError::UnboundResourceMapping);
+            }
+            let mut resources = BTreeMap::new();
+            for (capability, resource) in seed.capability_resources {
+                if !snapshot.capabilities.contains(&capability) {
+                    return Err(CoreFatalError::UnpublishedResourceMapping);
+                }
+                if resources.insert(capability, resource).is_some() {
+                    return Err(CoreFatalError::DuplicateResourceMapping);
+                }
+                match resource_owners.entry(resource) {
+                    Entry::Vacant(entry) => {
+                        entry.insert(snapshot.device_id.clone());
+                    }
+                    Entry::Occupied(entry) if entry.get() != &snapshot.device_id => {
+                        return Err(CoreFatalError::ResourceSharedAcrossDevices);
+                    }
+                    Entry::Occupied(_) => {}
+                }
+                if resource_owners.len() > limits.max_resources {
+                    return Err(CoreFatalError::TooManyResources);
+                }
+            }
+            if snapshot.binding_instance_id.is_some()
+                && resources.len() != snapshot.capabilities.len()
+            {
+                return Err(CoreFatalError::MissingResourceMapping);
+            }
+            devices.insert(
+                snapshot.device_id.clone(),
+                CoreDevice {
+                    snapshot,
+                    resources,
+                },
+            );
+        }
+        Ok(Self {
+            agent_instance_id,
+            limits,
+            clock,
+            last_observed_uptime: None,
+            devices,
+            records: BTreeMap::new(),
+            next_admission_sequence: 0,
+            queue,
+        })
+    }
+
+    pub fn agent_instance_id(&self) -> &AgentInstanceId {
+        &self.agent_instance_id
+    }
+
+    pub fn retained_command_count(&self) -> usize {
+        self.records.len()
+    }
+
+    /// Absence after safe eviction is not evidence that no physical effect
+    /// occurred. This lookup does not run admission or sample the clock.
+    pub fn command_status(&self, command_id: &CommandId) -> Option<CommandState> {
+        self.records
+            .get(command_id)
+            .map(CommandRecord::public_state)
+    }
+
+    /// Preserve the normative ordering. A retained command is resolved before
+    /// any freshness, device, binding, capability, cache, or queue revalidation.
+    pub fn submit_command(
+        &mut self,
+        submission: CommandSubmission<P>,
+    ) -> Result<AdmissionDecision, CoreFatalError> {
+        // 1. Agent epoch, before command-ID lookup.
+        if submission.expected_agent_instance_id != self.agent_instance_id {
+            return Ok(AdmissionDecision::Rejected(
+                AdmissionRejection::AgentInstanceConflict,
+            ));
+        }
+        // M8.2.2 already binds kind and typed payload. Fail fatally if a first-
+        // party caller constructs or mutates an inconsistent generic DTO.
+        if submission.kind.as_str() != submission.payload.command_kind() {
+            return Err(CoreFatalError::InvalidCompiledCommand);
+        }
+        // Observe the control-plane clock invariant even for retained retries.
+        // This does not apply freshness or reclamation before retained lookup.
+        self.observe_uptime()?;
+        let identity = RetainedIdentity::from_submission(&submission);
+        // 2. Retained identity, before current-state checks.
+        if let Some(existing) = self.records.get(&submission.command_id) {
+            return Ok(if existing.identity() == &identity {
+                AdmissionDecision::Deduplicated(existing.public_state())
+            } else {
+                AdmissionDecision::Rejected(AdmissionRejection::SemanticConflict)
+            });
+        }
+
+        // A new submission gets a current freshness sample after identity
+        // formation/lookup; retained retries never reach this policy check.
+        let now = self.observe_uptime()?;
+        let uptime = now.get();
+        let deadline = submission.not_after_agent_uptime_ms.get();
+        // 3. Freshness and future horizon, using subtraction only after order.
+        if uptime > deadline {
+            return Ok(AdmissionDecision::Rejected(
+                AdmissionRejection::SubmissionExpired,
+            ));
+        }
+        if deadline - uptime > self.limits.max_submission_horizon_ms {
+            return Ok(AdmissionDecision::Rejected(
+                AdmissionRejection::SubmissionHorizonExceeded,
+            ));
+        }
+        // 4. Acceptance-relative timeout policy, independent of freshness.
+        if submission.timeout_ms.get() > self.limits.max_command_timeout_ms {
+            return Ok(AdmissionDecision::Rejected(
+                AdmissionRejection::TimeoutTooLarge,
+            ));
+        }
+        // 5–7. Configured device, exact binding, compiled published capability,
+        // and its internal serialized physical resource.
+        let Some(device) = self.devices.get(&submission.device_id) else {
+            return Ok(AdmissionDecision::Rejected(
+                AdmissionRejection::UnknownDevice,
+            ));
+        };
+        if device.snapshot.binding_instance_id.as_ref()
+            != Some(&submission.expected_binding_instance_id)
+        {
+            return Ok(AdmissionDecision::Rejected(
+                AdmissionRejection::BindingInstanceConflict,
+            ));
+        }
+        let capability = Capability::new(submission.payload.required_capability())
+            .map_err(|_| CoreFatalError::InvalidCompiledCommand)?;
+        if !device.snapshot.capabilities.contains(&capability) {
+            return Ok(AdmissionDecision::Rejected(
+                AdmissionRejection::CapabilityUnavailable,
+            ));
+        }
+        let Some(&resource) = device.resources.get(&capability) else {
+            return Err(CoreFatalError::MissingResourceMapping);
+        };
+        // 8–9. Reclaim only safe terminal identities, then enforce the bound.
+        self.reclaim_for_admission(now)?;
+        if self.records.len() >= self.limits.max_command_records {
+            return Ok(AdmissionDecision::Rejected(
+                AdmissionRejection::CommandCacheFull,
+            ));
+        }
+        // 10. A reserved slot is invisible to future execution.
+        let reservation = match self.queue.reserve(&resource) {
+            Ok(reservation) => reservation,
+            Err(QueueReservationError::Full) => {
+                return Ok(AdmissionDecision::Rejected(
+                    AdmissionRejection::ExecutorQueueFull,
+                ));
+            }
+            Err(QueueReservationError::Unavailable) => {
+                return Ok(AdmissionDecision::Rejected(
+                    AdmissionRejection::ExecutorUnavailable,
+                ));
+            }
+        };
+        let sequence = self
+            .next_admission_sequence
+            .checked_add(1)
+            .ok_or(CoreFatalError::RecordSequenceOverflow)?;
+        let command_id = submission.command_id.clone();
+        let state = NonterminalCommandState {
+            agent_instance_id: self.agent_instance_id.clone(),
+            command_id: command_id.clone(),
+            device_id: submission.device_id,
+            binding_instance_id: submission.expected_binding_instance_id,
+            kind: submission.kind,
+            accepted_agent_uptime_ms: now,
+        };
+        let payload = Arc::new(submission.payload);
+        let queued = QueuedCommand::new(&state, submission.timeout_ms, Arc::clone(&payload));
+        // 11. The record exists before commit can make the queued command visible.
+        match self.records.entry(command_id.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(CommandRecord::Active {
+                    state,
+                    _payload: payload,
+                    identity,
+                    admission_sequence: sequence,
+                });
+            }
+            Entry::Occupied(_) => return Err(CoreFatalError::RecordInvariant),
+        }
+        self.next_admission_sequence = sequence;
+        let recorded = match self.records.get(&command_id) {
+            Some(CommandRecord::Active { state, .. }) => state,
+            _ => return Err(CoreFatalError::RecordInvariant),
+        };
+        // 12. The queue sees a borrowed witness from the live Core record.
+        match self.queue.commit(reservation, queued, recorded) {
+            Ok(()) => Ok(AdmissionDecision::Accepted(CommandState::Accepted(
+                recorded.clone(),
+            ))),
+            Err(QueueCommitError::GuaranteedNotEnqueued) => {
+                // The port guarantees the command was never visible. Preserve
+                // accepted identity and report a known non-effect, not a retry.
+                let terminal_at = self.observe_uptime()?;
+                let terminal = self.terminalize_non_effect(&command_id, terminal_at)?;
+                Ok(AdmissionDecision::Accepted(terminal))
+            }
+        }
+    }
+
+    fn observe_uptime(&mut self) -> Result<AgentUptimeMs, CoreFatalError> {
+        let now = self.clock.now();
+        if self.last_observed_uptime.is_some_and(|last| now < last) {
+            return Err(CoreFatalError::ClockRegression);
+        }
+        self.last_observed_uptime = Some(now);
+        Ok(now)
+    }
+
+    fn reclaim_for_admission(&mut self, now: AgentUptimeMs) -> Result<(), CoreFatalError> {
+        if self.records.len() < self.limits.max_command_records {
+            return Ok(());
+        }
+        let mut oldest: Option<(u64, CommandId)> = None;
+        for (command_id, record) in &self.records {
+            if let CommandRecord::Terminal {
+                state,
+                identity,
+                admission_sequence,
+            } = record
+            {
+                let age = now
+                    .get()
+                    .checked_sub(state.terminal_agent_uptime_ms.get())
+                    .ok_or(CoreFatalError::RecordInvariant)?;
+                if now > identity.not_after_agent_uptime_ms
+                    && age >= self.limits.terminal_recovery_minimum_ms
+                    && oldest
+                        .as_ref()
+                        .is_none_or(|(sequence, _)| admission_sequence < sequence)
+                {
+                    oldest = Some((*admission_sequence, command_id.clone()));
+                }
+            }
+        }
+        if let Some((_, command_id)) = oldest {
+            self.records.remove(&command_id);
+        }
+        Ok(())
+    }
+
+    // Narrow Core-owned transition used for the guaranteed non-enqueue failure.
+    // M8.2.4 will define execution-result transitions and effect evidence.
+    fn terminalize_non_effect(
+        &mut self,
+        command_id: &CommandId,
+        terminal_at: AgentUptimeMs,
+    ) -> Result<CommandState, CoreFatalError> {
+        let code = ErrorCode::new("edge.queue_commit_not_enqueued")
+            .map_err(|_| CoreFatalError::InvalidCompiledCommand)?;
+        let record = self
+            .records
+            .get_mut(command_id)
+            .ok_or(CoreFatalError::RecordInvariant)?;
+        let (state, identity, admission_sequence) = match record {
+            CommandRecord::Active {
+                state,
+                identity,
+                admission_sequence,
+                ..
+            } => (state, identity, admission_sequence),
+            CommandRecord::Terminal { .. } => return Err(CoreFatalError::RecordInvariant),
+        };
+        if terminal_at < state.accepted_agent_uptime_ms {
+            return Err(CoreFatalError::RecordInvariant);
+        }
+        let terminal = TerminalCommandState {
+            agent_instance_id: state.agent_instance_id.clone(),
+            command_id: state.command_id.clone(),
+            device_id: state.device_id.clone(),
+            binding_instance_id: state.binding_instance_id.clone(),
+            kind: state.kind.clone(),
+            accepted_agent_uptime_ms: state.accepted_agent_uptime_ms,
+            outcome: TerminalOutcome::Failed,
+            effect_evidence: EffectEvidence::None,
+            error: Some(ProtocolError {
+                code,
+                message: None,
+            }),
+            terminal_agent_uptime_ms: terminal_at,
+        };
+        *record = CommandRecord::Terminal {
+            state: terminal.clone(),
+            identity: identity.clone(),
+            admission_sequence: *admission_sequence,
+        };
+        Ok(CommandState::Terminal(terminal))
+    }
+}
+
+#[cfg(test)]
+mod tests;
