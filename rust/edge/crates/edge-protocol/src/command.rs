@@ -17,9 +17,9 @@ protocol_text!(
 
 /// Request DTO with unknown envelope fields rejected and a generic typed payload.
 /// This is not the final Core semantic command: `kind` and `P` are independent here.
-/// M8.2.2 must bind a recognized kind to its compiled payload schema before Core
-/// or adapters receive a semantic command.
-/// Ordinary Serde does not supply the later strict, resource-bounded JSON codec.
+/// The strict codec binds a recognized kind to its compiled payload schema before
+/// returning a wire command for future Core use. This generic DTO alone does
+/// not perform kind/payload dispatch or bounded untrusted-JSON decoding.
 /// Debug diagnostics redact payload content; callers must not log it separately.
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

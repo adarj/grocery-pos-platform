@@ -112,23 +112,24 @@ rootless package tests do not establish deployed appliance behavior.
 
 ### Rust edge protocol foundation
 
-The Rust 2024 [edge workspace](rust/edge/Cargo.toml) now contains the
+The Rust 2024 [edge workspace](rust/edge/Cargo.toml) contains the
 dependency-minimal `edge-protocol` library: distinct opaque IDs, exact time and
-sequence domains, device snapshots, generic typed command submissions, semantic
-command equality, lifecycle/outcome/effect evidence, safe errors, and generic
-event values. Ordinary Serde tests protect the wire vocabulary. This implements
-the M8.2.1 type foundation under [ADR-0033](docs/adr/0033-use-a-semantic-local-edge-protocol-for-pos-hardware.md).
+sequence domains, device snapshots, typed command vocabulary and semantic
+equality, lifecycle/outcome/effect evidence, safe errors, and generic event
+values. Its strict codec bounds JSON input and output, rejects duplicate decoded
+keys and excessive structural work, and binds recognized command kinds to
+compiled payload schemas. This implements the M8.2.1 type foundation and M8.2.2
+codec under [ADR-0033](docs/adr/0033-use-a-semantic-local-edge-protocol-for-pos-hardware.md).
 
-The daemon, CoreActor, command cache/executors, simulator, real adapters, Racket
-client, Linux deployment, and physical hardware I/O remain unimplemented.
-M8.2.2 owns the strict untrusted-JSON codec, including duplicate-key rejection
-and bounded decoding; these Serde tests do not establish M8 Tier A qualification.
+The daemon, CoreActor, command admission/cache/executors, simulator, UDS server,
+Racket client, real adapters, Linux deployment, and physical hardware I/O remain
+unimplemented. Codec tests do not establish M8 Tier A qualification.
 
 ### Testing and qualification
 
 Racket, Flutter unit/widget, and isolated real-process integration tests protect
 the checkout/security/recovery boundaries. Rust tests protect the edge protocol
-type foundation. CI checks source, repository, and artifact contracts.
+types and codec. CI checks source, repository, and artifact contracts.
 [M6 reliability](docs/acceptance/m6/README.md) and
 [M7 security](docs/acceptance/m7/README.md) have separate evidence records.
 

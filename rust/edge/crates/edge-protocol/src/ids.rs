@@ -1,6 +1,7 @@
 use crate::text::protocol_text;
 
-/// Initial type-level identifier ceiling; strict decoding must enforce it before allocation.
+/// Initial type-level identifier ceiling; strict decoding checks it after
+/// bounded structural parsing of the containing JSON document.
 pub const MAX_IDENTIFIER_BYTES: usize = 256;
 
 protocol_text!(

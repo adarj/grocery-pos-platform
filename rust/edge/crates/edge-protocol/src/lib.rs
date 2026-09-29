@@ -1,17 +1,21 @@
 #![forbid(unsafe_code)]
 
-//! Typed values for Edge Protocol v1; no server, codec, Core, or device I/O.
+//! Typed values and a strict JSON codec for Edge Protocol v1; no server, Core,
+//! or device I/O.
 //!
-//! Serde models field names and basic value invariants. It is not the strict
-//! untrusted-JSON boundary: duplicate keys, allocation/depth/collection budgets,
-//! framing, and command-specific dispatch remain M8.2.2 responsibilities.
+//! Untrusted bytes are size-checked before parsing, then structurally preflighted
+//! and decoded into typed values. HTTP framing and Core admission are later work.
 //!
 //! Initial value ceilings are 256 UTF-8 bytes for opaque identifiers and semantic
 //! names/codes, and 1024 bytes for safe error messages. They make these values
-//! bounded without a UUID or device-ID lexical grammar; codec qualification must
-//! enforce the ceilings before allocation. They are initial implementation
-//! choices, not new immutable M8.1 protocol constants or runtime resource policy.
+//! bounded without a UUID or device-ID lexical grammar. The body-size ceiling is
+//! checked before parsing; structural decoded-string/container bounds are checked
+//! during the streaming preflight; these type-specific ceilings are checked on
+//! typed deserialization. JSON unescaping may allocate before type validation,
+//! within the prior bounded body. These are initial implementation choices,
+//! not immutable M8.1 protocol constants.
 
+mod codec;
 mod command;
 mod device;
 mod error;
@@ -21,6 +25,12 @@ mod numbers;
 mod text;
 mod version;
 
+pub use codec::{
+    CommandPayloadDecodeError, CommandPayloadDecoder, DEFAULT_EVENT_RECORD_MAX_BYTES,
+    DEFAULT_NON_STREAM_RESPONSE_MAX_BYTES, JsonDecodeError, JsonDecodeLimits, JsonEncodeError,
+    StrictJsonFragment, StrictJsonSchema, TypedCommandPayload, decode_command_strict,
+    decode_json_strict, encode_json_bounded,
+};
 pub use command::{
     CommandKind, CommandState, CommandSubmission, EffectEvidence, NonterminalCommandState,
     SemanticCommandIdentity, TerminalCommandState, TerminalOutcome,
