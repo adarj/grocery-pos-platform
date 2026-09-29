@@ -13,9 +13,12 @@ agent-doctor:
 test:
     just test-racket
     just test-flutter
+    just test-rust
 
 check:
     just analyze-flutter
+    just check-rust-format
+    just clippy-rust
     just test
     just test-pos-integration
 
@@ -39,6 +42,23 @@ test-pos-integration:
 
 analyze-flutter:
     cd flutter/apps/pos_terminal && flutter analyze
+
+fmt-rust:
+    cd rust/edge && cargo fmt --all
+
+check-rust-format:
+    cd rust/edge && cargo fmt --all --check
+
+clippy-rust:
+    cd rust/edge && cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+test-rust:
+    cd rust/edge && cargo test --locked --workspace --all-features
+
+check-rust:
+    just check-rust-format
+    just clippy-rust
+    just test-rust
 
 # Builds the internal noarch Fedora POS Core RPM without installing it.
 build-pos-core-rpm:

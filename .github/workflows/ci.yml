@@ -87,6 +87,20 @@ jobs:
       - name: Run Racket tests
         run: nix develop --command just test-racket
 
+  rust:
+    name: Rust edge checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - name: Check Rust formatting, Clippy, and tests
+        run: nix develop --command just check-rust
+
   flutter:
     name: Flutter checks
     runs-on: ubuntu-latest

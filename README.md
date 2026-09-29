@@ -7,7 +7,7 @@ operator security are in place, alongside Fedora Kinoite appliance foundations.
 
 This is **not suitable for production retail use**. M7 repository/Tier A security
 qualification passed, but booted appliance, physical kiosk, and abrupt-power
-qualification remain pending. Physical device I/O, substantial Rust edge work,
+qualification remain pending. Physical device I/O, the Rust edge daemon,
 card payments, refunds, inventory integration, and cloud synchronization are
 not implemented.
 
@@ -110,11 +110,26 @@ See [appliance operations](docs/operations/kinoite-appliance.md) and
 [provisioning](docs/operations/appliance-provisioning.md). Built artifacts and
 rootless package tests do not establish deployed appliance behavior.
 
+### Rust edge protocol foundation
+
+The Rust 2024 [edge workspace](rust/edge/Cargo.toml) now contains the
+dependency-minimal `edge-protocol` library: distinct opaque IDs, exact time and
+sequence domains, device snapshots, generic typed command submissions, semantic
+command equality, lifecycle/outcome/effect evidence, safe errors, and generic
+event values. Ordinary Serde tests protect the wire vocabulary. This implements
+the M8.2.1 type foundation under [ADR-0033](docs/adr/0033-use-a-semantic-local-edge-protocol-for-pos-hardware.md).
+
+The daemon, CoreActor, command cache/executors, simulator, real adapters, Racket
+client, Linux deployment, and physical hardware I/O remain unimplemented.
+M8.2.2 owns the strict untrusted-JSON codec, including duplicate-key rejection
+and bounded decoding; these Serde tests do not establish M8 Tier A qualification.
+
 ### Testing and qualification
 
 Racket, Flutter unit/widget, and isolated real-process integration tests protect
-the checkout/security/recovery boundaries. CI checks repository and artifact
-contracts. [M6 reliability](docs/acceptance/m6/README.md) and
+the checkout/security/recovery boundaries. Rust tests protect the edge protocol
+type foundation. CI checks source, repository, and artifact contracts.
+[M6 reliability](docs/acceptance/m6/README.md) and
 [M7 security](docs/acceptance/m7/README.md) have separate evidence records.
 
 M7's committed record has passing Tier A evidence, including x86_64 artifact
@@ -128,10 +143,9 @@ developer-surface changes.
 
 Card/payment-terminal integration, refunds, promotions, inventory integration,
 customer-display workflows, Rust hardware agents, cloud synchronization and
-remote management remain separately scoped future work. Rust, Supabase CLI,
-and OpenTofu tooling in the development shell are preparation, not evidence of
-implemented agents or cloud infrastructure. There is currently no Rust workspace
-or canonical cloud start/stop/plan workflow.
+remote management remain separately scoped future work. The Rust protocol
+library and development tools do not establish implemented hardware agents or
+cloud infrastructure. There is no canonical cloud start/stop/plan workflow.
 
 ## Development environment
 
@@ -260,8 +274,13 @@ Use the narrowest relevant existing recipe:
 | `just test-flutter` | Flutter unit/widget tests |
 | `just test-pos-integration` | Isolated Flutter ↔ Racket ↔ SQLite process tests |
 | `just analyze-flutter` | Flutter analysis |
-| `just test` | Racket and Flutter tests, without real-process integration |
-| `just check` | Analysis, both test suites, and real-process integration |
+| `just fmt-rust` | Format the Rust workspace |
+| `just check-rust-format` | Verify Rust formatting |
+| `just clippy-rust` | Locked workspace Clippy, with warnings denied |
+| `just test-rust` | Locked Rust workspace tests |
+| `just check-rust` | Rust formatting check, Clippy, and tests |
+| `just test` | Racket, Flutter, and Rust tests, without real-process integration |
+| `just check` | Flutter analysis, Rust format/Clippy, all three test suites, and real-process integration |
 
 The integration suite starts/owns its backend and temporary state; no separately
 started server or cloud service is needed. See the
@@ -287,14 +306,14 @@ just build-appliance-bundle
 
 These commands do not provision a register or mutate the host deployment.
 See the [Core service contract](docs/operations/pos-core-service.md) and appliance
-runbooks. `just --list` is the live command inventory; do not assume Rust tests,
-a multi-language formatter, or cloud orchestration exists before implemented
-recipes establish their contracts.
+runbooks. `just --list` is the live command inventory; no aggregate multi-language
+formatter or cloud orchestration recipe exists.
 
 ## Repository and deeper guidance
 
 Production application code lives under `pos-backend-racket/` and
-`flutter/apps/pos_terminal/`; `packaging/` contains appliance delivery and
+`flutter/apps/pos_terminal/`, with Rust protocol source under `rust/edge/`;
+`packaging/` contains appliance delivery and
 `scripts/` contains developer/qualification helpers.
 
 - [ADRs](docs/adr/README.md): accepted architecture and rationale.

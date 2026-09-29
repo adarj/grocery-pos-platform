@@ -135,6 +135,10 @@
         devShells.default = pkgs.mkShell {
           name = "grocery-pos-dev";
 
+          # Separate tool and target-library hooks. Without strict roles this
+          # multi-compiler shell duplicates flags until GCC cannot spawn collect2.
+          strictDeps = true;
+
           packages = with pkgs; [
             # Core command-line tools
             git
@@ -161,7 +165,6 @@
 
             # Racket backend
             racket
-            libargon2
 
             # Rust edge agents
             rustToolchain
@@ -191,6 +194,11 @@
             clang
             cmake
             ninja
+          ];
+
+          buildInputs = with pkgs; [
+            # Libraries linked/loaded by Racket and the Flutter Linux runner.
+            libargon2
             gtk3
             glib
             libepoxy
