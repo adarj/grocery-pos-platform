@@ -135,7 +135,24 @@ records, including the complete initial snapshot, use the bounded JSON encoder.
 `edge-adapter-api` defines bounded begin/poll/Drop contracts; `edge-sim` supplies
 deterministic, bounded scripts through the same Core → queue → executor → adapter
 path, including disconnect/rebind and subscription continuity scenarios.
-These are M8.2.1–M8.2.5 foundations under
+`edge-server` adds peer-authenticated filesystem UDS HTTP/1.1 using an inherited
+listener. One control thread owns Core/execution; typed requests cross a bounded
+mailbox, and execution progresses independently of requests. Connections,
+headers, request bodies, response encoding, read deadlines, and socket writes
+are bounded. The event route forwards Core's atomic snapshot and live events as
+NDJSON through a one-record handoff; disconnect/overflow ends the subscription.
+The generic [Racket Edge modules](pos-backend-racket/pos/edge/) provide typed
+queries, immutable physical-attempt identity, explicit transport uncertainty,
+and a managed stream session with bounded framing and sequence/revision/epoch
+checks. They are opt-in and do not change checkout readiness. Each transmission
+uses a fresh request ID; an explicit retransmission preserves the same attempt.
+The pinned HTTP client disables redirects and automatic retries. Its private
+Nix patches bound upstream HTTP decoding and correct its attempt-count semantics.
+See the [transport/client notes](docs/development/edge-transport.md) for composition,
+qualification fixtures, dependency pins, and recovery limits.
+Real-process synthetic tests exercise UDS, strict admission, execution, events,
+lost-response dedupe, backpressure, and restart recovery.
+These are M8.2.1–M8.2.6 foundations under
 [ADR-0033](docs/adr/0033-use-a-semantic-local-edge-protocol-for-pos-hardware.md).
 
 In-process timeout/panic containment depends on adapters returning from bounded
@@ -150,9 +167,10 @@ An application hook panic or double panic during unwinding is not containable.
 Simulation is repository qualification infrastructure only, with no production
 activation path yet.
 
-OS discovery/selectors, complete `edge.toml` parsing, the UDS HTTP daemon and
-NDJSON transport, Racket client, real adapters, device-specific observations,
-Linux deployment, and physical qualification remain unimplemented.
+OS discovery/selectors, complete production `edge.toml`, real adapters,
+device-specific observations, production daemon/bootstrap composition,
+Linux service-identity/DAC/SELinux qualification, and physical qualification
+remain deferred. M8.2.7 owns the formal generic Tier-A qualification/audit.
 These foundation tests do not establish whole-M8 Tier A qualification or a
 functioning production edge daemon.
 

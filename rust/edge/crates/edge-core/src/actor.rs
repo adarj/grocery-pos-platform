@@ -240,6 +240,21 @@ where
         &self.agent_instance_id
     }
 
+    /// Observe the same monotonic domain used by admission and execution.
+    /// Read-side transport queries must also stop on an abandoned Core epoch.
+    pub fn current_uptime(&mut self) -> Result<AgentUptimeMs, CoreFatalError> {
+        self.ensure_live()?;
+        self.observe_uptime()
+    }
+
+    /// Current configured logical slots in deterministic DeviceId order.
+    pub fn device_snapshots(&self) -> Vec<DeviceSnapshot> {
+        self.devices
+            .values()
+            .map(|device| device.snapshot.clone())
+            .collect()
+    }
+
     pub fn retained_command_count(&self) -> usize {
         self.records.len()
     }

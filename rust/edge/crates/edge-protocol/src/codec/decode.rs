@@ -231,6 +231,9 @@ pub fn decode_command_strict<D: CommandPayloadDecoder>(
                 CommandPayloadDecodeError::SchemaViolation => {
                     JsonDecodeError::PayloadSchemaViolation
                 }
+                CommandPayloadDecodeError::SemanticViolation => {
+                    JsonDecodeError::PayloadSemanticViolation
+                }
             }
         })?;
     if payload.command_kind() != raw.kind.as_str() {

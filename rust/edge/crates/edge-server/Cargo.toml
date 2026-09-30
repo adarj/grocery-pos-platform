@@ -1,0 +1,31 @@
+[package]
+name = "edge-server"
+description = "Bounded peer-authenticated UDS HTTP transport for the private Edge Protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+edge-protocol = { path = "../edge-protocol" }
+edge-core = { path = "../edge-core" }
+edge-adapter-api = { path = "../edge-adapter-api" }
+bytes = "1"
+hyper = { version = "1", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+http-body-util = "0.1"
+tokio = { version = "1", default-features = false, features = ["rt", "net", "sync", "time", "macros", "io-util"] }
+rustix = { version = "1", default-features = false, features = ["std", "net", "process"] }
+serde.workspace = true
+edge-sim = { path = "../edge-sim", optional = true }
+
+[features]
+qualification = ["dep:edge-sim"]
+
+[[bin]]
+name = "edge-qualification-fixture"
+path = "src/bin/edge-qualification-fixture.rs"
+required-features = ["qualification"]
+
+[lints]
+workspace = true

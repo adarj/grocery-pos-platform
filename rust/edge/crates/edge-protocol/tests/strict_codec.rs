@@ -96,6 +96,39 @@ fn decode_command(
 }
 
 #[test]
+fn semantic_payload_rejection_is_distinct_from_structural_schema_failure() {
+    struct SemanticDecoder;
+    impl CommandPayloadDecoder for SemanticDecoder {
+        type Payload = SyntheticPayload;
+        fn decode_payload(
+            _: &CommandKind,
+            payload: StrictJsonFragment<'_>,
+        ) -> Result<Self::Payload, CommandPayloadDecodeError> {
+            payload.decode::<ObservePayload>()?;
+            Err(CommandPayloadDecodeError::SemanticViolation)
+        }
+    }
+    let body = command_json("request-a", "synthetic.observe", r#"{"count":0}"#);
+    assert_eq!(
+        decode_command_strict::<SemanticDecoder>(
+            body.as_bytes(),
+            JsonDecodeLimits::COMMAND_REQUEST
+        )
+        .unwrap_err(),
+        JsonDecodeError::PayloadSemanticViolation
+    );
+    let structural = body.replace(r#""count":0"#, r#""unknown":0"#);
+    assert_eq!(
+        decode_command_strict::<SemanticDecoder>(
+            structural.as_bytes(),
+            JsonDecodeLimits::COMMAND_REQUEST
+        )
+        .unwrap_err(),
+        JsonDecodeError::PayloadSchemaViolation
+    );
+}
+
+#[test]
 fn one_bounded_json_document_decodes_and_framing_is_strict() {
     assert_eq!(decode::<u64>(b"7 \n"), Ok(7));
     assert_eq!(

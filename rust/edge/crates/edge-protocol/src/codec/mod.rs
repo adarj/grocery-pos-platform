@@ -37,6 +37,11 @@ impl StrictJsonSchema for crate::DeviceSnapshot {}
 impl StrictJsonSchema for crate::CommandState {}
 impl StrictJsonSchema for crate::EdgeEvent {}
 impl StrictJsonSchema for crate::ProtocolError {}
+impl StrictJsonSchema for crate::HealthResponse {}
+impl StrictJsonSchema for crate::AgentStatusResponse {}
+impl StrictJsonSchema for crate::DeviceListResponse {}
+impl StrictJsonSchema for crate::CommandResponse {}
+impl StrictJsonSchema for crate::ProtocolErrorResponse {}
 
 /// Initial M8 command-request defaults, subject to implementation qualification.
 /// The root scalar has depth zero; the root array/object has depth one, and
@@ -93,6 +98,7 @@ pub enum JsonDecodeError {
     SchemaViolation,
     UnknownCommandKind,
     PayloadSchemaViolation,
+    PayloadSemanticViolation,
 }
 
 impl fmt::Display for JsonDecodeError {
@@ -112,6 +118,9 @@ impl fmt::Display for JsonDecodeError {
             Self::SchemaViolation => "JSON value violates its protocol schema",
             Self::UnknownCommandKind => "unsupported semantic command kind",
             Self::PayloadSchemaViolation => "command payload violates its compiled schema",
+            Self::PayloadSemanticViolation => {
+                "command payload violates compiled semantic constraints"
+            }
         })
     }
 }
@@ -123,6 +132,9 @@ impl std::error::Error for JsonDecodeError {}
 pub enum CommandPayloadDecodeError {
     UnknownKind,
     SchemaViolation,
+    /// Typed shape is valid but a compiled physical-command constraint fails.
+    /// Separate from structural invalidity for safe boundary error mapping.
+    SemanticViolation,
 }
 
 impl fmt::Display for CommandPayloadDecodeError {
@@ -130,6 +142,7 @@ impl fmt::Display for CommandPayloadDecodeError {
         f.write_str(match self {
             Self::UnknownKind => "unsupported semantic command kind",
             Self::SchemaViolation => "command payload violates its compiled schema",
+            Self::SemanticViolation => "command payload violates compiled semantic constraints",
         })
     }
 }

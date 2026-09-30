@@ -79,6 +79,21 @@ pub(super) struct PreparedEvent {
 }
 
 impl<P: CoreCommand, C: AgentClock, Q: ExecutorQueuePort<P>> CoreActor<P, C, Q> {
+    /// Observe continuity without draining events. Transport backpressure must
+    /// notice overflow even while a socket is not ready for another record.
+    pub fn event_subscription_active(
+        &self,
+        token: &SubscriptionToken,
+    ) -> Result<bool, CoreFatalError> {
+        self.ensure_live()?;
+        Ok(Rc::ptr_eq(&token.owner, &self.authority)
+            && self
+                .events
+                .subscriber
+                .as_ref()
+                .is_some_and(|subscriber| subscriber.generation == token.generation))
+    }
+
     pub fn event_cursor(&self) -> EventCursor {
         EventCursor::new(self.events.sequence)
     }

@@ -112,6 +112,61 @@
           hash = "sha256-GbniMHYktaaXLbc/CHNRxQvzisc2u5NAsUH2E4ZLYeY=";
         };
 
+        # http-easy-lib 0.11.1: only its non-distribution dependencies are
+        # copied as collections. net-cookies/unix-socket are in pinned Racket.
+        httpEasySource = pkgs.fetchFromGitHub {
+          owner = "Bogdanp"; repo = "racket-http-easy";
+          rev = "d099f4025f93b5938b7a66db821aa4888e2a2afc";
+          hash = "sha256-5fYrV79nQDnvDXIpPO3EUPVwRZFIUOdi4i0wXnjTkKw=";
+        };
+        resourcePoolSource = pkgs.fetchFromGitHub {
+          owner = "Bogdanp"; repo = "racket-resource-pool";
+          rev = "323ca977ab55f526582f322f148cf684b79896c3";
+          hash = "sha256-EwkoTDzhle0WtdyCfaJGo5F7xWFN2c+LHXJhjZ9A6RI=";
+        };
+        actorSource = pkgs.fetchFromGitHub {
+          owner = "Bogdanp"; repo = "racket-actor";
+          rev = "0d46e1f039bbc22372171a077884f28ccd283c93";
+          hash = "sha256-b0Q++FnbQQCHqDS3JIGqGm/M08KG+VxHv8+mSBdq9vA=";
+        };
+        racketEdgeCollections = pkgs.stdenvNoCC.mkDerivation {
+          pname = "grocery-pos-racket-edge-collections";
+          version = "2026-09-29";
+          dontUnpack = true;
+          nativeBuildInputs = [ pkgs.patch ];
+          installPhase = ''
+            mkdir -p "$out/share/racket/collects"/{net,data,actor}
+            cp -R ${httpEasySource}/http-easy-lib/. "$out/share/racket/collects/net/"
+            cp -R ${resourcePoolSource}/resource-pool-lib/. "$out/share/racket/collects/data/"
+            cp -R ${actorSource}/actor-lib/. "$out/share/racket/collects/actor/"
+            chmod -R u+w "$out/share/racket/collects"
+            # Pinned Racket's HTTP decoder allocates the declared chunk length
+            # before the bounded caller sees bytes. Keep mature parsing, with
+            # bounded framing/storage, private to http-easy (no global override).
+            cp ${pkgs.racket}/share/racket/collects/net/http-client.rkt \
+              "$out/share/racket/collects/net/http-easy/private/bounded-http-client.rkt"
+            chmod u+w "$out/share/racket/collects/net/http-easy/private/bounded-http-client.rkt"
+            cd "$out/share/racket/collects/net/http-easy/private"
+            patch -p1 < ${./nix/racket-http-client-bounds.patch}
+            # Edge disallows compression; avoid background decompression before
+            # the client can reject a hostile Content-Encoding header.
+            substituteInPlace bounded-http-client.rkt \
+              --replace-fail "[decodes '(gzip deflate)]" '[decodes null]'
+            substituteInPlace session.rkt pool.rkt proxy.rkt \
+              --replace-fail net/http-client '"bounded-http-client.rkt"'
+            # Upstream 0.11.1 initializes a retry counter with max-attempts,
+            # permitting one extra attempt. Make the advertised count TOTAL.
+            substituteInPlace session.rkt \
+              --replace-fail '#:attempts max-attempts' '#:attempts (sub1 max-attempts)'
+            # Library diagnostics must not echo hostile response/framing text.
+            substituteInPlace session.rkt \
+              --replace-fail '(exn-message e)' '"HTTP transport error"' \
+              --replace-fail '(response-status-line resp)' '"HTTP response received"'
+            substituteInPlace pool.rkt \
+              --replace-fail '(exn-message conn-or-exn)' '"HTTP connection error"'
+          '';
+        };
+
         racketCryptoCollections = pkgs.stdenvNoCC.mkDerivation {
           pname = "grocery-pos-racket-crypto-collections";
           version = "2.0-713eaaf";
@@ -211,7 +266,7 @@
             export SQLITE_DB_PATH="$PROJECT_ROOT/.local/sqlite/pos-dev.db"
             export RACKET_API_HOST="127.0.0.1"
             export RACKET_API_PORT="7340"
-            export PLTCOLLECTS="${racketCryptoCollections}/share/racket/collects:''${PLTCOLLECTS:-}"
+            export PLTCOLLECTS="${racketEdgeCollections}/share/racket/collects:${racketCryptoCollections}/share/racket/collects:''${PLTCOLLECTS:-}"
             export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.libargon2 ]}:''${LD_LIBRARY_PATH:-}"
 
             mkdir -p \

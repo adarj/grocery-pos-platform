@@ -22,6 +22,7 @@ mod error;
 mod event;
 mod ids;
 mod numbers;
+mod response;
 mod text;
 mod version;
 
@@ -46,3 +47,7 @@ pub use ids::{
 pub use numbers::{AgentUptimeMs, CommandTimeoutMs, EventCursor, EventSequence, StateRevision};
 pub use text::{MAX_SEMANTIC_NAME_BYTES, TextError};
 pub use version::{ProtocolMajor, ProtocolVersion, UnsupportedProtocolMajor};
+
+pub use response::{
+    AgentStatusResponse, CommandResponse, DeviceListResponse, HealthResponse, ProtocolErrorResponse,
+};
