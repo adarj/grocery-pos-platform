@@ -6,7 +6,7 @@ use crate::{
 };
 
 /// Generic event vocabulary only; no NDJSON framing, subscription, or replay machinery.
-/// Core supplies atomic snapshots and contiguous per-agent sequences in future checkpoints.
+/// Core supplies atomic snapshots and contiguous per-agent live sequences.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum EdgeEvent {

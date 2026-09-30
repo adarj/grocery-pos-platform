@@ -1,13 +1,16 @@
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::rc::Rc;
 
 use edge_adapter_api::{AdapterOperation, AdapterPoll, AdapterPollContext, DeviceAdapter};
-use edge_protocol::AgentUptimeMs;
+use edge_protocol::{AgentUptimeMs, BindingInstanceId, DeviceId};
 
 use crate::effect::{Completion, EffectTracker};
 use crate::panic_boundary::{adapter_call, adapter_drop, install_privacy_hook};
 use crate::{
-    AgentClock, CoreActor, CoreCommand, CoreFatalError, ExecutorQueuePort, QueueConsumer,
+    AgentClock, BindingInstallationWitness, BindingInvalidation, CoreActor, CoreCommand,
+    CoreFatalError, ExecutorQueuePort, LifecycleError, LifecycleRejection, QueueConsumer,
     QueuedCommand, ResourceId,
 };
 
@@ -26,7 +29,14 @@ impl<P, O> Drop for Active<P, O> {
     }
 }
 
+struct InstalledBinding {
+    device_id: DeviceId,
+    binding: BindingInstanceId,
+    live: Rc<Cell<bool>>,
+}
+
 struct ResourceExecutor<P, A: DeviceAdapter<P>> {
+    installed: Option<InstalledBinding>,
     adapter: Option<A>,
     active: Option<Active<P, A::Operation>>,
 }
@@ -34,6 +44,24 @@ struct ResourceExecutor<P, A: DeviceAdapter<P>> {
 impl<P, A: DeviceAdapter<P>> Drop for ResourceExecutor<P, A> {
     fn drop(&mut self) {
         self.active.take();
+        self.discard_adapter();
+    }
+}
+
+impl<P, A: DeviceAdapter<P>> ResourceExecutor<P, A> {
+    fn matches(&self, command: &QueuedCommand<P>) -> bool {
+        self.adapter.is_some()
+            && self.installed.as_ref().is_some_and(|v| {
+                v.live.get()
+                    && v.device_id == *command.device_id()
+                    && v.binding == *command.binding_instance_id()
+            })
+    }
+
+    fn discard_adapter(&mut self) {
+        if let Some(installed) = self.installed.take() {
+            installed.live.set(false);
+        }
         discard_adapter(&mut self.adapter);
     }
 }
@@ -67,6 +95,7 @@ pub struct ExecutorSupervisor<P, A: DeviceAdapter<P>> {
     resources: BTreeMap<ResourceId, ResourceExecutor<P, A>>,
     consumer: QueueConsumer<P>,
     fatal: bool,
+    core_owner: Option<Rc<()>>,
 }
 
 impl<P, A: DeviceAdapter<P>> fmt::Debug for ExecutorSupervisor<P, A> {
@@ -79,39 +108,118 @@ impl<P, A: DeviceAdapter<P>> fmt::Debug for ExecutorSupervisor<P, A> {
 }
 
 impl<P: CoreCommand, A: DeviceAdapter<P>> ExecutorSupervisor<P, A> {
-    /// Adapters must exactly cover the bounded queue resource set. Installs the
-    /// process panic-hook privacy wrapper; see crate documentation for ordering.
-    pub fn new(
-        consumer: QueueConsumer<P>,
-        adapters: impl IntoIterator<Item = (ResourceId, A)>,
-    ) -> Result<Self, CoreFatalError> {
+    /// Creates uninstalled resource slots. Adapter installation and Core
+    /// activation are separate; a constructor cannot publish binding authority.
+    /// Installs the process panic privacy wrapper (serial bootstrap only).
+    pub fn new(consumer: QueueConsumer<P>) -> Result<Self, CoreFatalError> {
         install_privacy_hook();
-        let ids = consumer.resources();
-        let mut resources = BTreeMap::new();
-        for (resource, adapter) in AdapterSeeds(Some(adapters.into_iter())) {
-            if resources.len() >= ids.len()
-                || !ids.contains(&resource)
-                || resources.contains_key(&resource)
-            {
-                adapter_drop(adapter);
-                return Err(CoreFatalError::QueueInvariant);
-            }
-            resources.insert(
-                resource,
-                ResourceExecutor {
-                    adapter: Some(adapter),
-                    active: None,
-                },
-            );
-        }
-        if resources.len() != ids.len() {
-            return Err(CoreFatalError::QueueInvariant);
-        }
+        let resources = consumer
+            .resources()
+            .into_iter()
+            .map(|resource| {
+                (
+                    resource,
+                    ResourceExecutor {
+                        adapter: None,
+                        installed: None,
+                        active: None,
+                    },
+                )
+            })
+            .collect();
         Ok(Self {
             resources,
             consumer,
             fatal: false,
+            core_owner: None,
         })
+    }
+
+    /// Installs a complete fresh set for a Connecting logical slot. The returned
+    /// witness is the only route to activation. No adapter begin/poll occurs.
+    /// Replacement first stops every old active operation for these resources;
+    /// old queued identities remain attached to their original binding.
+    /// A rejected or dropped witness cancels eligibility immediately; the next
+    /// drive discards the pending adapters without begin/poll calls.
+    pub fn install_binding<C: AgentClock>(
+        &mut self,
+        core: &mut CoreActor<P, C, crate::QueueProducer<P>>,
+        device_id: &DeviceId,
+        binding: &BindingInstanceId,
+        adapters: impl IntoIterator<Item = (ResourceId, A)>,
+    ) -> Result<BindingInstallationWitness, LifecycleError> {
+        // Guard even rejected input iterators: adapter cleanup remains private.
+        let mut seeds = AdapterSeeds(Some(adapters.into_iter()));
+        core.ensure_live()?;
+        if self.fatal
+            || !core.owns_consumer(&self.consumer)
+            || self
+                .core_owner
+                .as_ref()
+                .is_some_and(|owner| !core.matches_authority(owner))
+        {
+            return Err(LifecycleError::Fatal(
+                core.stop(CoreFatalError::BindingInstallationInvariant),
+            ));
+        }
+        let required = core.installation_resources(device_id, binding)?;
+        let mut fresh = BTreeMap::new();
+        for (resource, adapter) in &mut seeds {
+            if !required.contains(&resource)
+                || !self.resources.contains_key(&resource)
+                || fresh.contains_key(&resource)
+            {
+                adapter_drop(adapter);
+                return Err(LifecycleError::Rejected(
+                    LifecycleRejection::IncompleteInstallation,
+                ));
+            }
+            fresh.insert(
+                resource,
+                ResourceExecutor {
+                    adapter: Some(adapter),
+                    installed: None,
+                    active: None,
+                },
+            );
+        }
+        if fresh.len() != required.len() {
+            return Err(LifecycleError::Rejected(
+                LifecycleRejection::IncompleteInstallation,
+            ));
+        }
+        let live = Rc::new(Cell::new(true));
+        let witness = core.installation_witness(device_id, binding, required, Rc::clone(&live))?;
+        self.core_owner = Some(Rc::clone(&witness.owner));
+        for (resource, mut replacement) in fresh {
+            let old = self
+                .resources
+                .get_mut(&resource)
+                .ok_or(CoreFatalError::QueueInvariant)?;
+            if let Some(mut active) = old.active.take() {
+                core.execution_witness(&active.command, true)?;
+                let operation = active
+                    .operation
+                    .take()
+                    .ok_or(CoreFatalError::ExecutionInvariant)?;
+                adapter_drop(operation);
+                let now = core.observe_uptime()?;
+                core.finish_record(
+                    active.command.command_id(),
+                    now,
+                    active.tracker.interrupted(),
+                    Some("edge.binding_invalidated"),
+                )?;
+            }
+            old.discard_adapter();
+            replacement.installed = Some(InstalledBinding {
+                device_id: device_id.clone(),
+                binding: binding.clone(),
+                live: Rc::clone(&live),
+            });
+            *old = replacement;
+        }
+        Ok(witness)
     }
 
     /// A fatal error poisons this supervisor. The caller must abandon the Core
@@ -123,11 +231,20 @@ impl<P: CoreCommand, A: DeviceAdapter<P>> ExecutorSupervisor<P, A> {
         if self.fatal {
             return Err(CoreFatalError::ExecutionInvariant);
         }
+        core.ensure_live()?;
+        if self
+            .core_owner
+            .as_ref()
+            .is_some_and(|owner| !core.matches_authority(owner))
+        {
+            self.fatal = true;
+            return Err(core.stop(CoreFatalError::BindingInstallationInvariant));
+        }
         let result = self.drive_inner(core);
         if result.is_err() {
             self.fatal = true;
         }
-        result
+        core.latch(result)
     }
 
     fn drive_inner<C: AgentClock, Q: ExecutorQueuePort<P>>(
@@ -142,10 +259,12 @@ impl<P: CoreCommand, A: DeviceAdapter<P>> ExecutorSupervisor<P, A> {
                     return Err(CoreFatalError::QueueInvariant);
                 }
                 core.execution_witness(command, false)?;
-                Ok(!core.binding_executable(command) || expired(command, now)?)
+                Ok(!core.binding_executable(command)
+                    || !executor.matches(command)
+                    || expired(command, now)?)
             })?;
             for command in removed {
-                let code = if !core.binding_executable(&command) {
+                let code = if !core.binding_executable(&command) || !executor.matches(&command) {
                     "edge.binding_fenced"
                 } else {
                     "edge.execution_timeout"
@@ -159,14 +278,21 @@ impl<P: CoreCommand, A: DeviceAdapter<P>> ExecutorSupervisor<P, A> {
                 // command drops here; no queue/operation payload reference remains.
             }
 
-            if executor.active.is_none() && !core.resource_executable(resource) {
-                discard_adapter(&mut executor.adapter);
+            if executor.active.is_none()
+                && executor.installed.as_ref().is_some_and(|installed| {
+                    !installed.live.get()
+                        || core.installation_retired(&installed.device_id, &installed.binding)
+                })
+            {
+                executor.discard_adapter();
             }
 
             if let Some(mut active) = executor.active.take() {
                 core.execution_witness(&active.command, true)?;
                 let now = core.observe_uptime()?;
-                let interrupt = if !core.binding_executable(&active.command) {
+                let interrupt = if !core.binding_executable(&active.command)
+                    || !executor.matches(&active.command)
+                {
                     Some("edge.binding_fenced")
                 } else if expired(&active.command, now)? {
                     Some("edge.execution_timeout")
@@ -252,11 +378,8 @@ impl<P: CoreCommand, A: DeviceAdapter<P>> ExecutorSupervisor<P, A> {
                         .ok_or(CoreFatalError::ExecutionInvariant)?;
                     adapter_drop(operation);
                     if fence {
-                        core.fence_binding(
-                            active.command.device_id(),
-                            active.command.binding_instance_id(),
-                        );
-                        discard_adapter(&mut executor.adapter);
+                        invalidate_execution_binding(core, &active.command)?;
+                        executor.discard_adapter();
                     }
                     let terminal_at = core.observe_uptime()?;
                     core.finish_record(active.command.command_id(), terminal_at, completion, code)?;
@@ -272,8 +395,12 @@ impl<P: CoreCommand, A: DeviceAdapter<P>> ExecutorSupervisor<P, A> {
             {
                 core.execution_witness(&command, false)?;
                 let now = core.observe_uptime()?;
-                if !core.binding_executable(&command) || expired(&command, now)? {
-                    let code = if !core.binding_executable(&command) {
+                if !core.binding_executable(&command)
+                    || !executor.matches(&command)
+                    || expired(&command, now)?
+                {
+                    let code = if !core.binding_executable(&command) || !executor.matches(&command)
+                    {
                         "edge.binding_fenced"
                     } else {
                         "edge.execution_timeout"
@@ -310,11 +437,8 @@ impl<P: CoreCommand, A: DeviceAdapter<P>> ExecutorSupervisor<P, A> {
                                 .take()
                                 .ok_or(CoreFatalError::ExecutionInvariant)?;
                             adapter_drop(operation);
-                            core.fence_binding(
-                                active.command.device_id(),
-                                active.command.binding_instance_id(),
-                            );
-                            discard_adapter(&mut executor.adapter);
+                            invalidate_execution_binding(core, &active.command)?;
+                            executor.discard_adapter();
                             let now = core.observe_uptime()?;
                             core.finish_record(
                                 active.command.command_id(),
@@ -331,8 +455,8 @@ impl<P: CoreCommand, A: DeviceAdapter<P>> ExecutorSupervisor<P, A> {
                             Ok(Err(code)) => code.as_str(),
                             _ => "edge.adapter_panic",
                         };
-                        core.fence_binding(command.device_id(), command.binding_instance_id());
-                        discard_adapter(&mut executor.adapter);
+                        invalidate_execution_binding(core, &command)?;
+                        executor.discard_adapter();
                         let now = core.observe_uptime()?;
                         core.finish_record(
                             command.command_id(),
@@ -346,6 +470,22 @@ impl<P: CoreCommand, A: DeviceAdapter<P>> ExecutorSupervisor<P, A> {
         }
         Ok(())
     }
+}
+
+fn invalidate_execution_binding<P: CoreCommand, C: AgentClock, Q: ExecutorQueuePort<P>>(
+    core: &mut CoreActor<P, C, Q>,
+    command: &QueuedCommand<P>,
+) -> Result<(), CoreFatalError> {
+    core.invalidate_binding(
+        command.device_id(),
+        command.binding_instance_id(),
+        BindingInvalidation::ExecutionFault,
+    )
+    .map(|_| ())
+    .map_err(|error| match error {
+        LifecycleError::Fatal(error) => error,
+        _ => CoreFatalError::BindingInstallationInvariant,
+    })
 }
 
 fn expired<P>(command: &QueuedCommand<P>, now: AgentUptimeMs) -> Result<bool, CoreFatalError> {
@@ -366,7 +506,7 @@ impl<P, A: DeviceAdapter<P>> Drop for ExecutorSupervisor<P, A> {
     fn drop(&mut self) {
         for executor in self.resources.values_mut() {
             executor.active.take();
-            discard_adapter(&mut executor.adapter);
+            executor.discard_adapter();
         }
     }
 }

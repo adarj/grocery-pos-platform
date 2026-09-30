@@ -79,6 +79,12 @@ impl<P> Drop for QueueReservation<P> {
     }
 }
 
+impl<P> QueueProducer<P> {
+    pub(crate) fn owns_consumer(&self, consumer: &QueueConsumer<P>) -> bool {
+        Rc::ptr_eq(&self.0, &consumer.0)
+    }
+}
+
 impl<P> ExecutorQueuePort<P> for QueueProducer<P> {
     type Reservation = QueueReservation<P>;
 

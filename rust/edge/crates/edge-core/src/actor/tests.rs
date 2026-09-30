@@ -197,9 +197,9 @@ fn seed(
 fn normal_seed() -> CoreDeviceSeed {
     seed(
         "lane-a.device",
-        Some("binding-a"),
-        DeviceAvailability::Ready,
-        &["synthetic.observe", "synthetic.signal"],
+        None,
+        DeviceAvailability::Absent,
+        &[],
         &[
             ("synthetic.observe", ResourceId::new(7)),
             ("synthetic.signal", ResourceId::new(7)),
@@ -208,7 +208,32 @@ fn normal_seed() -> CoreDeviceSeed {
 }
 
 fn core(clock: FakeClock, limits: CoreLimits, queue: FakeQueue) -> TestCore {
-    TestCore::new(agent(), vec![normal_seed()], limits, clock, queue).unwrap()
+    let mut core = TestCore::new(agent(), vec![normal_seed()], limits, clock, queue).unwrap();
+    // Admission unit tests use a trusted installation fixture. Integration
+    // tests qualify witness issuance with the real executor and adapters.
+    core.begin_connecting(&device_id("lane-a.device")).unwrap();
+    let witness = core
+        .installation_witness(
+            &device_id("lane-a.device"),
+            &binding("binding-a"),
+            [ResourceId::new(7)].into(),
+            Rc::new(Cell::new(true)),
+        )
+        .unwrap();
+    core.activate_binding(
+        witness,
+        BoundDeviceState {
+            availability: BoundAvailability::Ready,
+            conditions: BTreeSet::new(),
+            capabilities: [
+                capability("synthetic.observe"),
+                capability("synthetic.signal"),
+            ]
+            .into(),
+        },
+    )
+    .unwrap();
+    core
 }
 
 fn command(
@@ -290,7 +315,7 @@ fn defaults_and_registry_seed_are_bounded_and_consistent() {
     );
     assert_eq!(
         make(vec![unpublished], limits()).unwrap_err(),
-        CoreFatalError::UnpublishedResourceMapping
+        CoreFatalError::InvalidInitialDeviceState
     );
     let duplicate_mapping = seed(
         "lane-a.device",
@@ -315,13 +340,13 @@ fn defaults_and_registry_seed_are_bounded_and_consistent() {
     );
     assert_eq!(
         make(vec![unbound], limits()).unwrap_err(),
-        CoreFatalError::UnboundResourceMapping
+        CoreFatalError::InvalidInitialDeviceState
     );
     let second = seed(
         "lane-b.device",
-        Some("binding-b"),
-        DeviceAvailability::Ready,
-        &["synthetic.observe"],
+        None,
+        DeviceAvailability::Absent,
+        &[],
         &[("synthetic.observe", ResourceId::new(7))],
     );
     assert_eq!(
@@ -338,9 +363,9 @@ fn defaults_and_registry_seed_are_bounded_and_consistent() {
     tiny.max_resources = 1;
     let two_resources = seed(
         "lane-a.device",
-        Some("binding-a"),
-        DeviceAvailability::Ready,
-        &["synthetic.observe", "synthetic.signal"],
+        None,
+        DeviceAvailability::Absent,
+        &[],
         &[
             ("synthetic.observe", ResourceId::new(7)),
             ("synthetic.signal", ResourceId::new(8)),
@@ -420,12 +445,6 @@ fn agent_precondition_and_retained_identity_win_before_current_state() {
         rejected(core.submit_command(wrong_agent).unwrap()),
         AdmissionRejection::AgentInstanceConflict
     );
-    let mut invalid_compiled = original.clone();
-    invalid_compiled.kind = CommandKind::new("synthetic.signal").unwrap();
-    assert_eq!(
-        core.submit_command(invalid_compiled),
-        Err(CoreFatalError::InvalidCompiledCommand)
-    );
     clock.set(120);
     core.devices.remove(&device_id("lane-a.device"));
     let mut retry = original.clone();
@@ -442,6 +461,12 @@ fn agent_precondition_and_retained_identity_win_before_current_state() {
     );
     assert_eq!(core.queue.reserve_calls, 1);
     assert_eq!(core.retained_command_count(), 1);
+    let mut invalid_compiled = command("same", "request-a", 105, 10);
+    invalid_compiled.kind = CommandKind::new("synthetic.signal").unwrap();
+    assert_eq!(
+        core.submit_command(invalid_compiled),
+        Err(CoreFatalError::InvalidCompiledCommand)
+    );
 }
 
 #[test]
@@ -515,14 +540,7 @@ fn freshness_horizon_timeout_and_clock_boundaries_are_exact() {
     assert_eq!(core.queue.reserve_calls, 2);
 
     let near_max = FakeClock::new(u64::MAX - 2);
-    let mut near_max_core = TestCore::new(
-        agent(),
-        vec![normal_seed()],
-        limits(),
-        near_max.clone(),
-        FakeQueue::default(),
-    )
-    .unwrap();
+    let mut near_max_core = self::core(near_max.clone(), limits(), FakeQueue::default());
     accepted(
         near_max_core
             .submit_command(command("max", "r", u64::MAX, 10))
@@ -564,21 +582,15 @@ fn device_binding_and_capability_checks_do_not_impose_a_ready_gate() {
         ),
         AdmissionRejection::BindingInstanceConflict
     );
-    let mut degraded = normal_seed();
-    degraded.snapshot.availability = DeviceAvailability::Degraded;
-    degraded
-        .snapshot
-        .capabilities
-        .remove(&capability("synthetic.signal"));
-    degraded
-        .capability_resources
-        .retain(|(cap, _)| cap != &capability("synthetic.signal"));
-    let mut core = TestCore::new(
-        agent(),
-        vec![degraded],
-        limits(),
-        clock,
-        FakeQueue::default(),
+    let mut core = self::core(clock, limits(), FakeQueue::default());
+    core.update_bound_device_state(
+        &device_id("lane-a.device"),
+        &binding("binding-a"),
+        BoundDeviceState {
+            availability: BoundAvailability::Degraded,
+            conditions: BTreeSet::new(),
+            capabilities: [capability("synthetic.observe")].into(),
+        },
     )
     .unwrap();
     let mut signal = command("signal", "r", 100, 10);
@@ -886,14 +898,232 @@ fn sequence_overflow_releases_the_uncommitted_reservation() {
 
 #[test]
 fn bound_published_capability_requires_a_resource_mapping() {
-    let mut incomplete = normal_seed();
-    incomplete.capability_resources.pop();
-    let result = TestCore::new(
-        agent(),
-        vec![incomplete],
-        limits(),
-        FakeClock::new(100),
-        FakeQueue::default(),
+    let mut core = core(FakeClock::new(100), limits(), FakeQueue::default());
+    let before = core
+        .device_snapshot(&device_id("lane-a.device"))
+        .unwrap()
+        .clone();
+    assert_eq!(
+        core.update_bound_device_state(
+            &device_id("lane-a.device"),
+            &binding("binding-a"),
+            BoundDeviceState {
+                availability: BoundAvailability::Ready,
+                conditions: BTreeSet::new(),
+                capabilities: [capability("synthetic.unconfigured")].into()
+            }
+        ),
+        Err(LifecycleError::Rejected(
+            LifecycleRejection::CapabilityNotConfigured
+        ))
     );
-    assert_eq!(result.unwrap_err(), CoreFatalError::MissingResourceMapping);
+    assert_eq!(
+        core.device_snapshot(&device_id("lane-a.device")),
+        Some(&before)
+    );
+}
+
+#[test]
+fn initial_device_history_cannot_be_seeded_as_runtime_authority() {
+    for change in 0..3 {
+        let mut seed = normal_seed();
+        match change {
+            0 => seed.snapshot.state_revision = StateRevision::new(1),
+            1 => seed.snapshot.binding_instance_id = Some(binding("old")),
+            _ => seed.snapshot.availability = DeviceAvailability::Ready,
+        }
+        assert_eq!(
+            TestCore::new(
+                agent(),
+                vec![seed],
+                limits(),
+                FakeClock::new(0),
+                FakeQueue::default()
+            )
+            .unwrap_err(),
+            CoreFatalError::InvalidInitialDeviceState
+        );
+    }
+    let core = TestCore::new(
+        agent(),
+        vec![normal_seed()],
+        limits(),
+        FakeClock::new(0),
+        FakeQueue::default(),
+    )
+    .unwrap();
+    let initial = core.device_snapshot(&device_id("lane-a.device")).unwrap();
+    assert_eq!(initial.state_revision.get(), 0);
+    assert_eq!(initial.binding_instance_id, None);
+    assert!(initial.capabilities.is_empty());
+    assert_eq!(core.event_cursor().get(), 0);
+}
+
+#[test]
+fn revision_overflow_preserves_snapshot_and_stops_subscription_and_admission() {
+    let mut core = core(FakeClock::new(100), limits(), FakeQueue::default());
+    let sub = core.open_event_subscription().unwrap();
+    core.devices
+        .get_mut(&device_id("lane-a.device"))
+        .unwrap()
+        .snapshot
+        .state_revision = StateRevision::new(u64::MAX);
+    let before = core
+        .device_snapshot(&device_id("lane-a.device"))
+        .unwrap()
+        .clone();
+    assert_eq!(
+        core.invalidate_binding(
+            &device_id("lane-a.device"),
+            &binding("binding-a"),
+            BindingInvalidation::Disconnected
+        ),
+        Err(LifecycleError::Fatal(CoreFatalError::StateRevisionOverflow))
+    );
+    assert_eq!(
+        core.device_snapshot(&device_id("lane-a.device")),
+        Some(&before)
+    );
+    assert_eq!(core.event_cursor(), sub.snapshot.event_cursor);
+    assert_eq!(
+        core.poll_event(&sub.token),
+        Err(CoreFatalError::StateRevisionOverflow)
+    );
+    assert_eq!(
+        core.submit_command(command("a", "r", 100, 10)),
+        Err(CoreFatalError::StateRevisionOverflow)
+    );
+}
+
+#[test]
+fn event_sequence_overflow_does_not_accept_or_publish_partial_state() {
+    let mut core = core(FakeClock::new(100), limits(), FakeQueue::default());
+    core.events.sequence = u64::MAX;
+    let sub = core.open_event_subscription().unwrap();
+    core.emit_heartbeat().unwrap(); // Snapshot/heartbeat need no next sequence.
+    assert_eq!(
+        core.submit_command(command("a", "r", 100, 10)),
+        Err(CoreFatalError::EventSequenceOverflow)
+    );
+    assert_eq!(core.retained_command_count(), 0);
+    assert_eq!(core.queue.commit_calls, 0);
+    assert_eq!(core.queue.outstanding_reservations.get(), 0);
+    assert_eq!(
+        core.poll_event(&sub.token),
+        Err(CoreFatalError::EventSequenceOverflow)
+    );
+    assert_eq!(core.event_cursor().get(), u64::MAX);
+}
+
+#[test]
+fn command_event_size_failure_preserves_each_prospective_phase() {
+    for phase in 0..3 {
+        let clock = FakeClock::new(100);
+        let mut core = core(clock, limits(), FakeQueue::default());
+        let sub = core.open_event_subscription().unwrap();
+        let submission = command("a", "r", 100, 10);
+        let id = submission.command_id.clone();
+        let queued = if phase != 0 {
+            accepted(core.submit_command(submission.clone()).unwrap());
+            let Some(CommandRecord::Active {
+                state, _payload, ..
+            }) = core.records.get(&id)
+            else {
+                panic!("accepted record missing");
+            };
+            Some(QueuedCommand::new(
+                ResourceId::new(7),
+                state,
+                submission.timeout_ms,
+                Arc::clone(_payload),
+            ))
+        } else {
+            None
+        };
+        if phase == 2 {
+            core.start_execution(queued.as_ref().unwrap()).unwrap();
+        }
+        let before = core.command_status(&id);
+        let cursor = core.event_cursor();
+        core.limits.max_event_record_bytes = 1;
+        let result = match phase {
+            0 => core.submit_command(submission).map(|_| ()),
+            1 => core.start_execution(queued.as_ref().unwrap()),
+            _ => core
+                .finish_record(
+                    &id,
+                    AgentUptimeMs::new(100),
+                    crate::effect::Completion::FailedNone,
+                    None,
+                )
+                .map(|_| ()),
+        };
+        assert_eq!(result, Err(CoreFatalError::EventNotRepresentable));
+        assert_eq!(core.command_status(&id), before);
+        assert_eq!(core.event_cursor(), cursor);
+        assert_eq!(core.queue.outstanding_reservations.get(), 0);
+        assert_eq!(core.queue.commit_calls, usize::from(phase != 0));
+        assert_eq!(core.retained_command_count(), usize::from(phase != 0));
+        assert_eq!(
+            core.poll_event(&sub.token),
+            Err(CoreFatalError::EventNotRepresentable)
+        );
+    }
+}
+
+#[test]
+fn subscription_generation_overflow_is_fatal_and_cannot_wrap_to_an_old_token() {
+    let mut core = core(FakeClock::new(100), limits(), FakeQueue::default());
+    let sub = core.open_event_subscription().unwrap();
+    core.close_event_subscription(&sub.token).unwrap();
+    core.events.generation = u64::MAX;
+    assert_eq!(
+        core.open_event_subscription().unwrap_err(),
+        SubscriptionError::Fatal(CoreFatalError::SubscriptionGenerationOverflow)
+    );
+    assert_eq!(
+        core.poll_event(&sub.token),
+        Err(CoreFatalError::SubscriptionGenerationOverflow)
+    );
+    assert_eq!(
+        core.begin_connecting(&device_id("lane-a.device")),
+        Err(LifecycleError::Fatal(
+            CoreFatalError::SubscriptionGenerationOverflow
+        ))
+    );
+}
+
+#[test]
+fn immediate_commit_failure_emits_accepted_then_terminal_without_erasing_identity() {
+    let mut core = core(
+        FakeClock::new(100),
+        limits(),
+        FakeQueue {
+            fail_commit: true,
+            ..FakeQueue::default()
+        },
+    );
+    let sub = core.open_event_subscription().unwrap();
+    let original = command("a", "r", 100, 10);
+    let terminal = accepted(core.submit_command(original.clone()).unwrap());
+    let EventPoll::Event(edge_protocol::EdgeEvent::CommandStateChanged(first)) =
+        core.poll_event(&sub.token).unwrap()
+    else {
+        panic!("accepted missing");
+    };
+    let EventPoll::Event(edge_protocol::EdgeEvent::CommandStateChanged(second)) =
+        core.poll_event(&sub.token).unwrap()
+    else {
+        panic!("terminal missing");
+    };
+    assert!(matches!(first.command, CommandState::Accepted(_)));
+    assert_eq!(first.sequence.get(), sub.snapshot.event_cursor.get() + 1);
+    assert_eq!(second.sequence.get(), first.sequence.get() + 1);
+    assert_eq!(second.command, terminal);
+    assert!(matches!(
+        core.submit_command(original).unwrap(),
+        AdmissionDecision::Deduplicated(_)
+    ));
+    assert_eq!(core.queue.reserve_calls, 1);
+    assert_eq!(core.poll_event(&sub.token).unwrap(), EventPoll::Empty);
 }

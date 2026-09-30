@@ -88,20 +88,16 @@ fn binding() -> BindingInstanceId {
 }
 
 fn seed() -> CoreDeviceSeed {
-    let caps: BTreeSet<_> = ["synthetic.signal", "synthetic.observe"]
-        .into_iter()
-        .map(|v| Capability::new(v).unwrap())
-        .collect();
     CoreDeviceSeed {
         snapshot: DeviceSnapshot {
             agent_instance_id: AgentInstanceId::new("agent-a").unwrap(),
             device_id: device(),
-            binding_instance_id: Some(binding()),
+            binding_instance_id: None,
             state_revision: StateRevision::new(0),
             adapter_kind: AdapterKind::new("synthetic").unwrap(),
-            availability: DeviceAvailability::Degraded,
+            availability: DeviceAvailability::Absent,
             conditions: BTreeSet::new(),
-            capabilities: caps,
+            capabilities: BTreeSet::new(),
         },
         capability_resources: vec![
             (
@@ -136,6 +132,18 @@ fn command(name: &str, resource: u8, timeout: u64) -> CommandSubmission<Payload>
 }
 
 fn fixture(capacity: usize, scripts: [Vec<Vec<Step>>; 2]) -> Fixture {
+    fixture_with_limits(
+        capacity,
+        scripts,
+        CoreLimits::with_registry_bounds(1, 2, 2, 1),
+    )
+}
+
+fn fixture_with_limits(
+    capacity: usize,
+    scripts: [Vec<Vec<Step>>; 2],
+    limits: CoreLimits,
+) -> Fixture {
     let clock = Clock(Rc::new(Cell::new(100)));
     let weak = Rc::new(RefCell::new(Vec::new()));
     let (producer, consumer) =
@@ -157,21 +165,47 @@ fn fixture(capacity: usize, scripts: [Vec<Vec<Step>>; 2]) -> Fixture {
             )
         })
         .collect();
-    let core = CoreActor::new(
+    let mut core = CoreActor::new(
         AgentInstanceId::new("agent-a").unwrap(),
         vec![seed()],
-        CoreLimits::with_registry_bounds(1, 2, 2, 1),
+        limits,
         clock.clone(),
         producer,
     )
     .unwrap();
+    let executor = make_executor(&mut core, consumer, adapters);
     Fixture {
         core,
-        executor: ExecutorSupervisor::new(consumer, adapters).unwrap(),
+        executor,
         clock,
         probes,
         weak,
     }
+}
+
+fn bound_state() -> BoundDeviceState {
+    BoundDeviceState {
+        availability: BoundAvailability::Degraded,
+        conditions: BTreeSet::new(),
+        capabilities: ["synthetic.signal", "synthetic.observe"]
+            .into_iter()
+            .map(|v| Capability::new(v).unwrap())
+            .collect(),
+    }
+}
+
+fn make_executor<A: DeviceAdapter<Payload>>(
+    core: &mut Core,
+    consumer: QueueConsumer<Payload>,
+    adapters: impl IntoIterator<Item = (ResourceId, A)>,
+) -> ExecutorSupervisor<Payload, A> {
+    let mut executor = ExecutorSupervisor::new(consumer).unwrap();
+    core.begin_connecting(&device()).unwrap();
+    let witness = executor
+        .install_binding(core, &device(), &binding(), adapters)
+        .unwrap();
+    core.activate_binding(witness, bound_state()).unwrap();
+    executor
 }
 
 impl Fixture {
@@ -202,7 +236,7 @@ impl Fixture {
     fn assert_fenced(&mut self) {
         assert_eq!(
             self.core.submit_command(command("new", 7, 100)).unwrap(),
-            AdmissionDecision::Rejected(AdmissionRejection::BindingFenced)
+            AdmissionDecision::Rejected(AdmissionRejection::BindingInstanceConflict)
         );
         assert!(self.core.command_status(&id("new")).is_none());
     }
@@ -560,8 +594,14 @@ fn exact_epoch_fence_stops_queued_and_sibling_active_work() {
     f.drive();
     f.drive();
     assert!(
-        !f.core
-            .fence_binding(&device(), &BindingInstanceId::new("old-epoch").unwrap())
+        f.core
+            .invalidate_binding(
+                &device(),
+                &BindingInstanceId::new("old-epoch").unwrap(),
+                BindingInvalidation::ExecutionFault
+            )
+            .unwrap()
+            == LifecycleChange::Stale
     );
     f.drive(); // A panic fences exact shared binding before C's next poll.
     f.terminal("a", TerminalOutcome::Unknown, EffectEvidence::Possible);
@@ -579,7 +619,12 @@ fn exact_epoch_fence_stops_queued_and_sibling_active_work() {
 fn externally_fenced_waiting_work_never_begins() {
     let mut f = fixture(1, [vec![], vec![]]);
     f.submit("a", 7, 100);
-    assert!(f.core.fence_binding(&device(), &binding()));
+    assert_eq!(
+        f.core
+            .invalidate_binding(&device(), &binding(), BindingInvalidation::ExecutionFault)
+            .unwrap(),
+        LifecycleChange::Changed
+    );
     f.drive();
     f.terminal("a", TerminalOutcome::Failed, EffectEvidence::None);
     assert_eq!(f.probes[0].metrics().begins, 0);
@@ -757,15 +802,16 @@ fn begin_panic_is_contained_and_releases_payload() {
             },
         )
     });
-    let mut executor = ExecutorSupervisor::new(consumer, adapters).unwrap();
+
     let mut core = CoreActor::new(
         AgentInstanceId::new("agent-a").unwrap(),
         vec![seed()],
         CoreLimits::with_registry_bounds(1, 2, 2, 1),
-        clock,
+        clock.clone(),
         producer,
     )
     .unwrap();
+    let mut executor = make_executor(&mut core, consumer, adapters);
     core.submit_command(command("a", 7, 10)).unwrap();
     executor.drive(&mut core).unwrap();
     let Some(CommandState::Terminal(terminal)) = core.command_status(&id("a")) else {
@@ -780,7 +826,7 @@ fn begin_panic_is_contained_and_releases_payload() {
     assert_eq!(polls.get(), 0); // begin has no effect handle and performs no I/O.
     assert_eq!(
         core.submit_command(command("b", 7, 10)).unwrap(),
-        AdmissionDecision::Rejected(AdmissionRejection::BindingFenced)
+        AdmissionDecision::Rejected(AdmissionRejection::BindingInstanceConflict)
     );
 }
 
@@ -806,7 +852,7 @@ fn deadline_or_clock_regression_during_poll_is_observed_before_result() {
                 },
             )
         });
-        let mut executor = ExecutorSupervisor::new(consumer, adapters).unwrap();
+
         let mut core = CoreActor::new(
             AgentInstanceId::new("agent-a").unwrap(),
             vec![seed()],
@@ -815,6 +861,7 @@ fn deadline_or_clock_regression_during_poll_is_observed_before_result() {
             producer,
         )
         .unwrap();
+        let mut executor = make_executor(&mut core, consumer, adapters);
         core.submit_command(command("a", 7, 10)).unwrap();
         executor.drive(&mut core).unwrap();
         if next_time == 99 {
@@ -864,15 +911,16 @@ fn begin_consuming_the_timeout_is_fenced_before_drive_returns() {
             },
         )
     });
-    let mut executor = ExecutorSupervisor::new(consumer, adapters).unwrap();
+
     let mut core = CoreActor::new(
         AgentInstanceId::new("agent-a").unwrap(),
         vec![seed()],
         CoreLimits::with_registry_bounds(1, 2, 2, 1),
-        clock,
+        clock.clone(),
         producer,
     )
     .unwrap();
+    let mut executor = make_executor(&mut core, consumer, adapters);
     core.submit_command(command("a", 7, 10)).unwrap();
     executor.drive(&mut core).unwrap();
     let Some(CommandState::Terminal(terminal)) = core.command_status(&id("a")) else {
@@ -886,7 +934,7 @@ fn begin_consuming_the_timeout_is_fenced_before_drive_returns() {
     assert_eq!(polls.get(), 0);
     assert_eq!(
         core.submit_command(command("b", 7, 10)).unwrap(),
-        AdmissionDecision::Rejected(AdmissionRejection::BindingFenced)
+        AdmissionDecision::Rejected(AdmissionRejection::BindingInstanceConflict)
     );
 }
 
@@ -933,7 +981,17 @@ fn timeout_cleanup_precedes_terminal_timestamp_and_stops_polls() {
     let polls = Rc::new(Cell::new(0));
     let (producer, consumer) =
         bounded_executor_queue([ResourceId::new(7), ResourceId::new(9)], 2, 1).unwrap();
-    let mut executor = ExecutorSupervisor::new(
+
+    let mut core = CoreActor::new(
+        AgentInstanceId::new("agent-a").unwrap(),
+        vec![seed()],
+        CoreLimits::with_registry_bounds(1, 2, 2, 1),
+        clock.clone(),
+        producer,
+    )
+    .unwrap();
+    let mut executor = make_executor(
+        &mut core,
         consumer,
         [7, 9].map(|r| {
             (
@@ -945,16 +1003,7 @@ fn timeout_cleanup_precedes_terminal_timestamp_and_stops_polls() {
                 },
             )
         }),
-    )
-    .unwrap();
-    let mut core = CoreActor::new(
-        AgentInstanceId::new("agent-a").unwrap(),
-        vec![seed()],
-        CoreLimits::with_registry_bounds(1, 2, 2, 1),
-        clock.clone(),
-        producer,
-    )
-    .unwrap();
+    );
     let request = command("a", 7, 10);
     let weak = Arc::downgrade(&request.payload.lifetime);
     core.submit_command(request).unwrap();
@@ -999,19 +1048,20 @@ fn unmarked_success_at_deadline_never_claims_known_non_effect() {
     let clock = Clock(Rc::new(Cell::new(100)));
     let (producer, consumer) =
         bounded_executor_queue([ResourceId::new(7), ResourceId::new(9)], 2, 1).unwrap();
-    let mut executor = ExecutorSupervisor::new(
-        consumer,
-        [7, 9].map(|r| (ResourceId::new(r), UnmarkedSuccessAtDeadline(clock.clone()))),
-    )
-    .unwrap();
+
     let mut core = CoreActor::new(
         AgentInstanceId::new("agent-a").unwrap(),
         vec![seed()],
         CoreLimits::with_registry_bounds(1, 2, 2, 1),
-        clock,
+        clock.clone(),
         producer,
     )
     .unwrap();
+    let mut executor = make_executor(
+        &mut core,
+        consumer,
+        [7, 9].map(|r| (ResourceId::new(r), UnmarkedSuccessAtDeadline(clock.clone()))),
+    );
     core.submit_command(command("a", 7, 10)).unwrap();
     executor.drive(&mut core).unwrap();
     executor.drive(&mut core).unwrap();
@@ -1024,7 +1074,7 @@ fn unmarked_success_at_deadline_never_claims_known_non_effect() {
     );
     assert_eq!(
         core.submit_command(command("b", 7, 10)).unwrap(),
-        AdmissionDecision::Rejected(AdmissionRejection::BindingFenced)
+        AdmissionDecision::Rejected(AdmissionRejection::BindingInstanceConflict)
     );
 }
 
@@ -1046,7 +1096,7 @@ impl Drop for PanickingAdapterDrop {
 fn destructor_panic_requires_process_termination_before_terminal_publication() {
     if let Some(mode) = std::env::var_os("M824_DESTRUCTOR_PROBE_CHILD") {
         if mode == "adapter" || mode == "unconsumed" {
-            let (_producer, consumer) =
+            let (producer, consumer) =
                 bounded_executor_queue::<Payload>([ResourceId::new(7)], 1, 1).unwrap();
             let seeds = if mode == "adapter" {
                 vec![(ResourceId::new(9), PanickingAdapterDrop(true))]
@@ -1057,7 +1107,17 @@ fn destructor_panic_requires_process_termination_before_terminal_publication() {
                     (ResourceId::new(7), PanickingAdapterDrop(true)),
                 ]
             };
-            let _ = ExecutorSupervisor::new(consumer, seeds);
+            let mut core = CoreActor::new(
+                AgentInstanceId::new("agent-a").unwrap(),
+                vec![seed()],
+                CoreLimits::with_registry_bounds(1, 2, 2, 1),
+                Clock(Rc::new(Cell::new(100))),
+                producer,
+            )
+            .unwrap();
+            core.begin_connecting(&device()).unwrap();
+            let mut executor = ExecutorSupervisor::new(consumer).unwrap();
+            let _ = executor.install_binding(&mut core, &device(), &binding(), seeds);
         } else {
             let clock = Clock(Rc::new(Cell::new(100)));
             let (producer, consumer) =
@@ -1076,7 +1136,7 @@ fn destructor_panic_requires_process_termination_before_terminal_publication() {
                     },
                 )
             });
-            let mut executor = ExecutorSupervisor::new(consumer, adapters).unwrap();
+
             let mut core = CoreActor::new(
                 AgentInstanceId::new("agent-a").unwrap(),
                 vec![seed()],
@@ -1085,6 +1145,7 @@ fn destructor_panic_requires_process_termination_before_terminal_publication() {
                 producer,
             )
             .unwrap();
+            let mut executor = make_executor(&mut core, consumer, adapters);
             core.submit_command(command("a", 7, 10)).unwrap();
             executor.drive(&mut core).unwrap();
             executor.drive(&mut core).unwrap();
@@ -1118,3 +1179,6 @@ fn destructor_panic_requires_process_termination_before_terminal_publication() {
         assert!(!stderr.contains("PRIVATE_SENTINEL"));
     }
 }
+
+#[path = "execution/lifecycle_events.rs"]
+mod lifecycle_events;

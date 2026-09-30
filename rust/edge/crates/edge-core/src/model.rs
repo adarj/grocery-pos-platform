@@ -33,9 +33,10 @@ pub trait AgentClock {
 /// Prevalidated configured logical slot plus internal executable-resource map.
 /// Multiple capabilities of one device may share a resource. Resource IDs may
 /// not be shared by different logical devices in this v1 admission registry.
-/// This admission seed models command capabilities: every published capability
-/// of a bound slot must have a resource. Event-only capabilities are not modeled
-/// as unmapped command capabilities. Unbound slots must have no resource mappings.
+/// Seeds are unbound, revision-zero public states. The resource map is the
+/// configured command allowlist and survives disconnect/rebind. Binding authority
+/// is established separately with an executor installation witness. Event-only
+/// capabilities are not modeled as unmapped command capabilities.
 pub struct CoreDeviceSeed {
     pub snapshot: DeviceSnapshot,
     pub capability_resources: Vec<(Capability, ResourceId)>,
@@ -56,6 +57,9 @@ pub struct CoreLimits {
     pub max_submission_horizon_ms: u64,
     pub max_command_timeout_ms: u64,
     pub terminal_recovery_minimum_ms: u64,
+    pub max_binding_epochs_per_agent: usize,
+    pub max_event_queue_records: usize,
+    pub max_event_record_bytes: usize,
 }
 
 impl CoreLimits {
@@ -74,6 +78,10 @@ impl CoreLimits {
             max_submission_horizon_ms: 60_000,
             max_command_timeout_ms: 60_000,
             terminal_recovery_minimum_ms: 120_000,
+            // Implementation defaults requiring M8.2.7 qualification.
+            max_binding_epochs_per_agent: 4096,
+            max_event_queue_records: 256,
+            max_event_record_bytes: edge_protocol::DEFAULT_EVENT_RECORD_MAX_BYTES,
         }
     }
 }
@@ -88,7 +96,6 @@ pub enum AdmissionRejection {
     TimeoutTooLarge,
     UnknownDevice,
     BindingInstanceConflict,
-    BindingFenced,
     CapabilityUnavailable,
     CommandCacheFull,
     ExecutorQueueFull,
@@ -113,10 +120,9 @@ pub enum CoreFatalError {
     TooManyConditions,
     DuplicateDevice,
     RegistryAgentMismatch,
-    UnpublishedResourceMapping,
     MissingResourceMapping,
     DuplicateResourceMapping,
-    UnboundResourceMapping,
+    InvalidInitialDeviceState,
     ResourceSharedAcrossDevices,
     InvalidCompiledCommand,
     ClockRegression,
@@ -124,4 +130,9 @@ pub enum CoreFatalError {
     RecordInvariant,
     QueueInvariant,
     ExecutionInvariant,
+    StateRevisionOverflow,
+    EventSequenceOverflow,
+    SubscriptionGenerationOverflow,
+    EventNotRepresentable,
+    BindingInstallationInvariant,
 }

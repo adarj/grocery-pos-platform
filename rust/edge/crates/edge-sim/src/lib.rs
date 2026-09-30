@@ -4,6 +4,9 @@
 //! activation path. A future daemon must enforce explicit simulation launch
 //! permission. Scripts follow the real adapter contract; no Core/cache/queue
 //! authority lives here. Stall means bounded Pending polls, never thread blocking.
+//! Binding and event qualification composes fresh scripted adapters through
+//! Core's real installation/lifecycle APIs; there is no simulator binding registry
+//! or event publication shortcut.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;

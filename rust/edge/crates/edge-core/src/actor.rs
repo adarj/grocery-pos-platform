@@ -1,5 +1,6 @@
-use std::collections::{BTreeMap, btree_map::Entry};
+use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::fmt;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use edge_protocol::{
@@ -14,8 +15,18 @@ use crate::model::{
 };
 use crate::queue::{ExecutorQueuePort, QueueCommitError, QueueReservationError, QueuedCommand};
 
+#[path = "binding.rs"]
+mod binding;
+#[path = "events.rs"]
+mod events;
+
+pub use binding::{
+    BindingInstallationWitness, BindingInvalidation, BoundAvailability, BoundDeviceState,
+    LifecycleChange, LifecycleError, LifecycleRejection,
+};
+pub use events::{EventPoll, EventSubscription, SubscriptionError, SubscriptionToken};
+
 struct CoreDevice {
-    execution_fenced: bool,
     snapshot: DeviceSnapshot,
     resources: BTreeMap<Capability, ResourceId>,
 }
@@ -101,6 +112,10 @@ where
     records: BTreeMap<CommandId, CommandRecord<P>>,
     next_admission_sequence: u64,
     queue: Q,
+    authority: Rc<()>,
+    binding_history: BTreeSet<BindingInstanceId>,
+    events: events::EventState,
+    fatal: Option<CoreFatalError>,
 }
 
 impl<P, C, Q> fmt::Debug for CoreActor<P, C, Q>
@@ -137,6 +152,9 @@ where
             || limits.max_conditions_per_device == 0
             || limits.max_command_records == 0
             || limits.max_command_timeout_ms == 0
+            || limits.max_binding_epochs_per_agent == 0
+            || limits.max_event_queue_records == 0
+            || limits.max_event_record_bytes == 0
         {
             return Err(CoreFatalError::InvalidLimits);
         }
@@ -159,14 +177,11 @@ where
             if snapshot.conditions.len() > limits.max_conditions_per_device {
                 return Err(CoreFatalError::TooManyConditions);
             }
-            if snapshot.binding_instance_id.is_none() && !seed.capability_resources.is_empty() {
-                return Err(CoreFatalError::UnboundResourceMapping);
+            if seed.capability_resources.len() > limits.max_capabilities_per_device {
+                return Err(CoreFatalError::TooManyCapabilities);
             }
             let mut resources = BTreeMap::new();
             for (capability, resource) in seed.capability_resources {
-                if !snapshot.capabilities.contains(&capability) {
-                    return Err(CoreFatalError::UnpublishedResourceMapping);
-                }
                 if resources.insert(capability, resource).is_some() {
                     return Err(CoreFatalError::DuplicateResourceMapping);
                 }
@@ -183,15 +198,23 @@ where
                     return Err(CoreFatalError::TooManyResources);
                 }
             }
+            if resources.len() > limits.max_capabilities_per_device {
+                return Err(CoreFatalError::TooManyCapabilities);
+            }
             if snapshot.binding_instance_id.is_some()
-                && resources.len() != snapshot.capabilities.len()
+                || !snapshot.capabilities.is_empty()
+                || snapshot.state_revision.get() != 0
+                || matches!(
+                    snapshot.availability,
+                    edge_protocol::DeviceAvailability::Ready
+                        | edge_protocol::DeviceAvailability::Degraded
+                )
             {
-                return Err(CoreFatalError::MissingResourceMapping);
+                return Err(CoreFatalError::InvalidInitialDeviceState);
             }
             devices.insert(
                 snapshot.device_id.clone(),
                 CoreDevice {
-                    execution_fenced: false,
                     snapshot,
                     resources,
                 },
@@ -206,6 +229,10 @@ where
             records: BTreeMap::new(),
             next_admission_sequence: 0,
             queue,
+            authority: Rc::new(()),
+            binding_history: BTreeSet::new(),
+            events: events::EventState::default(),
+            fatal: None,
         })
     }
 
@@ -228,6 +255,15 @@ where
     /// Preserve the normative ordering. A retained command is resolved before
     /// any freshness, device, binding, capability, cache, or queue revalidation.
     pub fn submit_command(
+        &mut self,
+        submission: CommandSubmission<P>,
+    ) -> Result<AdmissionDecision, CoreFatalError> {
+        self.ensure_live()?;
+        let result = self.submit_inner(submission);
+        self.latch(result)
+    }
+
+    fn submit_inner(
         &mut self,
         submission: CommandSubmission<P>,
     ) -> Result<AdmissionDecision, CoreFatalError> {
@@ -291,11 +327,6 @@ where
                 AdmissionRejection::BindingInstanceConflict,
             ));
         }
-        if device.execution_fenced {
-            return Ok(AdmissionDecision::Rejected(
-                AdmissionRejection::BindingFenced,
-            ));
-        }
         let capability = Capability::new(submission.payload.required_capability())
             .map_err(|_| CoreFatalError::InvalidCompiledCommand)?;
         if !device.snapshot.capabilities.contains(&capability) {
@@ -340,6 +371,7 @@ where
             kind: submission.kind,
             accepted_agent_uptime_ms: now,
         };
+        let event = self.prepare_command_event(CommandState::Accepted(state.clone()))?;
         let payload = Arc::new(submission.payload);
         let queued = QueuedCommand::new(
             resource,
@@ -361,6 +393,7 @@ where
             Entry::Occupied(_) => return Err(CoreFatalError::RecordInvariant),
         }
         self.next_admission_sequence = sequence;
+        self.publish_state_event(event);
         let recorded = match self.records.get(&command_id) {
             Some(CommandRecord::Active { state, .. }) => state,
             _ => return Err(CoreFatalError::RecordInvariant),
@@ -381,9 +414,10 @@ where
     }
 
     pub(crate) fn observe_uptime(&mut self) -> Result<AgentUptimeMs, CoreFatalError> {
+        self.ensure_live()?;
         let now = self.clock.now();
         if self.last_observed_uptime.is_some_and(|last| now < last) {
-            return Err(CoreFatalError::ClockRegression);
+            return self.latch(Err(CoreFatalError::ClockRegression));
         }
         self.last_observed_uptime = Some(now);
         Ok(now)
@@ -436,33 +470,39 @@ where
         )
     }
 
-    /// Fence only this exact current epoch. No rebind or public snapshot mutation
-    /// occurs here. A delayed old-epoch report cannot fence a replacement.
-    pub fn fence_binding(&mut self, device_id: &DeviceId, binding: &BindingInstanceId) -> bool {
-        let Some(device) = self.devices.get_mut(device_id) else {
-            return false;
-        };
-        if device.snapshot.binding_instance_id.as_ref() != Some(binding) {
-            return false;
-        }
-        device.execution_fenced = true;
-        true
-    }
-
-    pub(crate) fn resource_executable(&self, resource: ResourceId) -> bool {
-        self.devices.values().any(|device| {
-            !device.execution_fenced
-                && device.snapshot.binding_instance_id.is_some()
-                && device.resources.values().any(|id| *id == resource)
-        })
-    }
-
     pub(crate) fn binding_executable(&self, command: &QueuedCommand<P>) -> bool {
-        self.devices.get(command.device_id()).is_some_and(|device| {
-            !device.execution_fenced
-                && device.snapshot.binding_instance_id.as_ref()
-                    == Some(command.binding_instance_id())
-        })
+        self.fatal.is_none()
+            && self.devices.get(command.device_id()).is_some_and(|device| {
+                device.snapshot.binding_instance_id.as_ref() == Some(command.binding_instance_id())
+                    && device
+                        .resources
+                        .values()
+                        .any(|resource| *resource == command.resource())
+            })
+    }
+
+    pub(crate) fn ensure_live(&self) -> Result<(), CoreFatalError> {
+        self.fatal.map_or(Ok(()), Err)
+    }
+
+    pub(crate) fn stop(&mut self, error: CoreFatalError) -> CoreFatalError {
+        self.fatal = Some(error);
+        self.events.close();
+        error
+    }
+
+    pub(crate) fn matches_authority(&self, owner: &Rc<()>) -> bool {
+        Rc::ptr_eq(owner, &self.authority)
+    }
+
+    pub(crate) fn latch<T>(
+        &mut self,
+        result: Result<T, CoreFatalError>,
+    ) -> Result<T, CoreFatalError> {
+        if let Err(error) = result {
+            self.stop(error);
+        }
+        result
     }
 
     pub(crate) fn execution_witness(
@@ -495,10 +535,18 @@ where
         &mut self,
         command: &QueuedCommand<P>,
     ) -> Result<(), CoreFatalError> {
-        self.execution_witness(command, false)?;
+        self.ensure_live()?;
+        let result = self.start_execution_inner(command);
+        self.latch(result)
+    }
+
+    fn start_execution_inner(&mut self, command: &QueuedCommand<P>) -> Result<(), CoreFatalError> {
+        let state = self.execution_witness(command, false)?.clone();
+        let event = self.prepare_command_event(CommandState::Executing(state))?;
         match self.records.get_mut(command.command_id()) {
             Some(CommandRecord::Active { executing, .. }) => {
                 *executing = true;
+                self.publish_state_event(event);
                 Ok(())
             }
             _ => Err(CoreFatalError::ExecutionInvariant),
@@ -506,6 +554,18 @@ where
     }
 
     pub(crate) fn finish_record(
+        &mut self,
+        command_id: &CommandId,
+        terminal_at: AgentUptimeMs,
+        completion: crate::effect::Completion,
+        code: Option<&'static str>,
+    ) -> Result<CommandState, CoreFatalError> {
+        self.ensure_live()?;
+        let result = self.finish_record_inner(command_id, terminal_at, completion, code);
+        self.latch(result)
+    }
+
+    fn finish_record_inner(
         &mut self,
         command_id: &CommandId,
         terminal_at: AgentUptimeMs,
@@ -523,7 +583,7 @@ where
             .map_err(|_| CoreFatalError::InvalidCompiledCommand)?;
         let record = self
             .records
-            .get_mut(command_id)
+            .get(command_id)
             .ok_or(CoreFatalError::RecordInvariant)?;
         let (state, identity, admission_sequence) = match record {
             CommandRecord::Active {
@@ -565,12 +625,21 @@ where
             error,
             terminal_agent_uptime_ms: terminal_at,
         };
-        *record = CommandRecord::Terminal {
+        let compact = CommandRecord::Terminal {
             state: terminal.clone(),
             identity: identity.clone(),
             admission_sequence: *admission_sequence,
         };
+        let event = self.prepare_command_event(CommandState::Terminal(terminal.clone()))?;
+        self.records.insert(command_id.clone(), compact);
+        self.publish_state_event(event);
         Ok(CommandState::Terminal(terminal))
+    }
+}
+
+impl<P: CoreCommand, C: AgentClock> CoreActor<P, C, crate::QueueProducer<P>> {
+    pub(crate) fn owns_consumer(&self, consumer: &crate::QueueConsumer<P>) -> bool {
+        self.queue.owns_consumer(consumer)
     }
 }
 

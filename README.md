@@ -123,9 +123,19 @@ command admission, retained-attempt deduplication, bounded terminal retention,
 and the record-before-queue handoff. It now also provides bounded FIFO execution,
 acceptance-relative deadlines, monotonic effect tracking, exact binding fences,
 and conservative terminalization after adapter failure, timeout, or panic.
+Core now owns one authoritative binding lifecycle: invalidation clears the
+public binding and capabilities, and fresh attachment requires a complete
+executor installation witness. Configured resources survive unbinding;
+binding IDs cannot be reused within the bounded agent-epoch history. Device
+revisions and the global event sequence advance through checked Core transitions.
+One bounded subscriber receives an atomic full snapshot/cursor followed by typed
+live events; overflow closes continuity, and reconnect obtains a fresh snapshot
+without replay. Explicit heartbeats do not consume sequence numbers. Event
+records, including the complete initial snapshot, use the bounded JSON encoder.
 `edge-adapter-api` defines bounded begin/poll/Drop contracts; `edge-sim` supplies
 deterministic, bounded scripts through the same Core → queue → executor → adapter
-path. These are M8.2.1–M8.2.4 foundations under
+path, including disconnect/rebind and subscription continuity scenarios.
+These are M8.2.1–M8.2.5 foundations under
 [ADR-0033](docs/adr/0033-use-a-semantic-local-edge-protocol-for-pos-hardware.md).
 
 In-process timeout/panic containment depends on adapters returning from bounded
@@ -140,8 +150,9 @@ An application hook panic or double panic during unwinding is not containable.
 Simulation is repository qualification infrastructure only, with no production
 activation path yet.
 
-Full binding lifecycle and events, the UDS HTTP daemon, Racket client, real
-adapters, Linux deployment, and physical qualification remain unimplemented.
+OS discovery/selectors, complete `edge.toml` parsing, the UDS HTTP daemon and
+NDJSON transport, Racket client, real adapters, device-specific observations,
+Linux deployment, and physical qualification remain unimplemented.
 These foundation tests do not establish whole-M8 Tier A qualification or a
 functioning production edge daemon.
 
@@ -149,7 +160,7 @@ functioning production edge daemon.
 
 Racket, Flutter unit/widget, and isolated real-process integration tests protect
 the checkout/security/recovery boundaries. Rust tests protect protocol types,
-codec, Core admission, and deterministic execution/simulator semantics. CI checks
+codec, Core admission, execution, binding epochs, and event continuity. CI checks
 source, repository, and artifact contracts.
 [M6 reliability](docs/acceptance/m6/README.md) and
 [M7 security](docs/acceptance/m7/README.md) have separate evidence records.
