@@ -1,22 +1,77 @@
 #![cfg(feature = "qualification")]
 use std::{
-    io::{Read, Write},
+    io::{ErrorKind, Read, Write},
     os::unix::net::UnixStream,
     path::PathBuf,
     process::{Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
+    thread::JoinHandle,
     time::{Duration, Instant},
 };
 static NEXT: AtomicU64 = AtomicU64::new(0);
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
+const DIAGNOSTIC_BYTES: usize = 2048;
+
+fn capture(mut reader: impl Read + Send + 'static) -> JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut retained = Vec::new();
+        let mut buffer = [0; 512];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let keep = n.min(DIAGNOSTIC_BYTES - retained.len());
+                    retained.extend_from_slice(&buffer[..keep]);
+                    // Continue draining once full, so child output cannot deadlock.
+                }
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+        retained
+    })
+}
+
+fn safe_diagnostics(bytes: &[u8]) -> String {
+    // Never print raw child output, paths, credentials or panic payloads.
+    let allowed = [
+        "fixture startup exit requested",
+        "fixture control epoch stopped",
+    ];
+    let lines = bytes
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| {
+            allowed
+                .iter()
+                .find(|value| value.as_bytes() == line)
+                .copied()
+        })
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        format!(
+            "{} diagnostic bytes retained; contents withheld",
+            bytes.len()
+        )
+    } else {
+        lines.join("; ")
+    }
+}
 
 struct Fixture {
     child: std::process::Child,
     dir: PathBuf,
     socket: PathBuf,
+    diagnostics: Vec<JoinHandle<Vec<u8>>>,
 }
 
 impl Fixture {
     fn new(mode: &str) -> Self {
+        Self::spawn(mode)
+            .ready(STARTUP_TIMEOUT, |_| {})
+            .unwrap_or_else(|reason| panic!("fixture startup readiness probe: {reason}"))
+    }
+
+    fn spawn(mode: &str) -> Self {
         let dir = std::env::temp_dir().join(format!(
             "edge-uds-{}-{}",
             std::process::id(),
@@ -32,21 +87,133 @@ impl Fixture {
                 mode,
             ])
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
-            .unwrap();
-        let f = Self { child, dir, socket };
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while !f.socket.exists() {
-            assert!(Instant::now() < deadline);
-            std::thread::sleep(Duration::from_millis(5));
-        }
+            .unwrap_or_else(|error| {
+                let _ = std::fs::remove_dir_all(&dir);
+                panic!("fixture spawn: {:?}", error.kind())
+            });
+        // Own the child before capture/readiness can fail, so Drop covers startup.
+        let mut f = Self {
+            child,
+            dir,
+            socket,
+            diagnostics: Vec::new(),
+        };
+        f.diagnostics.push(capture(f.child.stdout.take().unwrap()));
+        f.diagnostics.push(capture(f.child.stderr.take().unwrap()));
         f
     }
 
+    fn ready(mut self, timeout: Duration, on_retry: impl FnMut(ErrorKind)) -> Result<Self, String> {
+        if let Err(reason) = self.wait_for_readiness(timeout, on_retry) {
+            self.stop(true);
+            let diagnostics = self.finish_diagnostics();
+            return Err(format!("{reason}; {diagnostics}"));
+        }
+        Ok(self)
+    }
+
+    fn wait_for_readiness(
+        &mut self,
+        timeout: Duration,
+        mut on_retry: impl FnMut(ErrorKind),
+    ) -> Result<(), String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            self.check_child()?;
+            let remaining = Self::remaining(deadline)?;
+            match UnixStream::connect(&self.socket) {
+                Ok(mut stream) => {
+                    stream
+                        .set_write_timeout(Some(remaining))
+                        .map_err(|error| Self::io_failure("probe write timeout", error))?;
+                    // An unknown route returns an authored 404 before Core work.
+                    // Do not use an event subscription or mutate fixture counters.
+                    stream
+                        .write_all(&get("/fixture-startup-probe"))
+                        .map_err(|error| Self::io_failure("probe write", error))?;
+                    let mut response = Vec::new();
+                    let mut buffer = [0; 512];
+                    loop {
+                        self.check_child()?;
+                        stream
+                            .set_read_timeout(Some(Self::remaining(deadline)?))
+                            .map_err(|error| Self::io_failure("probe read timeout", error))?;
+                        let n = stream
+                            .read(&mut buffer)
+                            .map_err(|error| Self::io_failure("probe read", error))?;
+                        if n == 0 {
+                            break;
+                        }
+                        if response.len() + n > 1024 {
+                            return Err("oversized startup probe response".into());
+                        }
+                        response.extend_from_slice(&buffer[..n]);
+                    }
+                    if !response.starts_with(b"HTTP/1.1 404 ")
+                        || !response
+                            .windows(b"\"edge.unknown_route\"".len())
+                            .any(|part| part == b"\"edge.unknown_route\"")
+                    {
+                        return Err("unexpected startup probe response".into());
+                    }
+                    // EOF plus drop completes the one-request connection before
+                    // returning; no live startup socket/subscription is retained.
+                    drop(stream);
+                    self.check_child()?;
+                    Self::remaining(deadline)?;
+                    return Ok(());
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        ErrorKind::NotFound | ErrorKind::ConnectionRefused
+                    ) =>
+                {
+                    on_retry(error.kind());
+                    std::thread::sleep(remaining.min(Duration::from_millis(5)));
+                }
+                Err(error) => return Err(Self::io_failure("probe connect", error)),
+            }
+        }
+    }
+
+    fn check_child(&mut self) -> Result<(), String> {
+        match self
+            .child
+            .try_wait()
+            .map_err(|error| Self::io_failure("child observation", error))?
+        {
+            Some(status) => Err(format!("child exited before readiness: {status}")),
+            None => Ok(()),
+        }
+    }
+
+    fn remaining(deadline: Instant) -> Result<Duration, String> {
+        deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| "startup deadline exceeded".into())
+    }
+
+    fn io_failure(stage: &str, error: std::io::Error) -> String {
+        format!("{stage}: {:?}, OS {:?}", error.kind(), error.raw_os_error())
+    }
+
     fn connect(&self) -> UnixStream {
-        let stream = UnixStream::connect(&self.socket).unwrap();
+        self.connect_at("ordinary request connection")
+    }
+
+    fn connect_at(&self, stage: &str) -> UnixStream {
+        let stream = UnixStream::connect(&self.socket).unwrap_or_else(|error| {
+            panic!(
+                "fixture {stage}: {:?}, OS {:?}",
+                error.kind(),
+                error.raw_os_error()
+            )
+        });
         stream
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();
@@ -54,7 +221,11 @@ impl Fixture {
     }
 
     fn request(&self, request: &[u8]) -> Vec<u8> {
-        let mut stream = self.connect();
+        self.request_at(request, "ordinary request connection")
+    }
+
+    fn request_at(&self, request: &[u8], stage: &str) -> Vec<u8> {
+        let mut stream = self.connect_at(stage);
         stream.write_all(request).unwrap();
         let mut response = Vec::new();
         if let Err(error) = stream.read_to_end(&mut response) {
@@ -65,22 +236,51 @@ impl Fixture {
         }
         response
     }
+
+    fn stop(&mut self, immediate: bool) -> bool {
+        if let Some(mut stdin) = self.child.stdin.take()
+            && !immediate
+        {
+            let _ = stdin.write_all(b"\n");
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return false,
+                Ok(None) if !immediate && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                _ => {
+                    let _ = self.child.kill();
+                    let _ = self.child.wait();
+                    return !immediate;
+                }
+            }
+        }
+    }
+
+    fn finish_diagnostics(&mut self) -> String {
+        self.diagnostics
+            .drain(..)
+            .map(|reader| match reader.join() {
+                Ok(bytes) => safe_diagnostics(&bytes),
+                Err(_) => "diagnostic capture failed".into(),
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        if let Some(stdin) = &mut self.child.stdin {
-            let _ = stdin.write_all(b"\n");
-        }
-        let start = Instant::now();
-        while self.child.try_wait().unwrap().is_none() {
-            if start.elapsed() > Duration::from_secs(3) {
-                let _ = self.child.kill();
-                panic!("fixture shutdown exceeded bound");
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        let timed_out = self.stop(false);
+        let diagnostics = self.finish_diagnostics();
         let _ = std::fs::remove_dir_all(&self.dir);
+        if std::thread::panicking() {
+            eprintln!("fixture failure diagnostics: {diagnostics}");
+        } else if timed_out {
+            panic!("fixture shutdown exceeded bound; {diagnostics}");
+        }
     }
 }
 
@@ -106,6 +306,174 @@ fn status(response: &[u8]) -> u16 {
         .unwrap()
         .parse()
         .unwrap()
+}
+
+fn wait_for_path(path: &std::path::Path) {
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    while !path.exists() {
+        assert!(Instant::now() < deadline, "fixture-owned path deadline");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn startup_readiness_waits_for_http_not_socket_path() {
+    let mut f = Fixture::spawn("startup-paused");
+    wait_for_path(&f.socket);
+    assert_eq!(
+        UnixStream::connect(&f.socket).err().unwrap().kind(),
+        ErrorKind::ConnectionRefused
+    );
+    let mut release = f.child.stdin.take().unwrap();
+    let (retry, retried) = std::sync::mpsc::sync_channel(1);
+    let (finished, completion) = std::sync::mpsc::sync_channel(1);
+    std::thread::scope(|scope| {
+        let startup = scope.spawn(move || {
+            let f = f
+                .ready(STARTUP_TIMEOUT, |kind| {
+                    let _ = retry.try_send(kind);
+                })
+                .unwrap();
+            // The old path-existence rule gets here before listen and fails at
+            // exactly the original event test's first client connection stage.
+            let _stream = f.connect_at("initial event-stream connection");
+            finished.send(()).unwrap();
+            f
+        });
+        let observed_retry = retried.recv_timeout(Duration::from_secs(1));
+        if observed_retry.is_err() {
+            // Join first to preserve a labeled pre-fix connection failure.
+            let _ = startup.join().unwrap();
+            panic!("startup returned without observing the bound/not-listening endpoint");
+        }
+        assert_eq!(observed_retry.unwrap(), ErrorKind::ConnectionRefused);
+        assert!(matches!(
+            completion.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        release.write_all(b"\n\n").unwrap();
+        let mut f = startup.join().unwrap();
+        f.child.stdin = Some(release);
+        assert_eq!(status(&f.request(&get("/v1/health"))), 200);
+    });
+}
+
+#[test]
+fn startup_child_exit_is_reported_and_reaped_without_deadline_wait() {
+    let f = Fixture::spawn("startup-exit");
+    let dir = f.dir.clone();
+    let pid = f.child.id();
+    let reason = f
+        .ready(STARTUP_TIMEOUT, |_| {})
+        .err()
+        .expect("child must exit");
+    assert!(reason.contains("child exited before readiness"), "{reason}");
+    assert!(reason.contains("23"), "{reason}");
+    assert!(
+        reason.contains("fixture startup exit requested"),
+        "{reason}"
+    );
+    assert!(!dir.exists(), "startup exit left fixture state");
+    assert!(
+        !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+        "startup child not reaped"
+    );
+}
+
+#[test]
+fn startup_deadline_kills_reaps_and_removes_unready_fixture() {
+    let f = Fixture::spawn("startup-paused");
+    wait_for_path(&f.socket);
+    let dir = f.dir.clone();
+    let pid = f.child.id();
+    let reason = f
+        .ready(Duration::from_millis(100), |_| {})
+        .err()
+        .expect("never released");
+    assert!(reason.contains("startup deadline exceeded"), "{reason}");
+    assert!(!dir.exists(), "startup timeout left fixture state");
+    assert!(
+        !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+        "startup child not reaped"
+    );
+}
+
+#[test]
+fn startup_listening_without_http_is_not_ready_and_is_cleaned_up() {
+    let mut f = Fixture::spawn("startup-paused");
+    wait_for_path(&f.socket);
+    f.child.stdin.as_mut().unwrap().write_all(b"\n").unwrap();
+    wait_for_path(&f.socket.with_extension("listening"));
+    // Raw connect succeeds, but the second gate has not started Hyper.
+    drop(UnixStream::connect(&f.socket).unwrap());
+    let dir = f.dir.clone();
+    let pid = f.child.id();
+    let reason = f
+        .ready(Duration::from_millis(100), |_| {})
+        .err()
+        .expect("listening alone is insufficient");
+    assert!(reason.contains("probe read"), "{reason}");
+    assert!(!dir.exists(), "HTTP readiness failure left fixture state");
+    assert!(
+        !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+        "startup child not reaped"
+    );
+}
+
+#[test]
+fn startup_probe_leaves_command_and_control_counters_untouched() {
+    let f = Fixture::new("small");
+    wait_for_path(&f.dir.join("metrics"));
+    let metrics = std::fs::read_to_string(f.dir.join("metrics")).unwrap();
+    assert_eq!(metrics.lines().take(3).collect::<Vec<_>>(), ["0", "0", "0"]);
+    assert!(metrics.lines().any(|line| line == "requests_total=0"));
+    assert!(metrics.lines().any(|line| line == "retained=0"));
+    assert!(metrics.lines().any(|line| line == "command_high_water=0"));
+    // Both small-mode connections must be usable after startup; the probe may
+    // not leave a live connection consuming either slot or an event subscriber.
+    let mut first = f.connect_at("initial event-stream connection");
+    first.write_all(&get("/v1/events")).unwrap();
+    let mut response = [0; 1024];
+    let n = first.read(&mut response).unwrap();
+    assert_eq!(status(&response[..n]), 200);
+    assert_eq!(
+        status(&f.request_at(&get("/v1/events"), "second-subscriber request")),
+        503
+    );
+}
+
+#[test]
+fn post_readiness_connection_refusal_remains_a_hard_failure() {
+    let mut f = Fixture::new("");
+    f.child.kill().unwrap();
+    f.child.wait().unwrap();
+    assert!(
+        f.socket.exists(),
+        "dead child leaves its owned socket pathname"
+    );
+    assert_eq!(
+        UnixStream::connect(&f.socket).err().unwrap().kind(),
+        ErrorKind::ConnectionRefused
+    );
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        f.connect_at("post-disconnect replacement event-stream connection")
+    }))
+    .expect_err("strict connection must fail");
+    let message = failure.downcast_ref::<String>().unwrap();
+    assert!(message.contains("post-disconnect replacement event-stream connection"));
+    assert!(message.contains("ConnectionRefused"));
+}
+
+#[test]
+fn fixture_diagnostics_are_bounded_drained_and_redacted() {
+    let hostile = b"synthetic-private-marker".repeat(1024);
+    let retained = capture(std::io::Cursor::new(hostile)).join().unwrap();
+    assert_eq!(retained.len(), DIAGNOSTIC_BYTES);
+    assert!(!safe_diagnostics(&retained).contains("synthetic-private-marker"));
+    assert_eq!(
+        safe_diagnostics(b"fixture startup exit requested\n"),
+        "fixture startup exit requested"
+    );
 }
 
 #[test]
@@ -272,7 +640,7 @@ fn lost_response_keeps_one_record_and_one_physical_start() {
 #[test]
 fn event_stream_first_snapshot_second_subscriber_and_disconnect_cleanup() {
     let f = Fixture::new("");
-    let mut stream = f.connect();
+    let mut stream = f.connect_at("initial event-stream connection");
     stream.write_all(&get("/v1/events")).unwrap();
     let mut buffer = [0; 2048];
     let n = stream.read(&mut buffer).unwrap();
@@ -282,11 +650,14 @@ fn event_stream_first_snapshot_second_subscriber_and_disconnect_cleanup() {
         assert!(n > 0);
         bytes.extend_from_slice(&buffer[..n]);
     }
-    assert_eq!(status(&f.request(&get("/v1/events"))), 503);
+    assert_eq!(
+        status(&f.request_at(&get("/v1/events"), "second-subscriber request")),
+        503
+    );
     drop(stream);
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        let mut new = f.connect();
+        let mut new = f.connect_at("post-disconnect replacement event-stream connection");
         new.write_all(&get("/v1/events")).unwrap();
         let n = new.read(&mut buffer).unwrap();
         if status(&buffer[..n]) == 200 {

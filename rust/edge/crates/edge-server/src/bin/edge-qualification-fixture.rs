@@ -262,6 +262,39 @@ fn bound() -> BoundDeviceState {
     }
 }
 
+fn listener(socket: &std::path::Path, mode: &str) -> std::os::unix::net::UnixListener {
+    if matches!(mode, "startup-paused" | "startup-exit") {
+        // Hold open the bind-before-listen window in std UnixListener::bind.
+        // Only this explicitly selected repository fixture mode changes startup.
+        let fd = rustix::net::socket_with(
+            rustix::net::AddressFamily::UNIX,
+            rustix::net::SocketType::STREAM,
+            rustix::net::SocketFlags::CLOEXEC,
+            None,
+        )
+        .expect("fixture socket");
+        let address = rustix::net::SocketAddrUnix::new(socket).expect("fixture address");
+        rustix::net::bind(&fd, &address).expect("fixture bind");
+        if mode == "startup-exit" {
+            eprintln!("fixture startup exit requested");
+            std::process::exit(23);
+        }
+        let mut release = [0];
+        if std::io::stdin().read_exact(&mut release).is_err() {
+            std::process::exit(24);
+        }
+        rustix::net::listen(&fd, -1).expect("fixture listen");
+        // A second gate distinguishes a listening socket from responsive HTTP.
+        std::fs::write(socket.with_extension("listening"), b"")
+            .expect("fixture startup observation");
+        if std::io::stdin().read_exact(&mut release).is_err() {
+            std::process::exit(24);
+        }
+        return fd.into();
+    }
+    std::os::unix::net::UnixListener::bind(socket).expect("fixture-owned temporary UDS")
+}
+
 fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.len() < 3 {
@@ -274,8 +307,7 @@ fn main() {
     let metrics = PathBuf::from(&args[1]);
     let agent = AgentInstanceId::new(&args[2]).expect("fixture agent");
     let mode = args.get(3).cloned().unwrap_or_default();
-    let listener =
-        std::os::unix::net::UnixListener::bind(&socket).expect("fixture-owned temporary UDS");
+    let listener = listener(&socket, &mode);
     let uid = rustix::process::getuid().as_raw();
     let mut limits = ServerLimits {
         heartbeat_interval: Duration::from_millis(100),
