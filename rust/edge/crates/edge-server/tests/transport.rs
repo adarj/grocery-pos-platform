@@ -282,3 +282,103 @@ fn event_stream_first_snapshot_second_subscriber_and_disconnect_cleanup() {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+#[test]
+fn qualification_hostile_chunked_request_and_ambiguous_framing_are_bounded() {
+    let f = Fixture::new("");
+    let prefix = b"POST /v1/commands HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n";
+    let mut oversized = prefix.to_vec();
+    oversized.extend_from_slice(b"40001\r\n"); // default 256 KiB + 1
+    oversized.extend(std::iter::repeat_n(b' ', 256 * 1024 + 1));
+    oversized.extend_from_slice(b"\r\n0\r\n\r\n");
+    assert_eq!(status(&f.request(&oversized)), 413);
+    let cl = format!(
+        "POST /v1/commands HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        256 * 1024 + 1,
+        " ".repeat(256 * 1024 + 1)
+    );
+    assert_eq!(status(&f.request(cl.as_bytes())), 413);
+    for body in [b"invalid\r\n".as_slice(), b"2\r\n{\r\n0\r\n\r\n".as_slice()] {
+        let mut req = prefix.to_vec();
+        req.extend_from_slice(body);
+        assert_eq!(status(&f.request(&req)), 400);
+    }
+    // Truncated chunk: EOF on request half, still allow response half.
+    let mut socket = f.connect();
+    socket.write_all(prefix).unwrap();
+    socket.write_all(b"20\r\n{}").unwrap();
+    socket.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut response = Vec::new();
+    socket.read_to_end(&mut response).unwrap();
+    assert_eq!(status(&response), 400);
+    // Hyper's HTTP/1 TE precedence is accepted here; it must serve exactly one
+    // request, close, and never reinterpret suffix bytes as another command.
+    let body = command("ambiguous", "");
+    let te_cl = format!(
+        "POST /v1/commands HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\nGET /v1/status HTTP/1.1\r\nHost: local\r\n\r\n",
+        body.len(),
+        body
+    );
+    let result = f.request(te_cl.as_bytes());
+    assert_eq!(status(&result), 202);
+    assert_eq!(
+        String::from_utf8(result)
+            .unwrap()
+            .matches("HTTP/1.1")
+            .count(),
+        1
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.dir.join("metrics"))
+            .unwrap()
+            .lines()
+            .next(),
+        Some("1")
+    );
+}
+
+#[test]
+fn qualification_opaque_path_ids_round_trip_without_route_confusion() {
+    let f = Fixture::new("");
+    let original = command("a/b%?#..", "");
+    assert_eq!(
+        status(&f.request(&post(&original, "application/json"))),
+        202
+    );
+    assert_eq!(
+        status(&f.request(&get("/v1/commands/a%2Fb%25%3F%23.."))),
+        200
+    );
+    assert_eq!(status(&f.request(&get("/v1/commands/a/b"))), 404);
+    assert_eq!(status(&f.request(&get("/v1/health?extra=1"))), 400);
+    assert_eq!(status(&f.request(&get("/v1/health/"))), 404);
+    assert_eq!(status(&f.request(&get("/v1/commands/%ff"))), 404);
+}
+
+#[test]
+fn qualification_default_body_and_header_boundaries_are_exact() {
+    let f = Fixture::new("");
+    for (id, chunked) in [("exact-cl", false), ("exact-chunked", true)] {
+        let mut body = command(id, "");
+        body.push_str(&" ".repeat(256 * 1024 - body.len()));
+        let request = if chunked {
+            format!("POST /v1/commands HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n", body.len(), body).into_bytes()
+        } else {
+            post(&body, "application/json")
+        };
+        assert_eq!(status(&f.request(&request)), 202);
+    }
+    for (extra, expected) in [(31, 200), (32, 431)] {
+        let headers = (0..extra)
+            .map(|i| format!("X-{i}: value\r\n"))
+            .collect::<String>();
+        let request = format!("GET /v1/health HTTP/1.1\r\nHost: local\r\n{headers}\r\n");
+        assert_eq!(status(&f.request(request.as_bytes())), expected);
+    }
+    let prefix = "GET /v1/health HTTP/1.1\r\nHost: local\r\nX-Large: ";
+    for (length, expected) in [(16 * 1024, 200), (16 * 1024 + 1, 431)] {
+        let request = format!("{prefix}{}\r\n\r\n", "x".repeat(length - prefix.len() - 4));
+        assert_eq!(request.len(), length);
+        assert_eq!(status(&f.request(request.as_bytes())), expected);
+    }
+}

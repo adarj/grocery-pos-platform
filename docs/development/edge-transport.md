@@ -128,12 +128,12 @@ simulation activation/security mechanism.
 
 The ordinary Racket test suite builds the fixture lazily with locked Cargo
 inputs. `just check-rust` and `just check` include the Rust and cross-language
-checks. No separate acceptance campaign is introduced. Real-process evidence
+checks. The M8.2 acceptance namespace adds a separate clean-tree qualification campaign; ordinary tests remain canonical regression checks. Real-process evidence
 covers lost-response/same-attempt dedupe with exactly one adapter start,
 fragmented/coalesced NDJSON, fault ordering, disconnect cleanup, overflow/fresh
 snapshot, and restart without command replay.
 
-M8.2.7 still owns formal whole-stack Tier-A qualification and evidence freezing.
+M8.2.7 uses two commits: reviewed qualification machinery first, then a clean committed-tree campaign and documentation-only evidence freeze. See [M8.2 acceptance](../acceptance/m8.2/README.md).
 Real hardware, discovery/selectors, complete production configuration, inherited
 FD bootstrap/deployment units, Linux identity/SELinux qualification, and peripheral
 business integration remain outside this checkpoint. SQLite remains schema v12.

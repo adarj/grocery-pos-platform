@@ -457,6 +457,22 @@ fn bounded_encoding_discards_oversized_partial_documents() {
 }
 
 #[test]
+fn qualification_default_encoding_limits_accept_exact_and_reject_one_over() {
+    for limit in [
+        DEFAULT_EVENT_RECORD_MAX_BYTES,
+        DEFAULT_NON_STREAM_RESPONSE_MAX_BYTES,
+    ] {
+        let exact = "x".repeat(limit - 2); // JSON string quotes count too
+        assert_eq!(encode_json_bounded(&exact, limit).unwrap().len(), limit);
+        let over = "x".repeat(limit - 1);
+        assert_eq!(
+            encode_json_bounded(&over, limit),
+            Err(JsonEncodeError::OutputTooLarge)
+        );
+    }
+}
+
+#[test]
 fn encoder_sanitizes_serialization_failures() {
     struct HostileError;
     impl Serialize for HostileError {

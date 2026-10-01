@@ -2,6 +2,7 @@
 (require rackunit racket/runtime-path racket/system racket/file racket/port racket/string racket/list racket/match
          (prefix-in http: net/http-easy) net/uri-codec json
          "../pos/edge/protocol.rkt" "../pos/edge/client.rkt" "../pos/edge/session.rkt")
+(provide (struct-out fixture) start-fixture stop-fixture with-fixture attempt wait-until metrics metric-value)
 (define-runtime-path manifest "../../rust/edge/Cargo.toml")
 (define-runtime-path binary "../../rust/edge/target/debug/edge-qualification-fixture")
 (define built? #f)
@@ -47,6 +48,10 @@
 (define (read-event stream) (parse-edge-event (decode-edge-json (read-edge-record (edge-stream-input stream)))))
 (define (next-sequenced stream)
   (let loop () (define e (read-event stream)) (if (edge-heartbeat? e) (loop) e)))
+(define (metric-value f name)
+  (define prefix (string-append name "="))
+  (define line (findf (lambda (s) (string-prefix? s prefix)) (metrics f)))
+  (and line (string->number (substring line (string-length prefix)))))
 (define (metrics f) (string-split (file->string (fixture-metrics f)) "\n"))
 (module+ test
   (test-case "failed fixture startup releases its child and temporary directory"
@@ -67,11 +72,13 @@
   (test-case "lost POST is uncertain and explicit same-attempt retransmission starts once"
     (with-fixture "lost" (lambda (f)
       (define a (attempt f))
+      (define before (metric-value f "requests_total"))
       (define lost (edge-submit-command (fixture-client f) a))
       (check-true (edge-transport-failure? lost) (format "~s" lost))
       (check-true (edge-transport-failure-uncertain? lost))
       (check-true (wait-until (lambda () (= (string->number (third (metrics f))) 1))))
       (check-equal? (first (metrics f)) "1") ; no automatic POST retry
+      (check-equal? (metric-value f "requests_total") (add1 before)) ; no implicit GET either
       (define replay (edge-submit-command (fixture-client f) a))
       (check-equal? (edge-response-status replay) 200)
       (check-equal? (edge-command-state-command-id (edge-command-response-command (edge-response-value replay))) (edge-command-attempt-command-id a))

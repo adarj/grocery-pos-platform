@@ -391,8 +391,13 @@ pub(crate) mod tests {
         started: Option<mpsc::Sender<()>>,
         drives: Arc<AtomicUsize>,
         heartbeat_observer: Option<mpsc::Sender<()>>,
+        request_drive_observer: Option<Arc<AtomicUsize>>,
     }
     impl Plane {
+        fn observe_request_drives(mut self, observer: Arc<AtomicUsize>) -> Self {
+            self.request_drive_observer = Some(observer);
+            self
+        }
         pub(crate) fn observe_heartbeats(mut self, observer: mpsc::Sender<()>) -> Self {
             self.heartbeat_observer = Some(observer);
             self
@@ -408,7 +413,10 @@ pub(crate) mod tests {
             &mut self,
             op: ControlOperation<Payload>,
         ) -> Result<ControlReply, CoreFatalError> {
-            self.requests.fetch_add(1, Ordering::Relaxed);
+            if let Some(observer) = &self.request_drive_observer {
+                observer.store(self.drives.load(Ordering::Relaxed), Ordering::Relaxed);
+            }
+            self.requests.fetch_add(1, Ordering::Release);
             if let Some(gate) = self.gate.take() {
                 self.started.take().unwrap().send(()).unwrap();
                 gate.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -466,6 +474,7 @@ pub(crate) mod tests {
             gate: None,
             started: None,
             heartbeat_observer: None,
+            request_drive_observer: None,
         }
     }
     #[tokio::test(flavor = "current_thread")]
@@ -602,5 +611,106 @@ pub(crate) mod tests {
         handle.close(next);
         handle.shutdown();
         thread.join().unwrap();
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn qualification_default_mailbox_64_cancelled_replies_cleanup_and_fair_drive() {
+        let limits = ServerLimits::default();
+        assert_eq!(limits.control_mailbox_capacity, 64);
+        let requests = Arc::new(AtomicUsize::new(0));
+        let drives = Arc::new(AtomicUsize::new(0));
+        let (release, gate) = mpsc::channel();
+        let (started, receive) = mpsc::channel();
+        let r = requests.clone();
+        let d = drives.clone();
+        let observed_drives = Arc::new(AtomicUsize::new(0));
+        let observer = observed_drives.clone();
+        let (handle, thread) = spawn(
+            move || {
+                Ok(plane(Arc::new(AtomicU64::new(100)), r, d)
+                    .observe_request_drives(observer)
+                    .gated(gate, started))
+            },
+            &limits,
+        )
+        .unwrap();
+        let lease = match handle.open().await.unwrap() {
+            Reply::Open(lease, _) => lease,
+            _ => panic!("subscription"),
+        };
+        let (reply, receiver) = oneshot::channel();
+        drop(receiver);
+        handle
+            .sender
+            .try_send(Message {
+                work: Work::Request(ControlOperation::Status),
+                reply,
+            })
+            .unwrap();
+        receive.recv_timeout(Duration::from_secs(1)).unwrap();
+        for _ in 0..64 {
+            let (reply, receiver) = oneshot::channel();
+            drop(receiver);
+            handle
+                .sender
+                .try_send(Message {
+                    work: Work::Request(ControlOperation::Status),
+                    reply,
+                })
+                .unwrap();
+        }
+        assert!(matches!(
+            handle.request(ControlOperation::Status).await,
+            Err(ControlError::Busy)
+        ));
+        assert_eq!(requests.load(Ordering::Relaxed), 1); // refusal never reaches Core
+        handle.close(lease); // cleanup bypasses saturated mailbox
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while requests.load(Ordering::Relaxed) != 65 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let new = match handle.open().await.unwrap() {
+            Reply::Open(lease, _) => lease,
+            _ => panic!("cleanup"),
+        };
+        // Keep the bounded mailbox under pressure for several drive cadences.
+        // Observe progress inside request handling, so later idle drives cannot
+        // accidentally satisfy the fairness assertion.
+        let before = drives.load(Ordering::Relaxed);
+        let sender = handle.sender.clone();
+        let cadence = limits.executor_cadence;
+        let sent = tokio::task::spawn_blocking(move || {
+            let until = Instant::now() + cadence * 4;
+            let mut count = 0;
+            while count < 5000 || Instant::now() < until {
+                let (reply, receiver) = oneshot::channel();
+                drop(receiver);
+                sender
+                    .send(Message {
+                        work: Work::Request(ControlOperation::Status),
+                        reply,
+                    })
+                    .unwrap();
+                count += 1;
+            }
+            count
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while requests.load(Ordering::Acquire) != 65 + sent {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let during = observed_drives.load(Ordering::Relaxed);
+        handle.close(new);
+        handle.shutdown();
+        thread.join().unwrap();
+        assert!(during > before + 1, "query flood starved executor drives");
     }
 }

@@ -94,6 +94,8 @@ struct Fixture {
     metrics: PathBuf,
     posts: usize,
     dedup: usize,
+    requests_total: usize,
+    command_high_water: usize,
     requests: Vec<RequestId>,
     flood: bool,
     flood_left: usize,
@@ -110,11 +112,14 @@ impl Fixture {
             .collect::<Vec<_>>()
             .join("\n");
         let value = format!(
-            "{}\n{}\n{}\n{}\n",
+            "{}\n{}\n{}\n{}\nrequests_total={}\nretained={}\ncommand_high_water={}\n",
             self.posts,
             self.dedup,
             self.begins.get(),
-            ids
+            ids,
+            self.requests_total,
+            self.runtime.core.retained_command_count(),
+            self.command_high_water
         );
         let next = self.metrics.with_extension("next");
         std::fs::write(&next, value).expect("fixture metric file");
@@ -123,6 +128,7 @@ impl Fixture {
 }
 impl ControlPlane<Payload> for Fixture {
     fn request(&mut self, op: ControlOperation<Payload>) -> Result<ControlReply, CoreFatalError> {
+        self.requests_total += 1;
         if let ControlOperation::Submit(sub) = &op {
             self.posts += 1;
             if self.requests.len() < 64 {
@@ -136,6 +142,9 @@ impl ControlPlane<Payload> for Fixture {
         ) {
             self.dedup += 1;
         }
+        self.command_high_water = self
+            .command_high_water
+            .max(self.runtime.core.retained_command_count());
         self.metrics();
         Ok(result)
     }
@@ -331,6 +340,8 @@ fn main() {
                 metrics,
                 posts: 0,
                 dedup: 0,
+                requests_total: 0,
+                command_high_water: 0,
                 requests: vec![],
                 flood: mode == "flood",
                 flood_left: 0,

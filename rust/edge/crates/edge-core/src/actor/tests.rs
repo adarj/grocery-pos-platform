@@ -1127,3 +1127,121 @@ fn immediate_commit_failure_emits_accepted_then_terminal_without_erasing_identit
     assert_eq!(core.queue.reserve_calls, 1);
     assert_eq!(core.poll_event(&sub.token).unwrap(), EventPoll::Empty);
 }
+
+#[test]
+fn qualification_dual_terminal_retention_all_four_conditions() {
+    // The open-freshness/elapsed-recovery case deliberately uses a larger
+    // configured horizon, as the defaults' 120s recovery exceeds 60s freshness.
+    for (deadline, recovery, now, retained) in [
+        (120, 20, 110, true),
+        (120, 5, 110, true),
+        (105, 40, 110, true),
+        (105, 5, 110, false),
+    ] {
+        let clock = FakeClock::new(100);
+        let mut policy = limits();
+        policy.max_command_records = 1;
+        policy.max_submission_horizon_ms = 100;
+        policy.terminal_recovery_minimum_ms = recovery;
+        let mut core = core(clock.clone(), policy, FakeQueue::default());
+        let original = command("old", "request-1", deadline, 10);
+        accepted(core.submit_command(original.clone()).unwrap());
+        terminate_without_effect(&mut core, &clock, "old", 101);
+        clock.set(now);
+        let result = core
+            .submit_command(command("new", "request-2", now, 10))
+            .unwrap();
+        if retained {
+            assert_eq!(rejected(result), AdmissionRejection::CommandCacheFull);
+            assert!(matches!(
+                core.submit_command(original).unwrap(),
+                AdmissionDecision::Deduplicated(_)
+            ));
+            assert_eq!(core.queue.reserve_calls, 1);
+        } else {
+            accepted(result);
+            assert!(core.command_status(&original.command_id).is_none());
+            assert_eq!(
+                rejected(core.submit_command(original).unwrap()),
+                AdmissionRejection::SubmissionExpired
+            );
+            assert_eq!(core.queue.commit_calls, 2); // replay never reaches queue
+        }
+    }
+}
+
+#[test]
+fn qualification_default_cache_protects_4096_records_then_reuses_capacity() {
+    let clock = FakeClock::new(100);
+    let defaults = CoreLimits::with_registry_bounds(1, 1, 2, 1);
+    assert_eq!(defaults.max_command_records, 4096);
+    assert_eq!(defaults.max_submission_horizon_ms, 60_000);
+    assert_eq!(defaults.max_command_timeout_ms, 60_000);
+    assert_eq!(defaults.terminal_recovery_minimum_ms, 120_000);
+    let mut core = core(clock.clone(), defaults, FakeQueue::default());
+    for index in 0..defaults.max_command_records {
+        accepted(
+            core.submit_command(command(&format!("c-{index}"), "r", 60_100, 60_000))
+                .unwrap(),
+        );
+    }
+    assert_eq!(
+        rejected(
+            core.submit_command(command("full", "r", 60_100, 60_000))
+                .unwrap()
+        ),
+        AdmissionRejection::CommandCacheFull
+    );
+    assert_eq!(core.queue.reserve_calls, 4096);
+    assert!(
+        core.command_status(&CommandId::new("full").unwrap())
+            .is_none()
+    );
+    // Every nonterminal identity was protected; simulated time never sleeps.
+    for index in 0..defaults.max_command_records {
+        assert!(
+            core.command_status(&CommandId::new(format!("c-{index}")).unwrap())
+                .is_some()
+        );
+        terminate_without_effect(&mut core, &clock, &format!("c-{index}"), 100);
+    }
+    clock.set(120_099);
+    assert_eq!(
+        rejected(
+            core.submit_command(command("protected", "r", 120_099, 10))
+                .unwrap()
+        ),
+        AdmissionRejection::CommandCacheFull
+    );
+    clock.set(120_100);
+    accepted(
+        core.submit_command(command("reused", "r", 120_100, 10))
+            .unwrap(),
+    );
+    assert_eq!(core.retained_command_count(), 4096);
+    assert!(
+        core.command_status(&CommandId::new("c-0").unwrap())
+            .is_none()
+    );
+    assert_eq!(
+        rejected(
+            core.submit_command(command("c-0", "r", 60_100, 60_000))
+                .unwrap()
+        ),
+        AdmissionRejection::SubmissionExpired
+    );
+    assert_eq!(
+        rejected(
+            core.submit_command(command("horizon", "r", 180_101, 10))
+                .unwrap()
+        ),
+        AdmissionRejection::SubmissionHorizonExceeded
+    );
+    assert_eq!(
+        rejected(
+            core.submit_command(command("timeout", "r", 120_100, 60_001))
+                .unwrap()
+        ),
+        AdmissionRejection::TimeoutTooLarge
+    );
+}

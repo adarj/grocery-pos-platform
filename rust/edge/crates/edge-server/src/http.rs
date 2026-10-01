@@ -857,4 +857,35 @@ mod tests {
         );
         std::fs::remove_file(path).unwrap();
     }
+    #[tokio::test(flavor = "current_thread")]
+    async fn qualification_default_16_connections_bound_before_route_work() {
+        let limits = ServerLimits::default();
+        assert_eq!(limits.max_connections, 16);
+        assert_eq!(limits.header_bytes, 16 * 1024);
+        assert_eq!(limits.max_headers, 32);
+        assert_eq!(limits.body_bytes, 256 * 1024);
+        assert_eq!(limits.response_bytes, 256 * 1024);
+        assert_eq!(limits.event_bytes, 64 * 1024);
+        let (path, requests, _, stop, task) =
+            server(limits, rustix::process::getuid().as_raw()).await;
+        let mut held = Vec::new();
+        for _ in 0..16 {
+            let mut stream = tokio::net::UnixStream::connect(&path).await.unwrap();
+            stream.write_all(b"POST /v1/commands HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n").await.unwrap();
+            held.push(stream);
+        }
+        // Yield to the accept loop; no timer deadline is used as readiness.
+        tokio::task::yield_now().await;
+        let refused = request(&path, b"GET /v1/health HTTP/1.1\r\nHost: local\r\n\r\n").await;
+        assert!(refused.is_empty());
+        assert_eq!(requests.load(Ordering::Relaxed), 0);
+        stop.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        drop(held);
+        std::fs::remove_file(path).unwrap();
+    }
 }

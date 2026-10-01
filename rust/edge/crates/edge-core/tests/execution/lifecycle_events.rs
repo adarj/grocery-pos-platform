@@ -15,7 +15,7 @@ fn sequence(event: &EdgeEvent) -> u64 {
     }
 }
 
-fn fresh_adapters(
+pub(super) fn fresh_adapters(
     weak: &Rc<RefCell<Vec<Weak<Payload>>>>,
 ) -> (Vec<(ResourceId, ObservedAdapter)>, Vec<SimProbe>) {
     let mut probes = Vec::new();

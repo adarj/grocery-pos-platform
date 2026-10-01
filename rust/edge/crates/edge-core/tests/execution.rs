@@ -524,6 +524,15 @@ fn normal_facts_and_contract_inconsistencies_derive_valid_pairs() {
             (TerminalOutcome::Unknown, EffectEvidence::Possible),
             true,
         ),
+        (
+            vec![
+                Step::MarkPossible,
+                Step::MarkConfirmed,
+                Step::BindingLost(FAILURE),
+            ],
+            (TerminalOutcome::Succeeded, EffectEvidence::Confirmed),
+            true,
+        ),
     ] {
         let mut f = fixture(1, [vec![steps.clone()], vec![]]);
         f.submit("a", 7, 100);
@@ -1182,3 +1191,6 @@ fn destructor_panic_requires_process_termination_before_terminal_publication() {
 
 #[path = "execution/lifecycle_events.rs"]
 mod lifecycle_events;
+
+#[path = "execution/qualification.rs"]
+mod qualification;

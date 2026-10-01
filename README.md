@@ -170,7 +170,12 @@ activation path yet.
 OS discovery/selectors, complete production `edge.toml`, real adapters,
 device-specific observations, production daemon/bootstrap composition,
 Linux service-identity/DAC/SELinux qualification, and physical qualification
-remain deferred. M8.2.7 owns the formal generic Tier-A qualification/audit.
+remain deferred. [M8.2.7 qualification machinery](docs/acceptance/m8.2/README.md)
+now defines the closed generic Tier-A campaigns, default-capacity/load and
+controlled process-death checks. Phase 1 builds the instrument; authoritative
+acceptance and evidence freezing occur only after human review and a signed
+machinery commit, in a separate Phase-2 run against that exact clean tree.
+No M8.2 Tier-A passing result is claimed by these machinery changes.
 These foundation tests do not establish whole-M8 Tier A qualification or a
 functioning production edge daemon.
 

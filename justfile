@@ -157,3 +157,15 @@ db-restore-offline BACKUP DB:
 # Creates a local, allowlisted diagnostic archive without stopping POS Core.
 support-bundle DB OUTPUT:
     racket pos-backend-racket/scripts/support-diagnostics.rkt collect {{quote(DB)}} {{quote(OUTPUT)}}
+
+# Authoritative M8.2 Tier-A campaign: clean committed source only (Phase 2).
+accept-m8-2:
+    bash scripts/acceptance/accept-m8-2.sh
+
+# Regenerates from a completed authoritative local summary, never from mocks.
+acceptance-report-m8-2:
+    racket scripts/acceptance/m8-2-report.rkt .local/acceptance/m8-2/run-summary.json docs/acceptance/m8.2/acceptance-results.json
+
+# Optional finite synthetic full-path load; mandatory acceptance uses 1000.
+stress-m8-2 ITERATIONS="50000":
+    racket scripts/acceptance/m8-2-process.rkt load {{quote(ITERATIONS)}}
