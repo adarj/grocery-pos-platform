@@ -1,201 +1,370 @@
 #lang racket/base
-(require rackunit racket/runtime-path racket/system racket/file racket/port racket/string racket/list racket/match
-         (prefix-in http: net/http-easy) net/uri-codec json
-         "../pos/edge/protocol.rkt" "../pos/edge/client.rkt" "../pos/edge/session.rkt")
-(provide (struct-out fixture) start-fixture stop-fixture with-fixture attempt wait-until metrics metric-value)
+
+(require rackunit
+         racket/runtime-path
+         racket/system
+         racket/file
+         racket/port
+         racket/string
+         racket/list
+         racket/match
+         (prefix-in http: net/http-easy)
+         net/uri-codec
+         json
+         "../pos/edge/protocol.rkt"
+         "../pos/edge/client.rkt"
+         "../pos/edge/session.rkt")
+
+(provide (struct-out fixture)
+         start-fixture
+         stop-fixture
+         with-fixture
+         attempt
+         wait-until
+         metrics
+         metric-value)
+
 (define-runtime-path manifest "../../rust/edge/Cargo.toml")
+
 (define-runtime-path binary "../../rust/edge/target/debug/edge-qualification-fixture")
+
 (define built? #f)
+
 (struct fixture (process output input error directory socket metrics client))
+
 (define (wait-until predicate [seconds 4])
   (define until (+ (current-inexact-monotonic-milliseconds) (* seconds 1000)))
-  (let loop () (cond [(predicate) #t] [(> (current-inexact-monotonic-milliseconds) until) #f] [else (sleep .01) (loop)])))
+  (let loop ()
+    (cond
+      [(predicate) #t]
+      [(> (current-inexact-monotonic-milliseconds) until) #f]
+      [else
+       (sleep .01)
+       (loop)])))
+
 (define (start-fixture [mode ""] [agent "fixture-agent"] [directory #f])
   (unless built?
-    (unless (system* (find-executable-path "cargo") "build" "--locked" "--manifest-path" (path->string manifest) "-p" "edge-server" "--features" "qualification" "--bin" "edge-qualification-fixture") (error 'fixture "Rust fixture build failed"))
+    (unless (system*
+             (find-executable-path "cargo")
+             "build"
+             "--locked"
+             "--manifest-path"
+             (path->string manifest)
+             "-p"
+             "edge-server"
+             "--features"
+             "qualification"
+             "--bin"
+             "edge-qualification-fixture")
+      (error 'fixture "Rust fixture build failed"))
     (set! built? #t))
   (define dir (or directory (make-temporary-file "edge-process-~a" 'directory)))
-  (define socket (build-path dir "edge.sock")) (define metrics (build-path dir "metrics"))
-  (define-values (proc out in err) (subprocess #f #f #f binary (path->string socket) (path->string metrics) agent mode))
+  (define socket (build-path dir "edge.sock"))
+  (define metrics (build-path dir "metrics"))
+  (define-values (proc out in err)
+    (subprocess #f #f #f binary (path->string socket) (path->string metrics) agent mode))
   (define f (fixture proc out in err dir socket metrics (make-edge-client socket)))
   (unless (wait-until (lambda () (and (file-exists? socket) (file-exists? metrics))))
     (subprocess-kill proc #t)
     (stop-fixture f)
     (error 'fixture "Rust fixture failed to start"))
   f)
+
 (define (stop-fixture f [remove? #t])
-  (dynamic-wind void
-    (lambda ()
-      (when (eq? (subprocess-status (fixture-process f)) 'running)
-        (with-handlers ([exn:fail? void])
-          (write-byte 10 (fixture-input f)) (flush-output (fixture-input f))))
-      (unless (sync/timeout 4 (fixture-process f))
-        (subprocess-kill (fixture-process f) #t)
-        (sync/timeout 1 (fixture-process f))
-        (error 'fixture "shutdown exceeded bound")))
-    (lambda ()
-      (for ([port (in-list (list (fixture-output f) (fixture-error f)))])
-        (unless (port-closed? port) (close-input-port port)))
-      (unless (port-closed? (fixture-input f)) (close-output-port (fixture-input f)))
-      (when (and remove? (directory-exists? (fixture-directory f))) (delete-directory/files (fixture-directory f))))))
+  (dynamic-wind
+   void
+   (lambda ()
+     (when (eq? (subprocess-status (fixture-process f)) 'running)
+       (with-handlers ([exn:fail? void])
+         (write-byte 10 (fixture-input f))
+         (flush-output (fixture-input f))))
+     (unless (sync/timeout 4 (fixture-process f))
+       (subprocess-kill (fixture-process f) #t)
+       (sync/timeout 1 (fixture-process f))
+       (error 'fixture "shutdown exceeded bound")))
+   (lambda ()
+     (for ([port (in-list (list (fixture-output f) (fixture-error f)))])
+       (unless (port-closed? port)
+         (close-input-port port)))
+     (unless (port-closed? (fixture-input f))
+       (close-output-port (fixture-input f)))
+     (when (and remove? (directory-exists? (fixture-directory f)))
+       (delete-directory/files (fixture-directory f))))))
+
 (define (with-fixture mode work)
-  (define f (start-fixture mode)) (dynamic-wind void (lambda () (work f)) (lambda () (stop-fixture f))))
+  (define f (start-fixture mode))
+  (dynamic-wind void (lambda () (work f)) (lambda () (stop-fixture f))))
+
 (define (attempt f [scenario "success"] [token 1])
   (define status (edge-response-value (edge-status (fixture-client f))))
-  (make-edge-command-attempt #:agent-id (edge-agent-status-agent-id status) #:device-id "fixture.device" #:binding-id "fixture-binding-a"
-                             #:not-after (+ (edge-agent-status-uptime status) 30000) #:timeout 10000
-                             #:payload (make-edge-payload "synthetic.signal" (hasheq 'scenario scenario 'token token))))
-(define (read-event stream) (parse-edge-event (decode-edge-json (read-edge-record (edge-stream-input stream)))))
+  (make-edge-command-attempt
+   #:agent-id (edge-agent-status-agent-id status)
+   #:device-id "fixture.device"
+   #:binding-id "fixture-binding-a"
+   #:not-after (+ (edge-agent-status-uptime status) 30000)
+   #:timeout 10000
+   #:payload (make-edge-payload "synthetic.signal" (hasheq 'scenario scenario 'token token))))
+
+(define (read-event stream)
+  (parse-edge-event (decode-edge-json (read-edge-record (edge-stream-input stream)))))
+
 (define (next-sequenced stream)
-  (let loop () (define e (read-event stream)) (if (edge-heartbeat? e) (loop) e)))
+  (let loop ()
+    (define e (read-event stream))
+    (if (edge-heartbeat? e) (loop) e)))
+
 (define (metric-value f name)
   (define prefix (string-append name "="))
   (define line (findf (lambda (s) (string-prefix? s prefix)) (metrics f)))
   (and line (string->number (substring line (string-length prefix)))))
-(define (metrics f) (string-split (file->string (fixture-metrics f)) "\n"))
+
+(define (metrics f)
+  (string-split (file->string (fixture-metrics f)) "\n"))
+
 (module+ test
   (test-case "failed fixture startup releases its child and temporary directory"
     (define directory (make-temporary-file "edge-start-failure-~a" 'directory))
-    (dynamic-wind void (lambda ()
-      (check-exn exn:fail? (lambda () (start-fixture "" (make-string 257 #\a) directory)))
-      (check-false (directory-exists? directory)))
-      (lambda () (when (directory-exists? directory) (delete-directory/files directory)))))
+    (dynamic-wind
+     void
+     (lambda ()
+       (check-exn exn:fail? (lambda () (start-fixture "" (make-string 257 #\a) directory)))
+       (check-false (directory-exists? directory)))
+     (lambda () (when (directory-exists? directory) (delete-directory/files directory)))))
+
   (test-case "real UDS health/status/devices and typed HTTP rejection"
-    (with-fixture "" (lambda (f)
-      (define client (fixture-client f))
-      (check-true (edge-health-state? (edge-response-value (edge-health client))))
-      (check-equal? (edge-agent-status-agent-id (edge-response-value (edge-status client))) "fixture-agent")
-      (check-equal? (length (edge-response-value (edge-devices client))) 1)
-      (check-equal? (edge-device-snapshot-binding-id (edge-response-value (edge-device client "fixture.device"))) "fixture-binding-a")
-      (check-equal? (edge-rejection-status (edge-device client "unknown")) 404)
-      (check-equal? (edge-rejection-status (edge-command-status client "unknown")) 404))))
+    (with-fixture
+     ""
+     (lambda (f)
+       (define client (fixture-client f))
+       (check-true (edge-health-state? (edge-response-value (edge-health client))))
+       (check-equal?
+        (edge-agent-status-agent-id (edge-response-value (edge-status client)))
+        "fixture-agent")
+       (check-equal? (length (edge-response-value (edge-devices client))) 1)
+       (check-equal?
+        (edge-device-snapshot-binding-id
+         (edge-response-value (edge-device client "fixture.device")))
+        "fixture-binding-a")
+       (check-equal? (edge-rejection-status (edge-device client "unknown")) 404)
+       (check-equal? (edge-rejection-status (edge-command-status client "unknown")) 404))))
+
   (test-case "lost POST is uncertain and explicit same-attempt retransmission starts once"
-    (with-fixture "lost" (lambda (f)
-      (define a (attempt f))
-      (define before (metric-value f "requests_total"))
-      (define lost (edge-submit-command (fixture-client f) a))
-      (check-true (edge-transport-failure? lost) (format "~s" lost))
-      (check-true (edge-transport-failure-uncertain? lost))
-      (check-true (wait-until (lambda () (= (string->number (third (metrics f))) 1))))
-      (check-equal? (first (metrics f)) "1") ; no automatic POST retry
-      (check-equal? (metric-value f "requests_total") (add1 before)) ; no implicit GET either
-      (define replay (edge-submit-command (fixture-client f) a))
-      (check-equal? (edge-response-status replay) 200)
-      (check-equal? (edge-command-state-command-id (edge-command-response-command (edge-response-value replay))) (edge-command-attempt-command-id a))
-      (define counts (metrics f))
-      (check-equal? (take counts 3) '("2" "1" "1"))
-      (check-not-equal? (fourth counts) (fifth counts))
-      (check-equal? (fourth counts) (edge-transport-failure-request-id lost)))))
+    (with-fixture
+     "lost"
+     (lambda (f)
+       (define a (attempt f))
+       (define before (metric-value f "requests_total"))
+       (define lost (edge-submit-command (fixture-client f) a))
+       (check-true (edge-transport-failure? lost) (format "~s" lost))
+       (check-true (edge-transport-failure-uncertain? lost))
+       (check-true (wait-until (lambda () (= (string->number (third (metrics f))) 1))))
+       (check-equal? (first (metrics f)) "1")
+       ; no automatic POST retry
+       (check-equal? (metric-value f "requests_total") (add1 before))
+       ; no implicit GET either
+       (define replay (edge-submit-command (fixture-client f) a))
+       (check-equal? (edge-response-status replay) 200)
+       (check-equal?
+        (edge-command-state-command-id (edge-command-response-command (edge-response-value replay)))
+        (edge-command-attempt-command-id a))
+       (define counts (metrics f))
+       (check-equal? (take counts 3) '("2" "1" "1"))
+       (check-not-equal? (fourth counts) (fifth counts))
+       (check-equal? (fourth counts) (edge-transport-failure-request-id lost)))))
+
   (test-case "fragmented NDJSON preserves snapshot/cursor and command lifecycle sequence"
-    (with-fixture "" (lambda (f)
-      (define stream (edge-open-events (fixture-client f)))
-      (dynamic-wind void (lambda ()
-        (define snapshot (read-event stream)) (check-true (edge-snapshot-event? snapshot))
-        (define state (edge-session-apply (empty-edge-session-state) snapshot))
-        (define a (attempt f)) (check-equal? (edge-response-status (edge-submit-command (fixture-client f) a)) 202)
-        (for ([phase '(accepted executing terminal)])
-          (define event (next-sequenced stream)) (check-true (edge-command-event? event))
-          (check-equal? (edge-command-state-phase (edge-command-event-command event)) phase)
-          (set! state (edge-session-apply state event)) (check-equal? (edge-session-state-health state) 'healthy))
-        (define cursor (edge-session-state-cursor state))
-        (check-equal? (edge-response-status (edge-submit-command (fixture-client f) a)) 200)
-        (define heartbeat (read-event stream)) (check-true (edge-heartbeat? heartbeat))
-        (check-equal? (edge-session-state-cursor (edge-session-apply state heartbeat)) cursor)
-        (check-equal? (edge-rejection-status (edge-open-events (fixture-client f))) 503))
+    (with-fixture
+     ""
+     (lambda (f)
+       (define stream (edge-open-events (fixture-client f)))
+       (dynamic-wind
+        void
+        (lambda ()
+          (define snapshot (read-event stream))
+          (check-true (edge-snapshot-event? snapshot))
+          (define state (edge-session-apply (empty-edge-session-state) snapshot))
+          (define a (attempt f))
+          (check-equal? (edge-response-status (edge-submit-command (fixture-client f) a)) 202)
+          (for ([phase '(accepted executing terminal)])
+            (define event (next-sequenced stream))
+            (check-true (edge-command-event? event))
+            (check-equal? (edge-command-state-phase (edge-command-event-command event)) phase)
+            (set! state (edge-session-apply state event))
+            (check-equal? (edge-session-state-health state) 'healthy))
+          (define cursor (edge-session-state-cursor state))
+          (check-equal? (edge-response-status (edge-submit-command (fixture-client f) a)) 200)
+          (define heartbeat (read-event stream))
+          (check-true (edge-heartbeat? heartbeat))
+          (check-equal? (edge-session-state-cursor (edge-session-apply state heartbeat)) cursor)
+          (check-equal? (edge-rejection-status (edge-open-events (fixture-client f))) 503))
         (lambda () (close-edge-stream! stream)))
-      (check-true (wait-until (lambda () (define new (edge-open-events (fixture-client f))) (and (edge-stream? new) (begin (close-edge-stream! new) #t))))))))
+       (check-true
+        (wait-until
+         (lambda ()
+           (define new (edge-open-events (fixture-client f)))
+           (and (edge-stream? new) (begin (close-edge-stream! new) #t))))))))
+
   (test-case "possible effect panic invalidates device before terminal and keeps old binding"
-    (with-fixture "" (lambda (f)
-      (define stream (edge-open-events (fixture-client f)))
-      (dynamic-wind void (lambda ()
-        (read-event stream)
-        (edge-submit-command (fixture-client f) (attempt f "panic"))
-        (define accepted (next-sequenced stream)) (define executing (next-sequenced stream))
-        (check-equal? (edge-command-state-phase (edge-command-event-command accepted)) 'accepted)
-        (check-equal? (edge-command-state-phase (edge-command-event-command executing)) 'executing)
-        (define invalid (next-sequenced stream)) (check-true (edge-device-event? invalid))
-        (check-false (edge-device-snapshot-binding-id (edge-device-event-device invalid)))
-        (define terminal (edge-command-event-command (next-sequenced stream)))
-        (check-equal? (edge-command-state-binding-id terminal) "fixture-binding-a")
-        (check-equal? (edge-command-state-outcome terminal) 'unknown)
-        (check-equal? (edge-command-state-evidence terminal) 'possible))
+    (with-fixture
+     ""
+     (lambda (f)
+       (define stream (edge-open-events (fixture-client f)))
+       (dynamic-wind
+        void
+        (lambda ()
+          (read-event stream)
+          (edge-submit-command (fixture-client f) (attempt f "panic"))
+          (define accepted (next-sequenced stream))
+          (define executing (next-sequenced stream))
+          (check-equal? (edge-command-state-phase (edge-command-event-command accepted)) 'accepted)
+          (check-equal?
+           (edge-command-state-phase (edge-command-event-command executing))
+           'executing)
+          (define invalid (next-sequenced stream))
+          (check-true (edge-device-event? invalid))
+          (check-false (edge-device-snapshot-binding-id (edge-device-event-device invalid)))
+          (define terminal (edge-command-event-command (next-sequenced stream)))
+          (check-equal? (edge-command-state-binding-id terminal) "fixture-binding-a")
+          (check-equal? (edge-command-state-outcome terminal) 'unknown)
+          (check-equal? (edge-command-state-evidence terminal) 'possible))
         (lambda () (close-edge-stream! stream))))))
+
   (test-case "fresh rebind over live events isolates old queued attempts and retains dedupe"
-    (with-fixture "rebind" (lambda (f)
-      (define client (fixture-client f))
-      (define stream (edge-open-events client))
-      (dynamic-wind void (lambda ()
-        (define state (edge-session-apply (empty-edge-session-state) (read-event stream)))
-        (define old (attempt f "pending"))
-        (check-equal? (edge-response-status (edge-submit-command client old)) 202)
-        (check-true (wait-until (lambda () (eq? (edge-command-state-phase (edge-response-value (edge-command-status client (edge-command-attempt-command-id old)))) 'executing))))
-        (define waiting (attempt f "pending" 2))
-        (check-equal? (edge-response-status (edge-submit-command client waiting)) 202)
-        (let loop ([n 0])
-          (define event (next-sequenced stream))
-          (set! state (edge-session-apply state event))
-          (check-equal? (edge-session-state-health state) 'healthy)
-          (define current (hash-ref (edge-session-state-devices state) "fixture.device"))
-          (unless (equal? (edge-device-snapshot-binding-id current) "fixture-binding-b")
-            (check-true (< n 12)) (loop (add1 n))))
-        (check-equal? (third (metrics f)) "1")
-        (for ([a (in-list (list old waiting))])
-          (define command (edge-response-value (edge-command-status client (edge-command-attempt-command-id a))))
-          (check-equal? (edge-command-state-binding-id command) "fixture-binding-a")
-          (check-equal? (edge-command-state-phase command) 'terminal)
-          (check-equal? (edge-command-state-evidence command) 'none))
-        (check-equal? (edge-response-status (edge-submit-command client old)) 200))
+    (with-fixture
+     "rebind"
+     (lambda (f)
+       (define client (fixture-client f))
+       (define stream (edge-open-events client))
+       (dynamic-wind
+        void
+        (lambda ()
+          (define state (edge-session-apply (empty-edge-session-state) (read-event stream)))
+          (define old (attempt f "pending"))
+          (check-equal? (edge-response-status (edge-submit-command client old)) 202)
+          (check-true
+           (wait-until
+            (lambda ()
+              (eq?
+               (edge-command-state-phase
+                (edge-response-value
+                 (edge-command-status client (edge-command-attempt-command-id old))))
+               'executing))))
+          (define waiting (attempt f "pending" 2))
+          (check-equal? (edge-response-status (edge-submit-command client waiting)) 202)
+          (let loop ([n 0])
+            (define event (next-sequenced stream))
+            (set! state (edge-session-apply state event))
+            (check-equal? (edge-session-state-health state) 'healthy)
+            (define current (hash-ref (edge-session-state-devices state) "fixture.device"))
+            (unless (equal? (edge-device-snapshot-binding-id current) "fixture-binding-b")
+              (check-true (< n 12))
+              (loop (add1 n))))
+          (check-equal? (third (metrics f)) "1")
+          (for ([a (in-list (list old waiting))])
+            (define command
+              (edge-response-value (edge-command-status client (edge-command-attempt-command-id a))))
+            (check-equal? (edge-command-state-binding-id command) "fixture-binding-a")
+            (check-equal? (edge-command-state-phase command) 'terminal)
+            (check-equal? (edge-command-state-evidence command) 'none))
+          (check-equal? (edge-response-status (edge-submit-command client old)) 200))
         (lambda () (close-edge-stream! stream))))))
+
   (test-case "managed session marks EOF stale and restart snapshot replaces old epoch without replay"
     (define f (start-fixture "" "agent-a"))
-    (define session #f) (define replacement #f) (define next #f)
-    (dynamic-wind void (lambda ()
-    (set! session (start-edge-session (fixture-client f) #:stale-ms 2000))
-    (check-true (wait-until (lambda () (eq? (edge-session-state-health (edge-session-current session)) 'healthy))))
-    (define old (edge-session-current session))
-    (stop-fixture f #f)
-    (check-true (wait-until (lambda () (eq? (edge-session-state-health (edge-session-current session)) 'stale))))
-    (stop-edge-session! session)
-    (set! replacement (start-fixture "" "agent-b" (fixture-directory f)))
-    (define ended (box #f))
-    (set! next (start-edge-session (fixture-client replacement) #:previous old #:on-epoch-ended (lambda (id) (set-box! ended id))))
-      (check-true (wait-until (lambda () (eq? (edge-session-state-health (edge-session-current next)) 'healthy))))
-      (check-equal? (edge-session-state-agent-id (edge-session-current next)) "agent-b")
-      (check-equal? (unbox ended) "agent-a")
-      (check-equal? (first (metrics replacement)) "0"))
-      (lambda ()
-        (when next (stop-edge-session! next))
-        (when session (stop-edge-session! session))
-        (when replacement (stop-fixture replacement))
-        (stop-fixture f))))
+    (define session #f)
+    (define replacement #f)
+    (define next #f)
+    (dynamic-wind
+     void
+     (lambda ()
+       (set! session (start-edge-session (fixture-client f) #:stale-ms 2000))
+       (check-true
+        (wait-until
+         (lambda () (eq? (edge-session-state-health (edge-session-current session)) 'healthy))))
+       (define old (edge-session-current session))
+       (stop-fixture f #f)
+       (check-true
+        (wait-until
+         (lambda () (eq? (edge-session-state-health (edge-session-current session)) 'stale))))
+       (stop-edge-session! session)
+       (set! replacement (start-fixture "" "agent-b" (fixture-directory f)))
+       (define ended (box #f))
+       (set!
+        next
+        (start-edge-session
+         (fixture-client replacement)
+         #:previous old
+         #:on-epoch-ended (lambda (id) (set-box! ended id))))
+       (check-true
+        (wait-until
+         (lambda () (eq? (edge-session-state-health (edge-session-current next)) 'healthy))))
+       (check-equal? (edge-session-state-agent-id (edge-session-current next)) "agent-b")
+       (check-equal? (unbox ended) "agent-a")
+       (check-equal? (first (metrics replacement)) "0"))
+     (lambda ()
+       (when next
+         (stop-edge-session! next))
+       (when session
+         (stop-edge-session! session))
+       (when replacement
+         (stop-fixture replacement))
+       (stop-fixture f))))
+
   (test-case "a command callback can stop its own managed session without leaving healthy state"
-    (with-fixture "" (lambda (f)
-      (define session #f)
-      (set! session (start-edge-session (fixture-client f) #:on-command (lambda (_) (stop-edge-session! session))))
-      (dynamic-wind void (lambda ()
-        (check-true (wait-until (lambda () (eq? (edge-session-state-health (edge-session-current session)) 'healthy))))
-        (edge-submit-command (fixture-client f) (attempt f "pending"))
-        (check-true (wait-until (lambda () (eq? (edge-session-state-health (edge-session-current session)) 'stale)) 1))
-        (check-equal? (edge-session-state-failure (edge-session-current session)) 'stopped)
-        (check-true (wait-until (lambda () (define fresh (edge-open-events (fixture-client f)))
-                                (and (edge-stream? fresh) (begin (close-edge-stream! fresh) #t))))))
+    (with-fixture
+     ""
+     (lambda (f)
+       (define session #f)
+       (set!
+        session
+        (start-edge-session
+         (fixture-client f)
+         #:on-command (lambda (_) (stop-edge-session! session))))
+       (dynamic-wind
+        void
+        (lambda ()
+          (check-true
+           (wait-until
+            (lambda () (eq? (edge-session-state-health (edge-session-current session)) 'healthy))))
+          (edge-submit-command (fixture-client f) (attempt f "pending"))
+          (check-true
+           (wait-until
+            (lambda () (eq? (edge-session-state-health (edge-session-current session)) 'stale))
+            1))
+          (check-equal? (edge-session-state-failure (edge-session-current session)) 'stopped)
+          (check-true
+           (wait-until
+            (lambda ()
+              (define fresh (edge-open-events (fixture-client f)))
+              (and (edge-stream? fresh) (begin (close-edge-stream! fresh) #t))))))
         (lambda () (stop-edge-session! session))))))
+
   (test-case "slow reader overflow ends stream and reconnect snapshot has current cursor without replay"
-    (with-fixture "flood" (lambda (f)
-      (define stream (edge-open-events (fixture-client f)))
-      (define initial (read-event stream))
-      (sleep 1)
-      ;; After withholding reads, buffered transport records may precede EOF.
-      ;; Read bounded records only; abrupt chunked EOF is a stream failure too.
-      (define ended? #f)
-      (with-handlers ([exn:fail? (lambda (_) (set! ended? #t))])
-        (let loop ([n 0])
-          (define line (read-edge-record (edge-stream-input stream)))
-          (cond [(eof-object? line) (set! ended? #t)] [else (check-true (< n 250)) (loop (add1 n))])))
-      (check-true ended?) (close-edge-stream! stream)
-      (define fresh (edge-open-events (fixture-client f)))
-      (dynamic-wind void (lambda ()
-        (define snapshot (read-event fresh))
-        (check-true (edge-snapshot-event? snapshot))
-        (check-true (> (edge-snapshot-event-cursor snapshot) (edge-snapshot-event-cursor initial))))
+    (with-fixture
+     "flood"
+     (lambda (f)
+       (define stream (edge-open-events (fixture-client f)))
+       (define initial (read-event stream))
+       (sleep 1)
+       ;; After withholding reads, buffered transport records may precede EOF.
+       ;; Read bounded records only; abrupt chunked EOF is a stream failure too.
+       (define ended? #f)
+       (with-handlers ([exn:fail? (lambda (_) (set! ended? #t))])
+         (let loop ([n 0])
+           (define line (read-edge-record (edge-stream-input stream)))
+           (cond
+             [(eof-object? line) (set! ended? #t)]
+             [else
+              (check-true (< n 250))
+              (loop (add1 n))])))
+       (check-true ended?)
+       (close-edge-stream! stream)
+       (define fresh (edge-open-events (fixture-client f)))
+       (dynamic-wind
+        void
+        (lambda ()
+          (define snapshot (read-event fresh))
+          (check-true (edge-snapshot-event? snapshot))
+          (check-true
+           (> (edge-snapshot-event-cursor snapshot) (edge-snapshot-event-cursor initial))))
         (lambda () (close-edge-stream! fresh)))))))

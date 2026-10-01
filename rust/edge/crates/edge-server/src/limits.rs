@@ -22,6 +22,7 @@ pub struct ServerLimits {
     #[cfg(feature = "qualification")]
     pub event_chunk_bytes: usize,
 }
+
 impl Default for ServerLimits {
     fn default() -> Self {
         Self {
@@ -45,6 +46,7 @@ impl Default for ServerLimits {
         }
     }
 }
+
 impl ServerLimits {
     pub(crate) fn valid(&self) -> bool {
         [

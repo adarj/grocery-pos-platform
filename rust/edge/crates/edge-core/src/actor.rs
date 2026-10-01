@@ -17,6 +17,7 @@ use crate::queue::{ExecutorQueuePort, QueueCommitError, QueueReservationError, Q
 
 #[path = "binding.rs"]
 mod binding;
+
 #[path = "events.rs"]
 mod events;
 

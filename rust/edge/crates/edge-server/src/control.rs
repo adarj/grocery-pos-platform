@@ -18,11 +18,13 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Notify, oneshot, watch};
 
 pub struct MonotonicClock(Instant);
+
 impl Default for MonotonicClock {
     fn default() -> Self {
         Self(Instant::now())
     }
 }
+
 impl AgentClock for MonotonicClock {
     fn now(&self) -> AgentUptimeMs {
         AgentUptimeMs::new(
@@ -39,6 +41,7 @@ pub enum ControlOperation<P> {
     Command(CommandId),
     Submit(CommandSubmission<P>),
 }
+
 #[derive(Debug)]
 pub enum ControlReply {
     Status(AgentStatusResponse),
@@ -89,24 +92,31 @@ impl<P: CoreCommand, C: AgentClock, A: DeviceAdapter<P>> ControlPlane<P>
             }
         })
     }
+
     fn event_cursor(&self) -> u64 {
         self.core.event_cursor().get()
     }
+
     fn subscription_active(&self, token: &SubscriptionToken) -> Result<bool, CoreFatalError> {
         self.core.event_subscription_active(token)
     }
+
     fn drive(&mut self) -> Result<(), CoreFatalError> {
         self.executor.drive(&mut self.core)
     }
+
     fn heartbeat(&mut self) -> Result<(), CoreFatalError> {
         self.core.emit_heartbeat()
     }
+
     fn open_events(&mut self) -> Result<EventSubscription, SubscriptionError> {
         self.core.open_event_subscription()
     }
+
     fn poll_events(&mut self, token: &SubscriptionToken) -> Result<EventPoll, CoreFatalError> {
         self.core.poll_event(token)
     }
+
     fn close_events(&mut self, token: &SubscriptionToken) -> Result<bool, CoreFatalError> {
         self.core.close_event_subscription(token)
     }
@@ -118,11 +128,13 @@ pub(crate) enum Epoch {
     Stopped,
     Fatal,
 }
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ControlError {
     Busy,
     Closed,
 }
+
 #[derive(Debug)]
 pub(crate) enum Reply {
     Value(ControlReply),
@@ -130,11 +142,13 @@ pub(crate) enum Reply {
     Event(EventPoll),
     Refused,
 }
+
 enum Work<P> {
     Request(ControlOperation<P>),
     Open,
     Poll(u64),
 }
+
 struct Message<P> {
     work: Work<P>,
     reply: oneshot::Sender<Reply>,
@@ -181,20 +195,25 @@ impl<P> ControlHandle<P> {
             .map_err(|_| ControlError::Closed)?
             .map_err(|_| ControlError::Closed)
     }
+
     pub async fn request(&self, op: ControlOperation<P>) -> Result<Reply, ControlError> {
         self.send(Work::Request(op)).await
     }
+
     pub async fn open(&self) -> Result<Reply, ControlError> {
         self.send(Work::Open).await
     }
+
     pub async fn poll(&self, lease: u64) -> Result<Reply, ControlError> {
         self.send(Work::Poll(lease)).await
     }
+
     pub fn close(&self, lease: u64) {
         // One subscription, monotonic leases. A delayed old cleanup cannot erase
         // a newer one. This dedicated slot never needs ordinary mailbox capacity.
         self.cleanup.fetch_max(lease, Ordering::Release);
     }
+
     pub fn shutdown(&self) {
         self.stop.store(true, Ordering::Release);
     }
@@ -355,16 +374,20 @@ pub(crate) mod tests {
             "synthetic.signal"
         }
     }
+
     impl CoreCommand for Payload {
         type PayloadFingerprint = ();
         fn required_capability(&self) -> &'static str {
             "synthetic.signal"
         }
+
         fn effect_class(&self) -> EffectClass {
             EffectClass::DiscreteEffect
         }
+
         fn retained_payload_fingerprint(&self) {}
     }
+
     struct Adapter;
     struct Operation;
     impl DeviceAdapter<Payload> for Adapter {
@@ -373,11 +396,13 @@ pub(crate) mod tests {
             Ok(Operation)
         }
     }
+
     impl AdapterOperation for Operation {
         fn poll(&mut self, _: &mut edge_adapter_api::AdapterPollContext<'_>) -> AdapterPoll {
             AdapterPoll::Pending
         }
     }
+
     struct Clock(Arc<AtomicU64>);
     impl AgentClock for Clock {
         fn now(&self) -> AgentUptimeMs {
@@ -393,6 +418,7 @@ pub(crate) mod tests {
         heartbeat_observer: Option<mpsc::Sender<()>>,
         request_drive_observer: Option<Arc<AtomicUsize>>,
     }
+
     impl Plane {
         fn observe_request_drives(mut self, observer: Arc<AtomicUsize>) -> Self {
             self.request_drive_observer = Some(observer);
@@ -408,6 +434,7 @@ pub(crate) mod tests {
             self
         }
     }
+
     impl ControlPlane<Payload> for Plane {
         fn request(
             &mut self,
@@ -423,16 +450,20 @@ pub(crate) mod tests {
             }
             self.runtime.request(op)
         }
+
         fn drive(&mut self) -> Result<(), CoreFatalError> {
             self.drives.fetch_add(1, Ordering::Relaxed);
             self.runtime.drive()
         }
+
         fn event_cursor(&self) -> u64 {
             self.runtime.event_cursor()
         }
+
         fn subscription_active(&self, t: &SubscriptionToken) -> Result<bool, CoreFatalError> {
             self.runtime.subscription_active(t)
         }
+
         fn heartbeat(&mut self) -> Result<(), CoreFatalError> {
             self.runtime.heartbeat()?;
             if let Some(observer) = &self.heartbeat_observer {
@@ -440,12 +471,15 @@ pub(crate) mod tests {
             }
             Ok(())
         }
+
         fn open_events(&mut self) -> Result<EventSubscription, SubscriptionError> {
             self.runtime.open_events()
         }
+
         fn poll_events(&mut self, t: &SubscriptionToken) -> Result<EventPoll, CoreFatalError> {
             self.runtime.poll_events(t)
         }
+
         fn close_events(&mut self, t: &SubscriptionToken) -> Result<bool, CoreFatalError> {
             self.runtime.close_events(t)
         }
@@ -477,6 +511,7 @@ pub(crate) mod tests {
             request_drive_observer: None,
         }
     }
+
     #[tokio::test(flavor = "current_thread")]
     async fn mailbox_full_fails_before_core_and_idle_drive_is_independent() {
         let requests = Arc::new(AtomicUsize::new(0));
@@ -540,6 +575,7 @@ pub(crate) mod tests {
         handle.shutdown();
         thread.join().unwrap();
     }
+
     #[tokio::test(flavor = "current_thread")]
     async fn clock_regression_abandons_epoch_and_later_requests_cannot_run() {
         let clock = Arc::new(AtomicU64::new(100));
@@ -569,6 +605,7 @@ pub(crate) mod tests {
         assert_eq!(requests.load(Ordering::Relaxed), 1);
         thread.join().unwrap();
     }
+
     #[tokio::test(flavor = "current_thread")]
     async fn cancelled_open_reply_releases_subscriber_and_old_cleanup_cannot_close_new() {
         let (handle, thread) = spawn(
@@ -612,6 +649,7 @@ pub(crate) mod tests {
         handle.shutdown();
         thread.join().unwrap();
     }
+
     #[tokio::test(flavor = "current_thread")]
     async fn qualification_default_mailbox_64_cancelled_replies_cleanup_and_fair_drive() {
         let limits = ServerLimits::default();

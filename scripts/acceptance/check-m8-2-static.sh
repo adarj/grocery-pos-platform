@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 metadata="$(mktemp /tmp/m8-2-static.XXXXXX)"
 trap 'rm -f -- "$metadata"' EXIT

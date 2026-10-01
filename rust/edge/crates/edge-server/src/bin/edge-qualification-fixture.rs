@@ -20,31 +20,38 @@ enum Scenario {
     Rejected,
     BindingLost,
 }
+
 #[derive(Eq, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Payload {
     scenario: Scenario,
     token: u8,
 }
+
 impl StrictJsonSchema for Payload {}
 impl TypedCommandPayload for Payload {
     fn command_kind(&self) -> &'static str {
         "synthetic.signal"
     }
 }
+
 impl CoreCommand for Payload {
     type PayloadFingerprint = (Scenario, u8);
     fn required_capability(&self) -> &'static str {
         "synthetic.signal"
     }
+
     fn effect_class(&self) -> EffectClass {
         EffectClass::DiscreteEffect
     }
+
     fn retained_payload_fingerprint(&self) -> Self::PayloadFingerprint {
         (self.scenario, self.token)
     }
 }
+
 struct Decoder;
+
 impl CommandPayloadDecoder for Decoder {
     type Payload = Payload;
     fn decode_payload(
@@ -62,9 +69,11 @@ impl CommandPayloadDecoder for Decoder {
         Ok(payload)
     }
 }
+
 struct Adapter {
     begins: Rc<Cell<usize>>,
 }
+
 impl DeviceAdapter<Payload> for Adapter {
     type Operation = ScriptedOperation<Payload>;
     fn begin(&mut self, payload: Arc<Payload>) -> Result<Self::Operation, AdapterErrorCode> {
@@ -88,6 +97,7 @@ impl DeviceAdapter<Payload> for Adapter {
     }
 }
 type Runtime = ControlRuntime<Payload, MonotonicClock, Adapter>;
+
 struct Fixture {
     runtime: Runtime,
     begins: Rc<Cell<usize>>,
@@ -102,6 +112,7 @@ struct Fixture {
     flood_start: Option<std::time::Instant>,
     rebind: bool,
 }
+
 impl Fixture {
     fn metrics(&self) {
         // Only authored counters and request-attempt correlation, no payloads.
@@ -126,6 +137,7 @@ impl Fixture {
         std::fs::rename(next, &self.metrics).expect("fixture metric publication");
     }
 }
+
 impl ControlPlane<Payload> for Fixture {
     fn request(&mut self, op: ControlOperation<Payload>) -> Result<ControlReply, CoreFatalError> {
         self.requests_total += 1;
@@ -148,12 +160,15 @@ impl ControlPlane<Payload> for Fixture {
         self.metrics();
         Ok(result)
     }
+
     fn event_cursor(&self) -> u64 {
         self.runtime.event_cursor()
     }
+
     fn subscription_active(&self, t: &SubscriptionToken) -> Result<bool, CoreFatalError> {
         self.runtime.subscription_active(t)
     }
+
     fn drive(&mut self) -> Result<(), CoreFatalError> {
         self.runtime.drive()?;
         if self.rebind && self.posts >= 2 && self.begins.get() > 0 {
@@ -216,9 +231,11 @@ impl ControlPlane<Payload> for Fixture {
         self.metrics();
         Ok(())
     }
+
     fn heartbeat(&mut self) -> Result<(), CoreFatalError> {
         self.runtime.heartbeat()
     }
+
     fn open_events(&mut self) -> Result<EventSubscription, SubscriptionError> {
         let sub = self.runtime.open_events()?;
         if self.flood {
@@ -227,13 +244,16 @@ impl ControlPlane<Payload> for Fixture {
         }
         Ok(sub)
     }
+
     fn poll_events(&mut self, t: &SubscriptionToken) -> Result<EventPoll, CoreFatalError> {
         self.runtime.poll_events(t)
     }
+
     fn close_events(&mut self, t: &SubscriptionToken) -> Result<bool, CoreFatalError> {
         self.runtime.close_events(t)
     }
 }
+
 fn bound() -> BoundDeviceState {
     BoundDeviceState {
         availability: BoundAvailability::Ready,
@@ -241,6 +261,7 @@ fn bound() -> BoundDeviceState {
         capabilities: [Capability::new("synthetic.signal").unwrap()].into(),
     }
 }
+
 fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.len() < 3 {

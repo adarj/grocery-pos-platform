@@ -61,6 +61,7 @@ pub fn bounded_executor_queue<P>(
 }
 
 pub struct QueueProducer<P>(Rc<RefCell<QueueState<P>>>);
+
 pub struct QueueConsumer<P>(Rc<RefCell<QueueState<P>>>);
 
 /// Unforgeable held waiting slot. Drop releases capacity on every pre-commit

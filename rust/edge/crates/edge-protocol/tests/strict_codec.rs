@@ -23,6 +23,7 @@ fn limits(change: impl FnOnce(&mut JsonDecodeLimits)) -> JsonDecodeLimits {
 struct ObservePayload {
     count: u64,
 }
+
 impl StrictJsonSchema for ObservePayload {}
 
 #[derive(Debug, Eq, PartialEq, Deserialize)]
@@ -31,6 +32,7 @@ struct SignalPayload {
     level: u64,
     marker: String,
 }
+
 impl StrictJsonSchema for SignalPayload {}
 
 #[derive(Debug, Eq, PartialEq)]
@@ -38,6 +40,7 @@ enum SyntheticPayload {
     Observe(ObservePayload),
     Signal(SignalPayload),
 }
+
 impl TypedCommandPayload for SyntheticPayload {
     fn command_kind(&self) -> &'static str {
         match self {
@@ -48,6 +51,7 @@ impl TypedCommandPayload for SyntheticPayload {
 }
 
 struct SyntheticDecoder;
+
 impl CommandPayloadDecoder for SyntheticDecoder {
     type Payload = SyntheticPayload;
 
@@ -70,6 +74,7 @@ impl CommandPayloadDecoder for SyntheticDecoder {
 // Deliberately buggy compiled dispatch: the payload schema is real, but its
 // variant does not match the requested kind.
 struct CrossedDecoder;
+
 impl CommandPayloadDecoder for CrossedDecoder {
     type Payload = SyntheticPayload;
 

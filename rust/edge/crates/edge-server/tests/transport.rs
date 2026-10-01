@@ -8,11 +8,13 @@ use std::{
     time::{Duration, Instant},
 };
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
 struct Fixture {
     child: std::process::Child,
     dir: PathBuf,
     socket: PathBuf,
 }
+
 impl Fixture {
     fn new(mode: &str) -> Self {
         let dir = std::env::temp_dir().join(format!(
@@ -42,6 +44,7 @@ impl Fixture {
         }
         f
     }
+
     fn connect(&self) -> UnixStream {
         let stream = UnixStream::connect(&self.socket).unwrap();
         stream
@@ -49,6 +52,7 @@ impl Fixture {
             .unwrap();
         stream
     }
+
     fn request(&self, request: &[u8]) -> Vec<u8> {
         let mut stream = self.connect();
         stream.write_all(request).unwrap();
@@ -62,6 +66,7 @@ impl Fixture {
         response
     }
 }
+
 impl Drop for Fixture {
     fn drop(&mut self) {
         if let Some(stdin) = &mut self.child.stdin {
@@ -78,17 +83,21 @@ impl Drop for Fixture {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
+
 fn get(path: &str) -> Vec<u8> {
     format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").into_bytes()
 }
+
 fn post(body: &str, media: &str) -> Vec<u8> {
     format!("POST /v1/commands HTTP/1.1\r\nHost: localhost\r\nContent-Type: {media}\r\nContent-Length: {}\r\n\r\n{body}",body.len()).into_bytes()
 }
+
 fn command(id: &str, extra: &str) -> String {
     format!(
         r#"{{"request_id":"request-{id}","command_id":"{id}","expected_agent_instance_id":"fixture-agent","device_id":"fixture.device","expected_binding_instance_id":"fixture-binding-a","not_after_agent_uptime_ms":50000,"kind":"synthetic.signal","timeout_ms":10000,"payload":{{"scenario":"success","token":1}}{extra}}}"#
     )
 }
+
 fn status(response: &[u8]) -> u16 {
     std::str::from_utf8(response)
         .unwrap()
@@ -98,6 +107,7 @@ fn status(response: &[u8]) -> u16 {
         .parse()
         .unwrap()
 }
+
 #[test]
 fn real_uds_routes_strict_codec_and_command_mapping() {
     let f = Fixture::new("");
@@ -195,6 +205,7 @@ fn real_uds_routes_strict_codec_and_command_mapping() {
         422
     );
 }
+
 #[test]
 fn queue_and_cache_capacity_reject_before_creating_another_record() {
     for (mode, code) in [
@@ -218,6 +229,7 @@ fn queue_and_cache_capacity_reject_before_creating_another_record() {
         assert_eq!(status(&f.request(&get("/v1/commands/refused"))), 404);
     }
 }
+
 #[test]
 fn headers_are_bounded_and_pipelining_is_not_served() {
     let f = Fixture::new("");
@@ -244,6 +256,7 @@ fn headers_are_bounded_and_pipelining_is_not_served() {
         1
     );
 }
+
 #[test]
 fn lost_response_keeps_one_record_and_one_physical_start() {
     let f = Fixture::new("lost");
@@ -255,6 +268,7 @@ fn lost_response_keeps_one_record_and_one_physical_start() {
     let metrics = std::fs::read_to_string(f.dir.join("metrics")).unwrap();
     assert_eq!(metrics.lines().take(3).collect::<Vec<_>>(), ["2", "1", "1"]);
 }
+
 #[test]
 fn event_stream_first_snapshot_second_subscriber_and_disconnect_cleanup() {
     let f = Fixture::new("");

@@ -34,19 +34,23 @@ pub enum ServerError {
     ControlThread,
     FatalEpoch,
 }
+
 impl fmt::Display for ServerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("Edge transport stopped")
     }
 }
+
 impl std::error::Error for ServerError {}
 #[derive(Clone, Copy, Debug)]
 struct ConnectionClosed;
+
 impl fmt::Display for ConnectionClosed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("Edge connection closed")
     }
 }
+
 impl std::error::Error for ConnectionClosed {}
 type ResponseBody = UnsyncBoxBody<Bytes, ConnectionClosed>;
 
@@ -158,6 +162,7 @@ fn json<T: serde::Serialize>(
         )
         .expect("authored response"))
 }
+
 fn error(
     status: StatusCode,
     code: &'static str,
@@ -176,6 +181,7 @@ fn error(
         limit,
     )
 }
+
 fn rejection(value: AdmissionRejection) -> (StatusCode, &'static str) {
     use AdmissionRejection::*;
     match value {
@@ -198,6 +204,7 @@ fn rejection(value: AdmissionRejection) -> (StatusCode, &'static str) {
         ExecutorUnavailable => (StatusCode::SERVICE_UNAVAILABLE, "edge.executor_unavailable"),
     }
 }
+
 fn segment(path: &str, prefix: &str) -> Option<String> {
     let rest = path.strip_prefix(prefix)?;
     if rest.is_empty() || rest.contains('/') {
@@ -216,6 +223,7 @@ fn segment(path: &str, prefix: &str) -> Option<String> {
     }
     String::from_utf8(decoded).ok()
 }
+
 async fn value<P>(
     control: &ControlHandle<P>,
     op: ControlOperation<P>,
@@ -236,6 +244,7 @@ async fn value<P>(
         _ => Err(ConnectionClosed),
     }
 }
+
 async fn handle<P: CoreCommand, D: CommandPayloadDecoder<Payload = P>>(
     request: Request<Incoming>,
     control: ControlHandle<P>,
@@ -522,6 +531,7 @@ fn event_bytes(event: &EdgeEvent, limit: usize) -> Result<Bytes, ConnectionClose
     bytes.push(b'\n');
     Ok(Bytes::from(bytes))
 }
+
 struct LeaseGuard<P> {
     control: ControlHandle<P>,
     lease: u64,
@@ -531,15 +541,18 @@ impl<P> Drop for LeaseGuard<P> {
         self.control.close(self.lease);
     }
 }
+
 struct EventBody {
     receiver: mpsc::Receiver<Result<Frame<Bytes>, ConnectionClosed>>,
     task: tokio::task::JoinHandle<()>,
 }
+
 impl Drop for EventBody {
     fn drop(&mut self) {
         self.task.abort();
     }
 }
+
 impl Body for EventBody {
     type Data = Bytes;
     type Error = ConnectionClosed;
@@ -550,6 +563,7 @@ impl Body for EventBody {
         self.receiver.poll_recv(cx)
     }
 }
+
 async fn stream_events<P: CoreCommand>(
     guard: LeaseGuard<P>,
     sender: mpsc::Sender<Result<Frame<Bytes>, ConnectionClosed>>,
@@ -590,6 +604,7 @@ async fn stream_events<P: CoreCommand>(
                         .map_err(|_| ConnectionClosed)?;
                 }
             }
+
             #[cfg(not(feature = "qualification"))]
             permit.send(Ok(Frame::data(bytes)));
         }
@@ -632,6 +647,7 @@ mod tests {
             Ok(Payload)
         }
     }
+
     async fn server(
         limits: ServerLimits,
         uid: u32,
@@ -665,6 +681,7 @@ mod tests {
         ));
         (socket, requests, clock, stop, task)
     }
+
     async fn request(path: &std::path::Path, bytes: &[u8]) -> Vec<u8> {
         let mut socket = tokio::net::UnixStream::connect(path).await.unwrap();
         socket.write_all(bytes).await.unwrap();
@@ -747,6 +764,7 @@ mod tests {
             "retiring waiter stole the current stream's event wakeup"
         );
     }
+
     #[tokio::test(flavor = "current_thread")]
     async fn mailbox_saturation_maps_to_503_without_another_core_request() {
         let requests = Arc::new(AtomicUsize::new(0));
@@ -791,6 +809,7 @@ mod tests {
         control.shutdown();
         thread.join().unwrap();
     }
+
     #[tokio::test(flavor = "current_thread")]
     async fn wrong_peer_is_closed_before_http_or_core_and_real_same_uid_passes() {
         let uid = rustix::process::getuid().as_raw();
@@ -809,6 +828,7 @@ mod tests {
         task.await.unwrap().unwrap();
         std::fs::remove_file(path).unwrap();
     }
+
     #[tokio::test(flavor = "current_thread")]
     async fn connection_limit_header_deadline_and_body_deadline_are_independent_of_core() {
         let limits = ServerLimits {
@@ -838,6 +858,7 @@ mod tests {
         task.await.unwrap().unwrap();
         std::fs::remove_file(path).unwrap();
     }
+
     #[tokio::test(flavor = "current_thread")]
     async fn core_fatal_stops_listener_instead_of_serving_recoverable_500() {
         let (path, _, clock, _stop, task) =
@@ -857,6 +878,7 @@ mod tests {
         );
         std::fs::remove_file(path).unwrap();
     }
+
     #[tokio::test(flavor = "current_thread")]
     async fn qualification_default_16_connections_bound_before_route_work() {
         let limits = ServerLimits::default();

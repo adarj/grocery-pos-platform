@@ -1,75 +1,177 @@
 #lang racket/base
+
 (require json racket/list racket/port racket/match)
-(provide (struct-out edge-health-state) (struct-out edge-agent-status)
-         (struct-out edge-device-snapshot) (struct-out edge-command-state)
-         (struct-out edge-protocol-error) (struct-out edge-command-response)
-         (struct-out edge-snapshot-event) (struct-out edge-device-event)
-         (struct-out edge-command-event) (struct-out edge-heartbeat)
+
+(provide (struct-out edge-health-state)
+         (struct-out edge-agent-status)
+         (struct-out edge-device-snapshot)
+         (struct-out edge-command-state)
+         (struct-out edge-protocol-error)
+         (struct-out edge-command-response)
+         (struct-out edge-snapshot-event)
+         (struct-out edge-device-event)
+         (struct-out edge-command-event)
+         (struct-out edge-heartbeat)
          (struct-out exn:fail:edge-protocol)
-         parse-edge-health parse-edge-status parse-edge-devices parse-edge-device
-         parse-edge-command parse-edge-command-response parse-edge-error parse-edge-event
-         decode-edge-json read-edge-record read-edge-body edge-id? edge-u64?
-         event-record-max-bytes non-stream-max-bytes)
+         parse-edge-health
+         parse-edge-status
+         parse-edge-devices
+         parse-edge-device
+         parse-edge-command
+         parse-edge-command-response
+         parse-edge-error
+         parse-edge-event
+         decode-edge-json
+         read-edge-record
+         read-edge-body
+         edge-id?
+         edge-u64?
+         event-record-max-bytes
+         non-stream-max-bytes)
 
 (define event-record-max-bytes (* 64 1024))
+
 (define non-stream-max-bytes (* 256 1024))
+
 (struct exn:fail:edge-protocol exn:fail (code) #:transparent)
+
 (define (invalid [code 'invalid-response])
-  (raise (exn:fail:edge-protocol "Invalid Edge protocol response" (current-continuation-marks) code)))
+  (raise
+   (exn:fail:edge-protocol "Invalid Edge protocol response" (current-continuation-marks) code)))
+
 ;; Immutable public values. No raw response hashes or command payloads escape parsing.
 (struct edge-health-state (agent-id major minor) #:transparent)
+
 (struct edge-agent-status (agent-id major minor uptime) #:transparent)
-(struct edge-device-snapshot (agent-id device-id binding-id revision adapter availability conditions capabilities) #:transparent)
-(struct edge-command-state (agent-id command-id device-id binding-id kind accepted phase outcome evidence error terminal) #:transparent)
+
+(struct edge-device-snapshot
+  (agent-id device-id binding-id revision adapter availability conditions capabilities)
+  #:transparent)
+
+(struct edge-command-state
+  (agent-id command-id device-id binding-id kind accepted phase outcome evidence error terminal)
+  #:transparent)
+
 (struct edge-protocol-error (code message request-id))
+
 (struct edge-command-response (request-id command) #:transparent)
+
 (struct edge-snapshot-event (agent-id cursor uptime devices) #:transparent)
+
 (struct edge-device-event (agent-id sequence device) #:transparent)
+
 (struct edge-command-event (agent-id sequence command) #:transparent)
+
 (struct edge-heartbeat (agent-id uptime) #:transparent)
-(define (edge-id? v) (and (string? v) (positive? (bytes-length (string->bytes/utf-8 v))) (<= (bytes-length (string->bytes/utf-8 v)) 256)))
-(define (edge-u64? v) (and (exact-integer? v) (<= 0 v (sub1 (expt 2 64)))))
-(define (checked predicate v) (unless (predicate v) (invalid)) v)
+
+(define (edge-id? v)
+  (and
+   (string? v)
+   (positive? (bytes-length (string->bytes/utf-8 v)))
+   (<= (bytes-length (string->bytes/utf-8 v)) 256)))
+
+(define (edge-u64? v)
+  (and (exact-integer? v) (<= 0 v (sub1 (expt 2 64)))))
+
+(define (checked predicate v)
+  (unless (predicate v)
+    (invalid))
+  v)
+
 (define (field obj key [pred values])
-  (unless (hash? obj) (invalid))
+  (unless (hash? obj)
+    (invalid))
   (checked pred (hash-ref obj key (lambda () (invalid)))))
-(define (id obj key) (string->immutable-string (field obj key edge-id?)))
-(define (uint obj key) (field obj key edge-u64?))
-(define (enum obj key allowed) (define v (field obj key string?)) (unless (member v allowed) (invalid 'unknown-safety-enum)) (string->symbol v))
-(define (optional-id obj key) (define v (field obj key)) (if (eq? v 'null) #f (string->immutable-string (checked edge-id? v))))
+
+(define (id obj key)
+  (string->immutable-string (field obj key edge-id?)))
+
+(define (uint obj key)
+  (field obj key edge-u64?))
+
+(define (enum obj key allowed)
+  (define v (field obj key string?))
+  (unless (member v allowed)
+    (invalid 'unknown-safety-enum))
+  (string->symbol v))
+
+(define (optional-id obj key)
+  (define v (field obj key))
+  (if (eq? v 'null) #f (string->immutable-string (checked edge-id? v))))
+
 (define (names obj key)
   (define xs (field obj key list?))
-  (unless (and (<= (length xs) 4096) (andmap edge-id? xs) (= (length xs) (length (remove-duplicates xs)))) (invalid))
+  (unless (and
+           (<= (length xs) 4096)
+           (andmap edge-id? xs)
+           (= (length xs) (length (remove-duplicates xs))))
+    (invalid))
   (map string->immutable-string xs))
+
 (define (version obj)
   (define v (field obj 'protocol_version hash?))
-  (unless (= (uint v 'major) 1) (invalid 'unsupported-version))
-  (define minor (uint v 'minor)) (unless (<= minor 65535) (invalid)) (values 1 minor))
+  (unless (= (uint v 'major) 1)
+    (invalid 'unsupported-version))
+  (define minor (uint v 'minor))
+  (unless (<= minor 65535)
+    (invalid))
+  (values 1 minor))
+
 (define (parse-edge-health obj)
-  (define-values (major minor) (version obj)) (edge-health-state (id obj 'agent_instance_id) major minor))
+  (define-values (major minor) (version obj))
+  (edge-health-state (id obj 'agent_instance_id) major minor))
+
 (define (parse-edge-status obj)
-  (define-values (major minor) (version obj)) (edge-agent-status (id obj 'agent_instance_id) major minor (uint obj 'agent_uptime_ms)))
+  (define-values (major minor) (version obj))
+  (edge-agent-status (id obj 'agent_instance_id) major minor (uint obj 'agent_uptime_ms)))
+
 (define (parse-edge-device obj)
   (define binding (optional-id obj 'binding_instance_id))
-  (define availability (enum obj 'availability '("disabled" "absent" "connecting" "ready" "degraded" "faulted")))
+  (define availability
+    (enum obj 'availability '("disabled" "absent" "connecting" "ready" "degraded" "faulted")))
   (define caps (names obj 'capabilities))
-  (unless (if (memq availability '(ready degraded)) binding (and (not binding) (null? caps))) (invalid 'binding-state))
-  (edge-device-snapshot (id obj 'agent_instance_id) (id obj 'device_id) binding (uint obj 'state_revision)
-                        (id obj 'adapter_kind) availability (names obj 'conditions) caps))
+  (unless (if (memq availability '(ready degraded)) binding (and (not binding) (null? caps)))
+    (invalid 'binding-state))
+  (edge-device-snapshot
+   (id obj 'agent_instance_id)
+   (id obj 'device_id)
+   binding
+   (uint obj 'state_revision)
+   (id obj 'adapter_kind)
+   availability
+   (names obj 'conditions)
+   caps))
+
 (define (devices obj agent)
-  (define xs (field obj 'devices list?)) (unless (<= (length xs) 4096) (invalid))
+  (define xs (field obj 'devices list?))
+  (unless (<= (length xs) 4096)
+    (invalid))
   (define ds (map parse-edge-device xs))
-  (unless (and (andmap (lambda (d) (equal? agent (edge-device-snapshot-agent-id d))) ds)
-               (= (length ds) (length (remove-duplicates (map edge-device-snapshot-device-id ds))))) (invalid)) ds)
-(define (parse-edge-devices obj) (devices obj (id obj 'agent_instance_id)))
+  (unless (and
+           (andmap (lambda (d) (equal? agent (edge-device-snapshot-agent-id d))) ds)
+           (= (length ds) (length (remove-duplicates (map edge-device-snapshot-device-id ds)))))
+    (invalid))
+  ds)
+
+(define (parse-edge-devices obj)
+  (devices obj (id obj 'agent_instance_id)))
+
 (define (parse-edge-error obj)
   (define error (field obj 'error hash?))
   (define message (hash-ref error 'message #f))
-  (unless (or (not message) (and (string? message) (<= (bytes-length (string->bytes/utf-8 message)) 1024))) (invalid))
+  (unless (or
+           (not message)
+           (and (string? message) (<= (bytes-length (string->bytes/utf-8 message)) 1024)))
+    (invalid))
   (define request (hash-ref obj 'request_id #f))
-  (unless (or (not request) (edge-id? request)) (invalid))
+  (unless (or (not request) (edge-id? request))
+    (invalid))
   ;; Do not print hostile message content in client diagnostics.
-  (edge-protocol-error (id error 'code) (and message (string->immutable-string message)) (and request (string->immutable-string request))))
+  (edge-protocol-error
+   (id error 'code)
+   (and message (string->immutable-string message))
+   (and request (string->immutable-string request))))
+
 (define (parse-edge-command obj)
   (define phase (enum obj 'phase '("accepted" "executing" "terminal")))
   (define accepted (uint obj 'accepted_agent_uptime_ms))
@@ -78,36 +180,70 @@
         (let ([outcome (enum obj 'outcome '("succeeded" "rejected" "failed" "unknown"))]
               [evidence (enum obj 'effect_evidence '("none" "possible" "confirmed"))]
               [terminal (uint obj 'terminal_agent_uptime_ms)])
-          (unless (and (>= terminal accepted) (member (cons outcome evidence) '((rejected . none) (failed . none) (failed . possible) (unknown . possible) (succeeded . confirmed)))) (invalid 'terminal-pair))
+          (unless (and
+                   (>= terminal accepted)
+                   (member
+                    (cons outcome evidence)
+                    '((rejected . none)
+                      (failed . none)
+                      (failed . possible)
+                      (unknown . possible)
+                      (succeeded . confirmed))))
+            (invalid 'terminal-pair))
           (values outcome evidence (and (hash-has-key? obj 'error) (parse-edge-error obj)) terminal))
         (values #f #f #f #f)))
-  (edge-command-state (id obj 'agent_instance_id) (id obj 'command_id) (id obj 'device_id) (id obj 'binding_instance_id)
-                      (id obj 'kind) accepted phase outcome evidence error terminal))
-(define (parse-edge-command-response obj) (edge-command-response (id obj 'request_id) (parse-edge-command (field obj 'command hash?))))
+  (edge-command-state
+   (id obj 'agent_instance_id)
+   (id obj 'command_id)
+   (id obj 'device_id)
+   (id obj 'binding_instance_id)
+   (id obj 'kind)
+   accepted
+   phase
+   outcome
+   evidence
+   error
+   terminal))
+
+(define (parse-edge-command-response obj)
+  (edge-command-response (id obj 'request_id) (parse-edge-command (field obj 'command hash?))))
+
 (define (parse-edge-event obj)
   (define agent (id obj 'agent_instance_id))
   (case (enum obj 'type '("snapshot" "device.state_changed" "command.state_changed" "heartbeat"))
-    [(snapshot) (edge-snapshot-event agent (uint obj 'event_cursor) (uint obj 'agent_uptime_ms) (devices obj agent))]
+    [(snapshot)
+     (edge-snapshot-event
+      agent
+      (uint obj 'event_cursor)
+      (uint obj 'agent_uptime_ms)
+      (devices obj agent))]
     [(heartbeat) (edge-heartbeat agent (uint obj 'agent_uptime_ms))]
     [(device.state_changed)
      (define device (parse-edge-device (field obj 'device hash?)))
-     (unless (and (equal? agent (edge-device-snapshot-agent-id device))
-                  (equal? (id obj 'device_id) (edge-device-snapshot-device-id device))
-                  (equal? (optional-id obj 'binding_instance_id) (edge-device-snapshot-binding-id device))
-                  (= (uint obj 'state_revision) (edge-device-snapshot-revision device))) (invalid 'event-metadata))
+     (unless (and
+              (equal? agent (edge-device-snapshot-agent-id device))
+              (equal? (id obj 'device_id) (edge-device-snapshot-device-id device))
+              (equal?
+               (optional-id obj 'binding_instance_id)
+               (edge-device-snapshot-binding-id device))
+              (= (uint obj 'state_revision) (edge-device-snapshot-revision device)))
+       (invalid 'event-metadata))
      (edge-device-event agent (uint obj 'sequence) device)]
     [(command.state_changed)
      (define command (parse-edge-command (field obj 'command hash?)))
-     (unless (equal? agent (edge-command-state-agent-id command)) (invalid 'event-metadata))
+     (unless (equal? agent (edge-command-state-agent-id command))
+       (invalid 'event-metadata))
      (edge-command-event agent (uint obj 'sequence) command)]))
 
 (define (decode-edge-json bytes)
-  (with-handlers ([exn:fail:edge-protocol? raise] [exn:fail? (lambda (_) (invalid 'malformed-json))])
+  (with-handlers ([exn:fail:edge-protocol? raise]
+                  [exn:fail? (lambda (_) (invalid 'malformed-json))])
     ;; Validate UTF-8 without replacement, then require exactly one document.
     (bytes->string/utf-8 bytes #f)
     (define in (open-input-bytes bytes))
     (define value (read-json in #:replace-malformed-surrogate? #f))
-    (unless (and (hash? value) (eof-object? (read-json in))) (invalid 'malformed-json))
+    (unless (and (hash? value) (eof-object? (read-json in)))
+      (invalid 'malformed-json))
     value))
 
 ;; Byte-oriented framing bounds allocation BEFORE consuming an unlimited line.
@@ -116,14 +252,22 @@
   (define buffer (make-bytes limit))
   (let loop ([n 0])
     (define b (read-byte in))
-    (cond [(eof-object? b) (if (zero? n) eof (invalid 'partial-record))]
-          [(= b 10) (when (zero? n) (invalid 'empty-record)) (subbytes buffer 0 n)]
-          [(= n limit) (invalid 'record-too-large)]
-          [else (bytes-set! buffer n b) (loop (add1 n))])))
+    (cond
+      [(eof-object? b) (if (zero? n) eof (invalid 'partial-record))]
+      [(= b 10)
+       (when (zero? n)
+         (invalid 'empty-record))
+       (subbytes buffer 0 n)]
+      [(= n limit) (invalid 'record-too-large)]
+      [else
+       (bytes-set! buffer n b)
+       (loop (add1 n))])))
+
 (define (read-edge-body in [limit non-stream-max-bytes])
   (define buffer (make-bytes (add1 limit)))
   (let loop ([n 0])
     (define count (read-bytes-avail! buffer in n (bytes-length buffer)))
-    (cond [(eof-object? count) (subbytes buffer 0 n)]
-          [(> (+ n count) limit) (invalid 'response-too-large)]
-          [else (loop (+ n count))])))
+    (cond
+      [(eof-object? count) (subbytes buffer 0 n)]
+      [(> (+ n count) limit) (invalid 'response-too-large)]
+      [else (loop (+ n count))])))

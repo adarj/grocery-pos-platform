@@ -1,23 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
 # Isolated runner control-flow tests. No real repository campaign or ledger.
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 scratch="$(mktemp -d /tmp/m8-2-runner-test.XXXXXX)"
 runner_pid=''
+
 cleanup() {
-  if [[ -n "$runner_pid" ]]; then kill -TERM "$runner_pid" 2>/dev/null || true; wait "$runner_pid" 2>/dev/null || true; fi
+  if [[ -n "$runner_pid" ]]; then
+    kill -TERM "$runner_pid" 2>/dev/null || true
+    wait "$runner_pid" 2>/dev/null || true
+  fi
   rm -rf -- "$scratch"
 }
+
 trap cleanup EXIT
+
 fixture="$scratch/repository"
 mkdir -p "$fixture/scripts/acceptance" "$fixture/docs/acceptance/m8.2" "$scratch/bin"
 cp "$repository_root/scripts/acceptance/"{accept-m8-2.sh,m8-2-report.rkt} "$fixture/scripts/acceptance/"
 real_report="$repository_root/docs/acceptance/m8.2/acceptance-results.json"
-if [[ -f "$real_report" ]]; then original_report="$(sha256sum "$real_report")"; else original_report=absent; fi
+if [[ -f "$real_report" ]]; then
+  original_report="$(sha256sum "$real_report")"
+else
+  original_report=absent
+fi
 original_index="$(git -C "$repository_root" diff --cached --binary | sha256sum)"
 export M82_REAL_RACKET="$(command -v racket)" M82_REAL_JQ="$(command -v jq)"
 export M82_TEST_STATE="$scratch/state"
 mkdir -p "$M82_TEST_STATE"
+
 cat >"$scratch/mock" <<'MOCK'
 #!/usr/bin/bash
 set -eu
@@ -79,19 +91,36 @@ case "${0##*/}" in
   rustc) printf '%s\n' 'rustc mock' ;;
 esac
 MOCK
+
 chmod +x "$scratch/mock"
-for name in git bash timeout racket jq mv rustc; do cp "$scratch/mock" "$scratch/bin/$name"; done
-run_runner() { PATH="$scratch/bin:$PATH" M82_TEST_FAILURE="$1" /usr/bin/bash "$fixture/scripts/acceptance/accept-m8-2.sh"; }
+for name in git bash timeout racket jq mv rustc; do
+  cp "$scratch/mock" "$scratch/bin/$name"
+done
+
+run_runner() {
+  PATH="$scratch/bin:$PATH" M82_TEST_FAILURE="$1" \
+    /usr/bin/bash "$fixture/scripts/acceptance/accept-m8-2.sh"
+}
+
 # A previous valid synthetic ledger must survive all infrastructure failures.
 run_runner '' >"$scratch/baseline.log" 2>&1
 cp "$fixture/docs/acceptance/m8.2/acceptance-results.json" "$scratch/previous.json"
-failures=(dirty tracked staged untracked deleted renamed status-error head-error final-status-error final-head-error
-          source-mid untracked-mid staged-mid head-mid source-at-summary source-after-guard head-after-guard
-          command blocked append corrupt-append log-open summary report publish publish-report locked)
+failures=(
+  dirty tracked staged untracked deleted renamed status-error head-error
+  final-status-error final-head-error source-mid untracked-mid staged-mid head-mid
+  source-at-summary source-after-guard head-after-guard command blocked append
+  corrupt-append log-open summary report publish publish-report locked
+)
 if (( $# )); then
-  for requested in "$@"; do [[ " ${failures[*]} " == *" $requested "* ]] || { echo 'unknown isolated runner case' >&2; exit 2; }; done
+  for requested in "$@"; do
+    [[ " ${failures[*]} " == *" $requested "* ]] || {
+      echo 'unknown isolated runner case' >&2
+      exit 2
+    }
+  done
   failures=("$@")
 fi
+
 for failure in "${failures[@]}"; do
   rm -rf -- "$fixture/.local" "$M82_TEST_STATE"
   mkdir -p "$fixture/.local/acceptance/m8-2" "$M82_TEST_STATE"
@@ -102,7 +131,8 @@ for failure in "${failures[@]}"; do
   [[ "$failure" != log-open ]] || mkdir "$fixture/.local/acceptance/m8-2/M8.2-A-001.log"
   [[ "$failure" != locked ]] || mkdir "$fixture/.local/acceptance/m8-2/run.lock"
   if run_runner "$failure" >"$scratch/$failure.log" 2>&1; then
-    printf 'm8-2-runner-test failed: %s returned success\n' "$failure" >&2; exit 1
+    printf 'm8-2-runner-test failed: %s returned success\n' "$failure" >&2
+    exit 1
   fi
   if [[ "$failure" == blocked ]]; then
     "$M82_REAL_JQ" -e '.overall_status=="conditional" and .test_groups[0].status=="blocked" and .test_groups[13].status=="passed" and (.test_groups|length)==14' "$fixture/docs/acceptance/m8.2/acceptance-results.json" >/dev/null
@@ -117,26 +147,57 @@ for failure in "${failures[@]}"; do
   esac
   printf 'm8-2-runner-test passed: %s\n' "$failure"
 done
+
 rm -rf -- "$fixture/.local" "$M82_TEST_STATE"
 mkdir -p "$M82_TEST_STATE"
 run_runner '' >"$scratch/success.log" 2>&1
 "$M82_REAL_JQ" -e '.overall_status=="passing" and (.test_groups|length)==14' "$fixture/docs/acceptance/m8.2/acceptance-results.json" >/dev/null
+
 # Interrupt an owned, genuinely supervised child. A second runner cannot steal
 # its logs/summary; cancellation cannot publish or leave the child alive.
 cp "$fixture/docs/acceptance/m8.2/acceptance-results.json" "$scratch/before-signal.json"
-PATH="$scratch/bin:$PATH" M82_TEST_FAILURE=signal /usr/bin/bash "$fixture/scripts/acceptance/accept-m8-2.sh" >"$scratch/signal.log" 2>&1 &
+PATH="$scratch/bin:$PATH" M82_TEST_FAILURE=signal \
+  /usr/bin/bash "$fixture/scripts/acceptance/accept-m8-2.sh" >"$scratch/signal.log" 2>&1 &
 runner_pid=$!
-for _ in {1..200}; do [[ -s "$M82_TEST_STATE/child.pid" ]] && break; sleep .01; done
-[[ -s "$M82_TEST_STATE/child.pid" ]] || { kill "$runner_pid"; wait "$runner_pid" || true; exit 1; }
-if run_runner '' >"$scratch/concurrent.log" 2>&1; then echo 'concurrent runner accepted' >&2; kill "$runner_pid"; wait "$runner_pid" || true; exit 1; fi
+for _ in {1..200}; do
+  [[ -s "$M82_TEST_STATE/child.pid" ]] && break
+  sleep .01
+done
+[[ -s "$M82_TEST_STATE/child.pid" ]] || {
+  kill "$runner_pid"
+  wait "$runner_pid" || true
+  exit 1
+}
+if run_runner '' >"$scratch/concurrent.log" 2>&1; then
+  echo 'concurrent runner accepted' >&2
+  kill "$runner_pid"
+  wait "$runner_pid" || true
+  exit 1
+fi
 kill -TERM "$runner_pid"
-if wait "$runner_pid"; then echo 'interrupted runner returned success' >&2; exit 1; fi
+if wait "$runner_pid"; then
+  echo 'interrupted runner returned success' >&2
+  exit 1
+fi
 runner_pid=''
 child_pid="$(cat "$M82_TEST_STATE/child.pid")"
-for _ in {1..200}; do if ! kill -0 "$child_pid" 2>/dev/null; then break; fi; sleep .01; done
-if kill -0 "$child_pid" 2>/dev/null; then kill -KILL "$child_pid"; echo 'interrupted child survived' >&2; exit 1; fi
+for _ in {1..200}; do
+  if ! kill -0 "$child_pid" 2>/dev/null; then
+    break
+  fi
+  sleep .01
+done
+if kill -0 "$child_pid" 2>/dev/null; then
+  kill -KILL "$child_pid"
+  echo 'interrupted child survived' >&2
+  exit 1
+fi
 cmp "$scratch/before-signal.json" "$fixture/docs/acceptance/m8.2/acceptance-results.json"
 [[ ! -e "$fixture/.local/acceptance/m8-2/run.lock" ]]
-if [[ "$original_report" == absent ]]; then [[ ! -f "$real_report" ]]; else [[ "$(sha256sum "$real_report")" == "$original_report" ]]; fi
+if [[ "$original_report" == absent ]]; then
+  [[ ! -f "$real_report" ]]
+else
+  [[ "$(sha256sum "$real_report")" == "$original_report" ]]
+fi
 [[ "$(git -C "$repository_root" diff --cached --binary | sha256sum)" == "$original_index" ]]
 printf '%s\n' 'm8-2-runner-test passed: isolated mocks, stale evidence reset, prior ledger preserved, cancellation/concurrent exclusion'

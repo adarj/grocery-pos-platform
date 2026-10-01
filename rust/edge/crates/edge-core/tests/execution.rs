@@ -34,9 +34,11 @@ impl CoreCommand for Payload {
     fn required_capability(&self) -> &'static str {
         self.command_kind()
     }
+
     fn effect_class(&self) -> EffectClass {
         EffectClass::DiscreteEffect
     }
+
     fn retained_payload_fingerprint(&self) -> PrivateFingerprint {
         PrivateFingerprint(self.resource, self.marker.clone())
     }
@@ -48,6 +50,7 @@ struct PrivateFingerprint(u8, String);
 
 #[derive(Clone)]
 struct Clock(Rc<Cell<u64>>);
+
 impl AgentClock for Clock {
     fn now(&self) -> AgentUptimeMs {
         AgentUptimeMs::new(self.0.get())
@@ -60,6 +63,7 @@ struct ObservedAdapter {
     inner: ScriptedAdapter,
     weak: Rc<RefCell<Vec<Weak<Payload>>>>,
 }
+
 impl DeviceAdapter<Payload> for ObservedAdapter {
     type Operation = ScriptedOperation<Payload>;
     fn begin(&mut self, payload: Arc<Payload>) -> Result<Self::Operation, AdapterErrorCode> {
@@ -69,6 +73,7 @@ impl DeviceAdapter<Payload> for ObservedAdapter {
 }
 
 type Core = CoreActor<Payload, Clock, QueueProducer<Payload>>;
+
 struct Fixture {
     core: Core,
     executor: ExecutorSupervisor<Payload, ObservedAdapter>,
@@ -80,9 +85,11 @@ struct Fixture {
 fn id(value: &str) -> CommandId {
     CommandId::new(value).unwrap()
 }
+
 fn device() -> DeviceId {
     DeviceId::new("synthetic.slot").unwrap()
 }
+
 fn binding() -> BindingInstanceId {
     BindingInstanceId::new("binding-a").unwrap()
 }
@@ -217,9 +224,11 @@ impl Fixture {
             AdmissionDecision::Accepted(CommandState::Accepted(_))
         ));
     }
+
     fn drive(&mut self) {
         self.executor.drive(&mut self.core).unwrap();
     }
+
     fn terminal(
         &self,
         name: &str,
@@ -233,6 +242,7 @@ impl Fixture {
         assert_eq!(state.effect_evidence, evidence);
         state
     }
+
     fn assert_fenced(&mut self) {
         assert_eq!(
             self.core.submit_command(command("new", 7, 100)).unwrap(),
@@ -742,6 +752,7 @@ struct SpecialAdapter {
     weak: Rc<RefCell<Option<Weak<Payload>>>>,
     polls: Rc<Cell<usize>>,
 }
+
 struct SpecialOperation {
     _payload: Arc<Payload>,
     clock: Clock,
@@ -749,6 +760,7 @@ struct SpecialOperation {
     advance_during_poll: Option<u64>,
     polls: Rc<Cell<usize>>,
 }
+
 impl DeviceAdapter<Payload> for SpecialAdapter {
     type Operation = SpecialOperation;
     fn begin(&mut self, payload: Arc<Payload>) -> Result<Self::Operation, AdapterErrorCode> {
@@ -768,6 +780,7 @@ impl DeviceAdapter<Payload> for SpecialAdapter {
         })
     }
 }
+
 impl AdapterOperation for SpecialOperation {
     fn poll(&mut self, context: &mut AdapterPollContext<'_>) -> AdapterPoll {
         self.polls.set(self.polls.get() + 1);
@@ -782,6 +795,7 @@ impl AdapterOperation for SpecialOperation {
         }
     }
 }
+
 impl Drop for SpecialOperation {
     fn drop(&mut self) {
         if self.panic_drop {
@@ -952,12 +966,14 @@ struct CleanupWitnessAdapter {
     dropped_at: Rc<Cell<Option<u64>>>,
     polls: Rc<Cell<usize>>,
 }
+
 struct CleanupWitnessOperation {
     clock: Clock,
     dropped_at: Rc<Cell<Option<u64>>>,
     polls: Rc<Cell<usize>>,
     _payload: Arc<Payload>,
 }
+
 impl DeviceAdapter<Payload> for CleanupWitnessAdapter {
     type Operation = CleanupWitnessOperation;
     fn begin(&mut self, payload: Arc<Payload>) -> Result<Self::Operation, AdapterErrorCode> {
@@ -969,12 +985,14 @@ impl DeviceAdapter<Payload> for CleanupWitnessAdapter {
         })
     }
 }
+
 impl AdapterOperation for CleanupWitnessOperation {
     fn poll(&mut self, _: &mut AdapterPollContext<'_>) -> AdapterPoll {
         self.polls.set(self.polls.get() + 1);
         AdapterPoll::Pending
     }
 }
+
 impl Drop for CleanupWitnessOperation {
     fn drop(&mut self) {
         self.dropped_at.set(Some(self.clock.0.get()));
@@ -1037,12 +1055,14 @@ fn timeout_cleanup_precedes_terminal_timestamp_and_stops_polls() {
 struct PanickingAdapterDrop(bool);
 
 struct UnmarkedSuccessAtDeadline(Clock);
+
 impl DeviceAdapter<Payload> for UnmarkedSuccessAtDeadline {
     type Operation = Self;
     fn begin(&mut self, _: Arc<Payload>) -> Result<Self::Operation, AdapterErrorCode> {
         Ok(Self(self.0.clone()))
     }
 }
+
 impl AdapterOperation for UnmarkedSuccessAtDeadline {
     fn poll(&mut self, _: &mut AdapterPollContext<'_>) -> AdapterPoll {
         self.0.0.set(110);
@@ -1093,6 +1113,7 @@ impl DeviceAdapter<Payload> for PanickingAdapterDrop {
         Err(FAILURE)
     }
 }
+
 impl Drop for PanickingAdapterDrop {
     fn drop(&mut self) {
         if self.0 {

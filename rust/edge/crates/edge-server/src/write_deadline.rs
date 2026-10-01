@@ -18,6 +18,7 @@ pub(crate) struct WriteDeadline {
     timeout: Duration,
     pending: Option<Pin<Box<Sleep>>>,
 }
+
 impl WriteDeadline {
     pub fn new(socket: UnixStream, timeout: Duration) -> Self {
         Self {
@@ -26,6 +27,7 @@ impl WriteDeadline {
             pending: None,
         }
     }
+
     fn bound<T>(
         &mut self,
         cx: &mut Context<'_>,
@@ -49,6 +51,7 @@ impl WriteDeadline {
         }
     }
 }
+
 impl AsyncRead for WriteDeadline {
     fn poll_read(
         mut self: Pin<&mut Self>,
@@ -58,6 +61,7 @@ impl AsyncRead for WriteDeadline {
         Pin::new(&mut self.socket).poll_read(cx, buf)
     }
 }
+
 impl AsyncWrite for WriteDeadline {
     fn poll_write(
         mut self: Pin<&mut Self>,
@@ -67,10 +71,12 @@ impl AsyncWrite for WriteDeadline {
         let result = Pin::new(&mut self.socket).poll_write(cx, buf);
         self.bound(cx, result)
     }
+
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let result = Pin::new(&mut self.socket).poll_flush(cx);
         self.bound(cx, result)
     }
+
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let result = Pin::new(&mut self.socket).poll_shutdown(cx);
         self.bound(cx, result)

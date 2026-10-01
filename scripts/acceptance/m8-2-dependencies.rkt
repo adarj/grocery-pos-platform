@@ -1,17 +1,34 @@
 #lang racket
+
 (require racket/file racket/string)
-(define (check ok [category "boundary"]) (unless ok (error 'm8-2-dependencies "pinned private HTTP ~a missing" category)))
+
+(define (check ok [category "boundary"])
+  (unless ok
+    (error 'm8-2-dependencies "pinned private HTTP ~a missing" category)))
+
 (check (equal? (version) "9.1") "Racket version")
+
 (define source (collection-file-path "bounded-http-client.rkt" "net" "http-easy" "private"))
+
 (check (string-prefix? (path->string source) "/nix/store/"))
+
 (define decoder (file->string source))
-(for ([contract '("HEADER-LIMIT" "bounded-headers" "copy-bytes ip op chunk-size" "[decodes null]" "Incomplete HTTP body" "Invalid HTTP response framing")])
+
+(for ([contract
+       '("HEADER-LIMIT" "bounded-headers" "copy-bytes ip op chunk-size" "[decodes null]"
+         "Incomplete HTTP body" "Invalid HTTP response framing")])
   (check (string-contains? decoder contract) contract))
+
 (define session (file->string (collection-file-path "session.rkt" "net" "http-easy" "private")))
+
 (check (string-contains? session "#:attempts (sub1 max-attempts)"))
+
 (check (string-contains? session "\"HTTP transport error\""))
-(for ([file (list (collection-file-path "pool.rkt" "data")
-                       (collection-file-path "main.rkt" "actor"))])
-  (check (file-exists? file) "package file" )
+
+(for ([file
+       (list (collection-file-path "pool.rkt" "data") (collection-file-path "main.rkt" "actor"))])
+  (check (file-exists? file) "package file")
   (check (string-prefix? (path->string file) "/nix/store/")))
-(displayln "Repository-declared Nix private HTTP patch/attempt semantics realized; no global package installation.")
+
+(displayln
+ "Repository-declared Nix private HTTP patch/attempt semantics realized; no global package installation.")
