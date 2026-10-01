@@ -1,15 +1,28 @@
 # M8.2 Generic Edge Foundation — Tier A
 
-**Phase 1 builds the qualification instrument. No authoritative acceptance result is published here yet.** M8.2 Tier-A passing does not mean whole-M8 Tier-A or Tier-B/C/D passing, a production hardware daemon, or durable exactly-once physical effects.
+**M8.2 Generic Edge Foundation — Tier A PASS**, qualified at
+`c44a820016feb8e56d3f6c52c2d49c16a294b5bd` by authoritative attempt #2 on
+2026-10-01. All fourteen mandatory groups passed. M8.2 Tier-A passing does not
+mean whole-M8 Tier-A or Tier-B/C/D passing, a production hardware daemon, or
+durable exactly-once physical effects.
 
 The generic path is Racket → filesystem UDS HTTP/1.1 → strict codec → single-owner Core → real FIFO/executor → simulator → Core events → NDJSON → Racket EdgeSession. Tier A can qualify this software contract, boundedness and failure handling. Same-user `SO_PEERCRED` checks are repository evidence; separate deployed service UID/DAC/SELinux enforcement is Tier B. Real selected devices are Tier C; integrated lanes are Tier D. Controlled edge process death is not physical power loss.
 
-[Requirements](requirements.md), the [test plan](test-plan.md), and the [E1–E30 matrix](invariant-matrix.md) define scope and planned evidence. Plans/source filenames do not prove execution. The future machine-readable `acceptance-results.json` records execution; `audit-report.md` interprets it and cannot override a failed/blocked entry.
+[Requirements](requirements.md), the [test plan](test-plan.md), and the [E1–E30 matrix](invariant-matrix.md) define scope and planned evidence. Plans/source filenames do not prove execution. The frozen machine-readable [acceptance ledger](acceptance-results.json) records execution; the [audit report](audit-report.md) interprets it and cannot override a failed/blocked entry.
+
+The machinery commit was `11ba5efacd96b761ea71fda08791dfa12f07b5e2`.
+Attempt #1 against formatting-normalized `7e9ddca17ed87db5cd64ccc6a8013bcb0a27e19c`
+failed A-001 on fixture startup readiness. The signed remediation commit
+`c44a820016feb8e56d3f6c52c2d49c16a294b5bd` added responsive-HTTP startup and
+deterministic regressions. Attempt #2 freshly ran every group on that exact
+clean tree; no earlier passing group was reused. The historical failing ledger
+remains in ignored `.local/acceptance/m8-2/failed-attempt-1/`. Current attempt #2
+logs remain at the ledger's ignored paths for local review.
 
 ## Two commits
 
 1. Phase 1 implements and self-tests the closed runner/reporter, source audit and campaigns. Constituent development runs use no acceptance ledger. A human adversarially reviews, manually signs/commits/pushes this machinery.
-2. A separate Phase-2 task verifies that exact commit SHA and a clean tree, runs `just accept-m8-2`, and freezes its actual ledger and prose audit in a documentation-only commit. The runner has **no dirty-tree override**. It also refuses publication if HEAD/worktree changes during the campaign.
+2. A separate Phase-2 task verifies the exact committed source SHA and a clean tree, runs `just accept-m8-2`, and freezes its actual ledger and prose audit in a documentation-only commit. The runner has **no dirty-tree override**. It also refuses publication if HEAD/worktree changes during the campaign. This record qualifies the corrected source above, not the later evidence-only commit.
 
 If Phase 2 finds a product or qualification-tool defect, stop the evidence freeze. Correct it, re-audit, manually commit the corrected source, and rerun against that new exact clean commit. A source change after a run invalidates that run for the changed tree; do not retain its ledger as certification of the fix.
 

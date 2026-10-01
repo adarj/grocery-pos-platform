@@ -19,8 +19,10 @@ server epoch and closes connections; it never becomes a recoverable HTTP 500.
 `ServerLimits` centralizes initial bounds: 16 connections, 64 queued control
 requests, 16 KiB HTTP buffer, 32 headers, 256 KiB command/non-stream JSON, 64 KiB
 per event, five-second header/body/control/write deadlines, ten-millisecond
-executor cadence, and ten-second heartbeat cadence. Counts/cadences are subject
-to M8.2.7 qualification. HTTP/1 keep-alive is disabled. Write half-close is allowed
+executor cadence, and ten-second heartbeat cadence. M8.2.7 qualified the generic
+defaults at `c44a820016feb8e56d3f6c52c2d49c16a294b5bd`; these are implementation
+bounds, not protocol constants or performance guarantees. HTTP/1 keep-alive is
+disabled. Write half-close is allowed
 because Racket's mature client closes its write half after response headers;
 this still permits only one request. A pending socket write has its own deadline,
 which does not run while waiting for a new Core event.
@@ -133,7 +135,12 @@ covers lost-response/same-attempt dedupe with exactly one adapter start,
 fragmented/coalesced NDJSON, fault ordering, disconnect cleanup, overflow/fresh
 snapshot, and restart without command replay.
 
-M8.2.7 uses two commits: reviewed qualification machinery first, then a clean committed-tree campaign and documentation-only evidence freeze. See [M8.2 acceptance](../acceptance/m8.2/README.md).
+M8.2.7 froze the generic Tier-A qualification record at
+`c44a820016feb8e56d3f6c52c2d49c16a294b5bd` after the reviewed machinery,
+formatting and fixture-readiness commits. Authoritative attempt #2 passed all
+fourteen groups freshly; the earlier failed attempt remains historical evidence.
+The documentation-only evidence commit retains the qualified source SHA. See
+[M8.2 acceptance](../acceptance/m8.2/README.md) and its audit report.
 Real hardware, discovery/selectors, complete production configuration, inherited
 FD bootstrap/deployment units, Linux identity/SELinux qualification, and peripheral
 business integration remain outside this checkpoint. SQLite remains schema v12.
