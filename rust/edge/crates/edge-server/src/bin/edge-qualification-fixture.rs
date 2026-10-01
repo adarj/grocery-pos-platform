@@ -111,6 +111,7 @@ struct Fixture {
     flood_left: usize,
     flood_start: Option<std::time::Instant>,
     rebind: bool,
+    drive_release: Option<PathBuf>,
 }
 
 impl Fixture {
@@ -170,6 +171,14 @@ impl ControlPlane<Payload> for Fixture {
     }
 
     fn drive(&mut self) -> Result<(), CoreFatalError> {
+        // Explicit qualification modes model delayed executor scheduling without
+        // blocking HTTP admission or changing the production executor cadence.
+        if let Some(release) = &self.drive_release {
+            if !release.exists() {
+                return Ok(());
+            }
+            self.drive_release = None;
+        }
         self.runtime.drive()?;
         if self.rebind && self.posts >= 2 && self.begins.get() > 0 {
             self.rebind = false;
@@ -311,11 +320,11 @@ fn main() {
     let uid = rustix::process::getuid().as_raw();
     let mut limits = ServerLimits {
         heartbeat_interval: Duration::from_millis(100),
-        lose_first_accepted_response: mode == "lost",
+        lose_first_accepted_response: matches!(mode.as_str(), "lost" | "lost-paused-drive"),
         event_chunk_bytes: 17,
         ..ServerLimits::default()
     };
-    if mode == "small" {
+    if matches!(mode.as_str(), "small" | "small-paused-drive") {
         limits.max_connections = 2;
         limits.control_mailbox_capacity = 1;
     }
@@ -344,7 +353,11 @@ fn main() {
             let (producer, consumer) = bounded_executor_queue(
                 [ResourceId::new(7)],
                 1,
-                if mode == "small" { 1 } else { 32 },
+                if matches!(mode.as_str(), "small" | "small-paused-drive") {
+                    1
+                } else {
+                    32
+                },
             )?;
             let device = DeviceId::new("fixture.device").unwrap();
             let binding = BindingInstanceId::new("fixture-binding-a").unwrap();
@@ -387,6 +400,8 @@ fn main() {
                 )
                 .unwrap();
             core.activate_binding(witness, bound()).unwrap();
+            let drive_release = matches!(mode.as_str(), "lost-paused-drive" | "small-paused-drive")
+                .then(|| metrics.with_extension("resume"));
             let f = Fixture {
                 runtime: ControlRuntime { core, executor },
                 begins,
@@ -400,6 +415,7 @@ fn main() {
                 flood_left: 0,
                 flood_start: None,
                 rebind: mode == "rebind",
+                drive_release,
             };
             f.metrics();
             Ok(f)

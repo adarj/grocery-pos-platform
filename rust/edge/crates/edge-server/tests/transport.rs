@@ -1,4 +1,8 @@
 #![cfg(feature = "qualification")]
+use edge_protocol::{
+    CommandResponse, CommandState, EffectEvidence, JsonDecodeLimits, StrictJsonSchema,
+    TerminalOutcome, decode_json_strict,
+};
 use std::{
     io::{ErrorKind, Read, Write},
     os::unix::net::UnixStream,
@@ -10,7 +14,29 @@ use std::{
 };
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
+const EXECUTION_TIMEOUT: Duration = Duration::from_secs(3);
 const DIAGNOSTIC_BYTES: usize = 2048;
+
+#[derive(Debug)]
+struct Metrics {
+    posts: usize,
+    dedupes: usize,
+    starts: usize,
+    requests_total: usize,
+    retained: usize,
+}
+
+impl Metrics {
+    fn check(&self, posts: usize, dedupes: usize) -> Result<(), String> {
+        if self.starts > 1 {
+            return Err(format!("duplicate adapter execution: {self:?}"));
+        }
+        if self.posts != posts || self.dedupes != dedupes || self.retained != 1 {
+            return Err(format!("unexpected command identity counters: {self:?}"));
+        }
+        Ok(())
+    }
+}
 
 fn capture(mut reader: impl Read + Send + 'static) -> JoinHandle<Vec<u8>> {
     std::thread::spawn(move || {
@@ -237,6 +263,99 @@ impl Fixture {
         response
     }
 
+    fn metrics(&self) -> Metrics {
+        let text = std::fs::read_to_string(self.dir.join("metrics")).unwrap();
+        let mut lines = text.lines();
+        let posts = lines.next().unwrap().parse().unwrap();
+        let dedupes = lines.next().unwrap().parse().unwrap();
+        let starts = lines.next().unwrap().parse().unwrap();
+        let counter = |name| {
+            text.lines()
+                .find_map(|line| line.strip_prefix(name))
+                .expect("fixture counter present")
+                .parse()
+                .expect("integer fixture counter")
+        };
+        Metrics {
+            posts,
+            dedupes,
+            starts,
+            requests_total: counter("requests_total="),
+            retained: counter("retained="),
+        }
+    }
+
+    fn resume_execution(&self) {
+        std::fs::write(self.dir.join("metrics.resume"), []).unwrap();
+    }
+
+    fn wait_for_execution(
+        &self,
+        id: &str,
+        posts: usize,
+        dedupes: usize,
+        terminal: bool,
+        timeout: Duration,
+    ) -> Result<CommandState, String> {
+        let started = Instant::now();
+        let deadline = started + timeout;
+        let timeout_error = |metrics: &Metrics| {
+            format!(
+                "execution deadline after {:?}: {metrics:?}",
+                started.elapsed()
+            )
+        };
+        loop {
+            // Detect duplicate physical starts before issuing another observation.
+            let metrics = self.metrics();
+            metrics.check(posts, dedupes)?;
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|remaining| !remaining.is_zero())
+                .ok_or_else(|| timeout_error(&metrics))?;
+            // Explicit test-side GET only; it never resubmits the command. Keep
+            // strict post-readiness connects and bound I/O by the remaining wait.
+            let mut stream = self.connect_at("command execution observation");
+            stream.set_read_timeout(Some(remaining)).unwrap();
+            stream.set_write_timeout(Some(remaining)).unwrap();
+            let io_error = |stage, error: std::io::Error| {
+                if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) {
+                    timeout_error(&metrics)
+                } else {
+                    Self::io_failure(stage, error)
+                }
+            };
+            stream
+                .write_all(&get(&format!("/v1/commands/{id}")))
+                .map_err(|error| io_error("command observation write", error))?;
+            let mut response = Vec::new();
+            stream
+                .read_to_end(&mut response)
+                .map_err(|error| io_error("command observation read", error))?;
+            assert_eq!(status(&response), 200);
+            let state: CommandState = json_body(&response);
+            let metrics = self.metrics();
+            metrics.check(posts, dedupes)?;
+            let ready = match &state {
+                CommandState::Accepted(_) => false,
+                CommandState::Executing(_) => !terminal,
+                CommandState::Terminal(state) => {
+                    assert_eq!(state.outcome, TerminalOutcome::Succeeded);
+                    assert_eq!(state.effect_evidence, EffectEvidence::Confirmed);
+                    true
+                }
+            };
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|remaining| !remaining.is_zero())
+                .ok_or_else(|| timeout_error(&metrics))?;
+            if ready && metrics.starts == 1 {
+                return Ok(state);
+            }
+            std::thread::sleep(remaining.min(Duration::from_millis(10)));
+        }
+    }
+
     fn stop(&mut self, immediate: bool) -> bool {
         if let Some(mut stdin) = self.child.stdin.take()
             && !immediate
@@ -306,6 +425,15 @@ fn status(response: &[u8]) -> u16 {
         .unwrap()
         .parse()
         .unwrap()
+}
+
+fn json_body<T: StrictJsonSchema>(response: &[u8]) -> T {
+    let offset = response
+        .windows(4)
+        .position(|bytes| bytes == b"\r\n\r\n")
+        .expect("HTTP response header terminator")
+        + 4;
+    decode_json_strict(&response[offset..], JsonDecodeLimits::default()).unwrap()
 }
 
 fn wait_for_path(path: &std::path::Path) {
@@ -584,8 +712,9 @@ fn queue_and_cache_capacity_reject_before_creating_another_record() {
         let first =
             command("active", "").replace("\"scenario\":\"success\"", "\"scenario\":\"pending\"");
         assert_eq!(status(&f.request(&post(&first, "application/json"))), 202);
-        std::thread::sleep(Duration::from_millis(50));
         if mode == "small" {
+            f.wait_for_execution("active", 1, 0, false, EXECUTION_TIMEOUT)
+                .unwrap();
             assert_eq!(
                 status(&f.request(&post(&command("waiting", ""), "application/json"))),
                 202
@@ -628,13 +757,111 @@ fn headers_are_bounded_and_pipelining_is_not_served() {
 #[test]
 fn lost_response_keeps_one_record_and_one_physical_start() {
     let f = Fixture::new("lost");
+    submit_lost_and_deduplicated(&f);
+    f.wait_for_execution("lost", 2, 1, true, EXECUTION_TIMEOUT)
+        .unwrap();
+    assert_eq!(f.metrics().starts, 1);
+}
+
+fn submit_lost_and_deduplicated(f: &Fixture) {
     let body = command("lost", "");
     assert!(f.request(&post(&body, "application/json")).is_empty());
+    let initial = f.metrics();
+    initial.check(1, 0).unwrap();
+    assert_eq!(initial.requests_total, 1, "no implicit recovery request");
     let second = body.replace("request-lost", "another-request");
-    assert_eq!(status(&f.request(&post(&second, "application/json"))), 200);
-    std::thread::sleep(Duration::from_millis(100));
-    let metrics = std::fs::read_to_string(f.dir.join("metrics")).unwrap();
-    assert_eq!(metrics.lines().take(3).collect::<Vec<_>>(), ["2", "1", "1"]);
+    let response = f.request(&post(&second, "application/json"));
+    assert_eq!(status(&response), 200);
+    let response: CommandResponse = json_body(&response);
+    assert_eq!(response.request_id.as_str(), "another-request");
+    let id = match response.command {
+        CommandState::Accepted(state) | CommandState::Executing(state) => state.command_id,
+        CommandState::Terminal(state) => state.command_id,
+    };
+    assert_eq!(id.as_str(), "lost");
+    let metrics = f.metrics();
+    metrics.check(2, 1).unwrap();
+    assert_eq!(metrics.requests_total, 2, "only explicit POST recovery");
+    let text = std::fs::read_to_string(f.dir.join("metrics")).unwrap();
+    assert_eq!(
+        text.lines().skip(3).take(2).collect::<Vec<_>>(),
+        ["request-lost", "another-request"]
+    );
+}
+
+#[test]
+fn lost_response_waits_for_terminal_execution_after_delayed_drive() {
+    let f = Fixture::new("lost-paused-drive");
+    submit_lost_and_deduplicated(&f);
+    std::thread::scope(|scope| {
+        let waiting = scope.spawn(|| {
+            f.wait_for_execution("lost", 2, 1, true, EXECUTION_TIMEOUT)
+                .unwrap()
+        });
+        // Deliberately hold execution past the former 100 ms assumption. The
+        // fixture gate, rather than host scheduling speed, guarantees zero starts.
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(f.metrics().starts, 0);
+        assert!(!waiting.is_finished());
+        f.resume_execution();
+        assert!(matches!(waiting.join().unwrap(), CommandState::Terminal(_)));
+    });
+    assert_eq!(f.metrics().starts, 1);
+}
+
+#[test]
+fn queue_capacity_waits_for_active_execution_after_delayed_drive() {
+    let f = Fixture::new("small-paused-drive");
+    let first =
+        command("active", "").replace("\"scenario\":\"success\"", "\"scenario\":\"pending\"");
+    assert_eq!(status(&f.request(&post(&first, "application/json"))), 202);
+    assert_eq!(f.metrics().starts, 0);
+    f.resume_execution();
+    let state = f
+        .wait_for_execution("active", 1, 0, false, EXECUTION_TIMEOUT)
+        .unwrap();
+    assert!(matches!(state, CommandState::Executing(_)));
+    assert_eq!(
+        status(&f.request(&post(&command("waiting", ""), "application/json"))),
+        202
+    );
+    let rejected = f.request(&post(&command("refused", ""), "application/json"));
+    assert_eq!(status(&rejected), 503);
+    assert!(
+        String::from_utf8(rejected)
+            .unwrap()
+            .contains("edge.executor_queue_full")
+    );
+    assert_eq!(status(&f.request(&get("/v1/commands/refused"))), 404);
+    assert_eq!(f.metrics().starts, 1);
+}
+
+#[test]
+fn execution_wait_is_bounded_when_executor_does_not_progress() {
+    let f = Fixture::new("lost-paused-drive");
+    submit_lost_and_deduplicated(&f);
+    let error = f
+        .wait_for_execution("lost", 2, 1, true, Duration::from_millis(30))
+        .unwrap_err();
+    assert!(error.contains("execution deadline"));
+    assert!(error.contains("starts: 0"));
+}
+
+#[test]
+fn execution_wait_rejects_duplicate_starts_before_polling() {
+    let metrics = Metrics {
+        posts: 2,
+        dedupes: 1,
+        starts: 2,
+        requests_total: 2,
+        retained: 1,
+    };
+    assert!(
+        metrics
+            .check(2, 1)
+            .unwrap_err()
+            .contains("duplicate adapter execution")
+    );
 }
 
 #[test]
