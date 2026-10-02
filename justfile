@@ -13,9 +13,12 @@ agent-doctor:
 test:
     just test-racket
     just test-flutter
+    just test-rust
 
 check:
     just analyze-flutter
+    just check-rust-format
+    just clippy-rust
     just test
     just test-pos-integration
 
@@ -39,6 +42,23 @@ test-pos-integration:
 
 analyze-flutter:
     cd flutter/apps/pos_terminal && flutter analyze
+
+fmt-rust:
+    cd rust/edge && cargo fmt --all
+
+check-rust-format:
+    cd rust/edge && cargo fmt --all --check
+
+clippy-rust:
+    cd rust/edge && cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+test-rust:
+    cd rust/edge && cargo test --locked --workspace --all-features
+
+check-rust:
+    just check-rust-format
+    just clippy-rust
+    just test-rust
 
 # Builds the internal noarch Fedora POS Core RPM without installing it.
 build-pos-core-rpm:
@@ -137,3 +157,15 @@ db-restore-offline BACKUP DB:
 # Creates a local, allowlisted diagnostic archive without stopping POS Core.
 support-bundle DB OUTPUT:
     racket pos-backend-racket/scripts/support-diagnostics.rkt collect {{quote(DB)}} {{quote(OUTPUT)}}
+
+# Authoritative M8.2 Tier-A campaign: clean committed source only (Phase 2).
+accept-m8-2:
+    bash scripts/acceptance/accept-m8-2.sh
+
+# Regenerates from a completed authoritative local summary, never from mocks.
+acceptance-report-m8-2:
+    racket scripts/acceptance/m8-2-report.rkt .local/acceptance/m8-2/run-summary.json docs/acceptance/m8.2/acceptance-results.json
+
+# Optional finite synthetic full-path load; mandatory acceptance uses 1000.
+stress-m8-2 ITERATIONS="50000":
+    racket scripts/acceptance/m8-2-process.rkt load {{quote(ITERATIONS)}}

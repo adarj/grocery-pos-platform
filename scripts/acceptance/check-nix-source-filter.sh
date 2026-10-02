@@ -2,55 +2,37 @@
 set -euo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-local_marker_directory="$repository_root/.local/acceptance/m6"
-flutter_marker_directory="$repository_root/flutter/apps/pos_terminal/.dart_tool"
+raco test "$repository_root/scripts/acceptance/m8-2-source-test.rkt"
+scratch="$(mktemp -d /tmp/grocery-pos-source-filter.XXXXXX)"
+trap 'rm -rf -- "$scratch"' EXIT
+racket "$repository_root/scripts/acceptance/nix-source-snapshot.rkt" "$repository_root" "$scratch/source"
 
-mkdir -p "$local_marker_directory" "$flutter_marker_directory"
-local_marker="$(mktemp "$local_marker_directory/nix-source-filter.XXXXXX")"
-flutter_marker="$(mktemp "$flutter_marker_directory/nix-source-filter.XXXXXX")"
+# These are intentionally synthetic regular markers, never real databases/logs.
+source_root="$scratch/source"
 
-cleanup() {
-  rm -f -- "$local_marker" "$flutter_marker"
+evaluate() {
+  (cd "$source_root" && nix eval --raw "$1" --option warn-dirty false)
 }
-trap cleanup EXIT
 
-rm -f -- "$local_marker" "$flutter_marker"
-
-core_before="$(
-  nix eval --raw \
-    'path:.#packages.aarch64-linux.pos-core-rpm.drvPath' \
-    --option warn-dirty false
-)"
-terminal_before="$(
-  nix eval --raw \
-    'path:.#packages.x86_64-linux.pos-terminal-flatpak.drvPath' \
-    --option warn-dirty false
-)"
-
-printf '%s\n' ignored-local-state >"$local_marker"
-printf '%s\n' ignored-flutter-state >"$flutter_marker"
-
-core_after="$(
-  nix eval --raw \
-    'path:.#packages.aarch64-linux.pos-core-rpm.drvPath' \
-    --option warn-dirty false
-)"
-terminal_after="$(
-  nix eval --raw \
-    'path:.#packages.x86_64-linux.pos-terminal-flatpak.drvPath' \
-    --option warn-dirty false
-)"
-
-if [[ "$core_before" != "$core_after" ]]; then
-  printf '%s\n' \
-    'POS Core RPM derivation changed when ignored .local state changed.' >&2
+core_before="$(evaluate 'path:.#packages.aarch64-linux.pos-core-rpm.drvPath')"
+terminal_before="$(evaluate 'path:.#packages.x86_64-linux.pos-terminal-flatpak.drvPath')"
+mkdir -p "$source_root/.local/acceptance/m8-2" "$source_root/flutter/apps/pos_terminal/.dart_tool"
+printf '%s\n' ignored-local-log >"$source_root/.local/acceptance/m8-2/test.log"
+printf '%s\n' synthetic-not-a-database >"$source_root/.local/acceptance/m8-2/test.db"
+printf '%s\n' ignored-flutter-state >"$source_root/flutter/apps/pos_terminal/.dart_tool/source-filter-marker"
+core_after="$(evaluate 'path:.#packages.aarch64-linux.pos-core-rpm.drvPath')"
+terminal_after="$(evaluate 'path:.#packages.x86_64-linux.pos-terminal-flatpak.drvPath')"
+[[ "$core_before" == "$core_after" ]] || {
+  echo 'POS Core derivation included ignored local state.' >&2
   exit 1
-fi
-
-if [[ "$terminal_before" != "$terminal_after" ]]; then
-  printf '%s\n' \
-    'Terminal Flatpak derivation changed when ignored .dart_tool state changed.' >&2
+}
+[[ "$terminal_before" == "$terminal_after" ]] || {
+  echo 'Terminal derivation included ignored local state.' >&2
   exit 1
-fi
+}
 
-printf '%s\n' 'Nix package sources exclude ignored developer-generated state.'
+# Test source selection with a real ignored UDS while preserving all unrelated
+# local daemon sockets. No pathname cleanup outside this owned directory.
+cd "$repository_root"
+racket scripts/acceptance/m8-2-source-socket.rkt "$scratch/socket-source"
+printf '%s\n' 'Nix sources exclude ignored local log/database/Flutter state; Git snapshot excludes live sockets and includes unstaged source without staging.'

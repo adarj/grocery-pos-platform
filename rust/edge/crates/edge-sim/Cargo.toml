@@ -1,0 +1,13 @@
+[package]
+name = "edge-sim"
+description = "Deterministic qualification-only Grocery POS edge adapter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+edge-adapter-api = { path = "../edge-adapter-api" }
+
+[lints]
+workspace = true

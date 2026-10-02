@@ -1,0 +1,163 @@
+#lang racket
+
+(require json racket/file racket/string)
+
+;; Lexical tripwires + Cargo's dependency graph, not formal runtime proof.
+(define (require-contract ok message)
+  (unless ok
+    (raise-user-error 'm8-2-static message)))
+
+(define (read path)
+  (file->string path))
+
+(define (files dir suffix)
+  (for/list ([p (in-directory dir)]
+             #:when (and (file-exists? p) (string-suffix? (path->string p) suffix)))
+    p))
+
+;; Scan the complete source: a test module can precede later production items.
+;; Test-only hits also require explicit classification instead of hiding suffixes.
+(define (production text)
+  (regexp-replace* #px"//[^\n]*" text ""))
+
+(define migrations (read "pos-backend-racket/pos/persistence/pos-database-migrations.rkt"))
+
+(require-contract
+ (equal?
+  (regexp-match*
+   #px"(?m:^\\s*\\(pos-database-migration ([0-9]+)\\s*$)"
+   migrations
+   #:match-select cadr)
+  (map number->string (range 1 13)))
+ "schema must remain v1–v12")
+
+(define metadata (call-with-input-file (vector-ref (current-command-line-arguments) 0) read-json))
+
+(define packages (hash-ref metadata 'packages))
+
+(define names '("edge-protocol" "edge-adapter-api" "edge-core" "edge-sim" "edge-server"))
+
+(require-contract
+ (equal? (sort (map (lambda (p) (hash-ref p 'name)) packages) string<?) (sort names string<?))
+ "workspace members changed")
+
+(require-contract
+ (regexp-match? #px"unsafe_code = \"forbid\"" (read "rust/edge/Cargo.toml"))
+ "workspace unsafe policy")
+
+(for ([package packages])
+  (define name (hash-ref package 'name))
+  (define dir (path-only (string->path (hash-ref package 'manifest_path))))
+  (require-contract
+   (regexp-match? #px"(?s:\\[lints\\]\\s*workspace = true)" (read (build-path dir "Cargo.toml")))
+   "crate lint inheritance")
+  (require-contract
+   (string-contains? (read (build-path dir "src/lib.rs")) "#![forbid(unsafe_code)]")
+   "crate unsafe policy")
+  (define normal
+    (filter (lambda (d) (equal? (hash-ref d 'kind) 'null)) (hash-ref package 'dependencies)))
+  (define expected
+    (hash-ref
+     (hash
+      "edge-protocol" '("serde" "serde_json")
+      "edge-adapter-api" '("edge-protocol")
+      "edge-core" '("edge-protocol" "edge-adapter-api")
+      "edge-sim" '("edge-adapter-api")
+      "edge-server" '("bytes" "edge-adapter-api" "edge-core" "edge-protocol" "edge-sim"
+                      "http-body-util" "hyper" "hyper-util" "rustix" "serde" "tokio"))
+     name))
+  (require-contract
+   (equal? (sort (map (lambda (d) (hash-ref d 'name)) normal) string<?) (sort expected string<?))
+   "dependency graph needs explicit classification")
+  (unless (equal? name "edge-server")
+    (require-contract
+     (not
+      (ormap
+       (lambda (d)
+         (member (hash-ref d 'name) '("tokio" "hyper" "hyper-util" "axum" "tower" "rustix")))
+       normal))
+     "transport dependency escaped server"))
+  (when (equal? name "edge-server")
+    (define sim (findf (lambda (d) (equal? (hash-ref d 'name) "edge-sim")) normal))
+    (require-contract (and sim (hash-ref sim 'optional)) "unconditional simulator dependency")
+    (require-contract
+     (equal? (hash-ref (hash-ref package 'features) 'qualification) '("dep:edge-sim"))
+     "simulation feature gate")
+    (define bins
+      (filter (lambda (t) (member "bin" (hash-ref t 'kind))) (hash-ref package 'targets)))
+    (require-contract
+     (and
+      (= (length bins) 1)
+      (equal? (hash-ref (car bins) 'name) "edge-qualification-fixture")
+      (equal? (hash-ref (car bins) 'required-features) '("qualification")))
+     "fixture gate"))
+  (for ([path (files (build-path dir "src") ".rs")]
+        #:unless (member "bin" (map path->string (explode-path path))))
+    (define code (production (read path)))
+    (require-contract
+     (not
+      (regexp-match?
+       #px"\\b(?:unsafe|sqlite3|rusqlite|sqlx|TcpListener|TcpStream)\\b|pos[.]db"
+       code))
+     "Rust authority boundary")
+    (require-contract
+     (not
+      (regexp-match?
+       #px"\"(?:payment[.]|card[.]|raw[.]|vendor[.])|\"(?:authorize|capture|refund|void|raw_usb|raw_serial)\""
+       code))
+     "raw/payment semantic channel")
+    (when (equal? name "edge-server")
+      (require-contract
+       (not
+        (regexp-match?
+         #px"(?i:access-control-allow|authorization.*bearer|rustls|native_tls|serde_json::Value)"
+         code))
+       "alternate server boundary"))))
+
+(define http (production (read "rust/edge/crates/edge-server/src/http.rs")))
+
+(require-contract
+ (equal?
+  (sort
+   (remove-duplicates (regexp-match* #px"\"(/v1/[^\" ]*)\"" http #:match-select cadr))
+   string<?)
+  (sort
+   '("/v1/health" "/v1/status" "/v1/devices" "/v1/events" "/v1/commands" "/v1/devices/"
+     "/v1/commands/")
+   string<?))
+ "seven frozen routes changed")
+
+(require-contract
+ (and (string-contains? http "decode_command_strict") (string-contains? http ".keep_alive(false)"))
+ "strict decoder/one request")
+
+(for ([path (files "flutter/apps/pos_terminal/lib" ".dart")])
+  (require-contract
+   (not
+    (regexp-match?
+     #px"edge[.]sock|/v1/(?:events|commands)|/dev/(?:hidraw|ttyUSB|input|bus/usb)|expected_binding_instance_id"
+     (production (read path))))
+   "Flutter Edge/raw authority"))
+
+(for ([path (files "pos-backend-racket/pos" ".rkt")]
+      #:unless (member "edge" (map path->string (explode-path path))))
+  (define code (regexp-replace* #px";[^\n]*" (read path) ""))
+  (require-contract
+   (not (regexp-match? #px"\"[^\"\n]*edge/(?:client|session)[.]rkt|start-edge-session" code))
+   "MVP unexpectedly depends on Edge"))
+
+(define client (read "pos-backend-racket/pos/edge/client.rkt"))
+
+(require-contract
+ (and
+  (string-contains? client "#:max-attempts 1")
+  (string-contains? client "#:max-redirects 0")
+  (string-contains? client "crypto-random-bytes"))
+ "attempt/redirect/ID contracts")
+
+(require-contract
+ (not (regexp-match? #px"\\bretryable\\b|\\bretry_after\\b" (string-append http client)))
+ "generic retry guidance")
+
+(displayln
+ "m8-2-static passed: v12, authority, seven routes, dependency/unsafe/simulation and opt-in boundaries")

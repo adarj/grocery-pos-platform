@@ -82,6 +82,10 @@ Read only the routes relevant to the task—not every linked document up front.
 
 - Flutter ↔ Racket API: [local API](docs/architecture/local-api.md), before
   changing that boundary.
+- Physical devices / Rust edges: [ADR-0033](docs/adr/0033-use-a-semantic-local-edge-protocol-for-pos-hardware.md),
+  [edge architecture](docs/architecture/edge-agent.md),
+  [Edge Protocol v1](docs/architecture/edge-protocol-v1.md), and
+  [edge threat model](docs/security/edge-agent-threat-model.md).
 - Transaction behavior, schemas, replay, and receipts: [journal](docs/architecture/transaction-journal.md),
   [command schema](docs/architecture/transaction-command-schema.md),
   [event schemas](docs/architecture/transaction-event-schema.md),

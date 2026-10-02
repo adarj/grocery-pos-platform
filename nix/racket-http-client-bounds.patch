@@ -1,0 +1,142 @@
+--- a/bounded-http-client.rkt
++++ b/bounded-http-client.rkt
+@@ -10,7 +10,7 @@
+          (rename-in racket/tcp
+                     [tcp-connect plain-tcp-connect]
+                     [tcp-abandon-port plain-tcp-abandon-port])
+-         "platform-ssl.rkt")
++         net/platform-ssl)
+ 
+ (define tolerant? #t)
+ (define eol-type
+@@ -202,14 +202,35 @@
+          (display body to)])
+   (flush-output to))
+ 
++(define HEADER-LIMIT (* 16 1024))
++;; Bound framing before allocation; existing HTTP parsing remains unchanged.
++(define (bounded-line in limit)
++  (define buffer (make-bytes limit))
++  (let loop ([n 0])
++    (define byte (read-byte in))
++    (cond
++      [(eof-object? byte) (error 'http-client "Incomplete HTTP framing")]
++      [(= byte 10)
++       (subbytes buffer 0 (if (and (positive? n) (= (bytes-ref buffer (sub1 n)) 13)) (sub1 n) n))]
++      [(= n limit) (error 'http-client "HTTP framing exceeds bound")]
++      [else (bytes-set! buffer n byte) (loop (add1 n))])))
+ (define (http-conn-status! hc)
+-  (read-bytes-line/not-eof (http-conn-from hc) eol-type))
+-
++  (bounded-line (http-conn-from hc) HEADER-LIMIT))
+ (define (http-conn-headers! hc)
+-  (define top (read-bytes-line/not-eof (http-conn-from hc) eol-type))
+-  (if (bytes=? top #"")
+-    empty
+-    (cons top (http-conn-headers! hc))))
++  (bounded-headers (http-conn-from hc)))
++(define (bounded-headers in)
++  (let loop ([remaining HEADER-LIMIT] [count 0])
++    (when (< remaining 2) (error 'http-client "HTTP headers exceed bound"))
++    (define top (bounded-line in remaining))
++    (cond [(bytes=? top #"") empty]
++          [(>= count 32) (error 'http-client "HTTP header count exceeds bound")]
++          [else
++           (define fields (regexp-match #px#"^([!#$%&'*+.^_`|~0-9A-Za-z-]+):[ \t]*([^\r\n]*)$" top))
++           (unless fields (error 'http-client "Invalid HTTP header"))
++           ;; Canonical separator keeps http-easy's header lookup authoritative
++           ;; even when a peer omits optional whitespace after the colon.
++           (define header (bytes-append (cadr fields) #": " (regexp-replace #px#"[ \t]+$" (caddr fields) #"")))
++           (cons header (loop (- remaining (bytes-length top) 2) (add1 count)))])))
+ 
+ (define BUFFER-SIZE 1024)
+ (define (copy-bytes in out count)
+@@ -221,6 +242,8 @@
+                            (if (< count BUFFER-SIZE)
+                              count
+                              BUFFER-SIZE)))
++      (when (and (eof-object? r) (exact-integer? count))
++        (error 'http-client "Incomplete HTTP body"))
+       (unless (eof-object? r)
+         (write-bytes buffer out 0 r)
+         (loop (- count r))))))
+@@ -241,40 +264,26 @@
+      (http-pipe-chunk in out))))
+ 
+ (define (http-pipe-chunk ip op)
+-  (define crlf-bytes
+-    (make-bytes 2))
+-  (let loop ([last-bytes #f])
+-    (define in-v (read-line ip eol-type))
+-    (cond
+-      [(eof-object? in-v)
+-       (void)]
+-      [else
+-       (define size-str
+-         (string-trim in-v))
+-       (define chunk-size
+-         (string->number size-str 16))
+-       (unless chunk-size
+-         (error 'http-pipe-chunk
+-                "Could not parse ~S as hexadecimal number"
+-                size-str))
+-       (define use-last-bytes?
+-         (and last-bytes (<= chunk-size (bytes-length last-bytes))))
+-       (cond
+-         [(zero? chunk-size)
+-          (void)]
+-         [else
+-          (define bs
+-            (cond
+-              [use-last-bytes?
+-               (read-bytes! last-bytes ip 0 chunk-size)
+-               last-bytes]
+-              [else
+-               (read-bytes chunk-size ip)]))
+-          (when (eof-object? bs)
+-            (error 'http-pipe-chunk "Unexpected EOF while reading chunk"))
+-          (read-bytes! crlf-bytes ip 0 2)
+-          (write-bytes bs op 0 chunk-size)
+-          (loop bs)])])))
++  (let loop ()
++    (define size-line (bounded-line ip 64))
++    (unless (regexp-match? #rx#"^[0-9a-fA-F]+$" size-line)
++      (error 'http-client "Invalid HTTP chunk size"))
++    (define chunk-size (string->number (bytes->string/utf-8 size-line #f) 16))
++    (unless (and (exact-nonnegative-integer? chunk-size) (<= chunk-size #xffffffffffffffff))
++      (error 'http-client "Invalid HTTP chunk size"))
++    (cond [(zero? chunk-size)
++           ;; The zero-size line alone is not a complete chunked body. Read the
++           ;; bounded trailer section through its terminating blank line.
++           (define trailers (bounded-headers ip))
++           (when (regexp-member #rx#"^(?i:Content-Length:|Transfer-Encoding:|Content-Encoding:)" trailers)
++             (error 'http-client "Invalid HTTP framing trailer"))]
++          [else
++      ;; Copy through fixed-size storage instead of allocating the advertised
++      ;; chunk length. The downstream pipe remains bounded to 4096 bytes.
++      (copy-bytes ip op chunk-size)
++      (unless (bytes=? (read-bytes 2 ip) #"\r\n")
++        (error 'http-client "Invalid HTTP chunk framing"))
++      (loop)])))
+ 
+ ;; The other end can hang up while we're reading the response, so we
+ ;; have to ensure that reading from the port doesn't deadlock and that
+@@ -443,6 +452,18 @@
+   (http-conn-enliven! hc)
+   (define status (http-conn-status! hc))
+   (define headers (http-conn-headers! hc))
++  ;; Validate critical framing before the mature decoder chooses a body port.
++  ;; Never reinterpret an invalid length as a close-delimited response.
++  (define lengths (filter (lambda (h) (regexp-match? #rx#"^(?i:Content-Length:)" h)) headers))
++  (define transfers (filter (lambda (h) (regexp-match? #rx#"^(?i:Transfer-Encoding:)" h)) headers))
++  (unless (and (<= (length lengths) 1) (<= (length transfers) 1)
++               (not (and (pair? lengths) (pair? transfers)))
++               (for/and ([h (in-list lengths)])
++                 (define match (regexp-match #rx#"^(?i:Content-Length: )[0-9]+$" h))
++                 (and match (<= (string->number (bytes->string/utf-8 (subbytes h 16))) #xffffffffffffffff)))
++               (for/and ([h (in-list transfers)])
++                 (regexp-match? #rx#"^(?i:Transfer-Encoding: chunked)$" h)))
++    (error 'http-client "Invalid HTTP response framing"))
+   (define close?
+     (or iclose?
+         (regexp-member #rx#"^(?i:Connection:[\t ]*close)$" headers)))

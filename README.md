@@ -7,7 +7,7 @@ operator security are in place, alongside Fedora Kinoite appliance foundations.
 
 This is **not suitable for production retail use**. M7 repository/Tier A security
 qualification passed, but booted appliance, physical kiosk, and abrupt-power
-qualification remain pending. Physical device I/O, substantial Rust edge work,
+qualification remain pending. Physical device I/O, the Rust edge daemon,
 card payments, refunds, inventory integration, and cloud synchronization are
 not implemented.
 
@@ -110,11 +110,83 @@ See [appliance operations](docs/operations/kinoite-appliance.md) and
 [provisioning](docs/operations/appliance-provisioning.md). Built artifacts and
 rootless package tests do not establish deployed appliance behavior.
 
+### Rust edge foundation
+
+The Rust 2024 [edge workspace](rust/edge/Cargo.toml) contains the
+dependency-minimal `edge-protocol` library: distinct opaque IDs, exact time and
+sequence domains, device snapshots, typed command vocabulary and semantic
+equality, lifecycle/outcome/effect evidence, safe errors, and generic event
+values. Its strict codec bounds JSON input and output, rejects duplicate decoded
+keys and excessive structural work, and binds recognized command kinds to
+compiled payload schemas. The `edge-core` library now owns deterministic
+command admission, retained-attempt deduplication, bounded terminal retention,
+and the record-before-queue handoff. It now also provides bounded FIFO execution,
+acceptance-relative deadlines, monotonic effect tracking, exact binding fences,
+and conservative terminalization after adapter failure, timeout, or panic.
+Core now owns one authoritative binding lifecycle: invalidation clears the
+public binding and capabilities, and fresh attachment requires a complete
+executor installation witness. Configured resources survive unbinding;
+binding IDs cannot be reused within the bounded agent-epoch history. Device
+revisions and the global event sequence advance through checked Core transitions.
+One bounded subscriber receives an atomic full snapshot/cursor followed by typed
+live events; overflow closes continuity, and reconnect obtains a fresh snapshot
+without replay. Explicit heartbeats do not consume sequence numbers. Event
+records, including the complete initial snapshot, use the bounded JSON encoder.
+`edge-adapter-api` defines bounded begin/poll/Drop contracts; `edge-sim` supplies
+deterministic, bounded scripts through the same Core → queue → executor → adapter
+path, including disconnect/rebind and subscription continuity scenarios.
+`edge-server` adds peer-authenticated filesystem UDS HTTP/1.1 using an inherited
+listener. One control thread owns Core/execution; typed requests cross a bounded
+mailbox, and execution progresses independently of requests. Connections,
+headers, request bodies, response encoding, read deadlines, and socket writes
+are bounded. The event route forwards Core's atomic snapshot and live events as
+NDJSON through a one-record handoff; disconnect/overflow ends the subscription.
+The generic [Racket Edge modules](pos-backend-racket/pos/edge/) provide typed
+queries, immutable physical-attempt identity, explicit transport uncertainty,
+and a managed stream session with bounded framing and sequence/revision/epoch
+checks. They are opt-in and do not change checkout readiness. Each transmission
+uses a fresh request ID; an explicit retransmission preserves the same attempt.
+The pinned HTTP client disables redirects and automatic retries. Its private
+Nix patches bound upstream HTTP decoding and correct its attempt-count semantics.
+See the [transport/client notes](docs/development/edge-transport.md) for composition,
+qualification fixtures, dependency pins, and recovery limits.
+Real-process synthetic tests exercise UDS, strict admission, execution, events,
+lost-response dedupe, backpressure, and restart recovery.
+These are M8.2.1–M8.2.6 foundations under
+[ADR-0033](docs/adr/0033-use-a-semantic-local-edge-protocol-for-pos-hardware.md).
+
+In-process timeout/panic containment depends on adapters returning from bounded
+begin/poll calls and performing no future I/O after operation Drop; this does not
+forcibly terminate arbitrary blocking hardware code. First executor construction
+belongs to serial process bootstrap and installs an adapter-scoped panic-hook
+privacy wrapper: application hooks must be installed before it and must not
+replace it afterward (replacement defeats this privacy protection).
+Adapter destructors must not panic or initiate effects; cleanup
+panic terminates the process before any ordinary terminal result is published.
+An application hook panic or double panic during unwinding is not containable.
+Simulation is repository qualification infrastructure only, with no production
+activation path yet.
+
+OS discovery/selectors, complete production `edge.toml`, real adapters,
+device-specific observations, production daemon/bootstrap composition,
+Linux service-identity/DAC/SELinux qualification, and physical qualification
+remain deferred. [M8.2 generic edge Tier-A qualification](docs/acceptance/m8.2/README.md)
+passed all fourteen mandatory groups at corrected source commit
+`30aa761cb759172d695a4d03bdd13679f1070af6`, including default-capacity/load,
+controlled process-death and qualification-instrument checks. The
+[frozen audit](docs/acceptance/m8.2/audit-report.md) records qualification and CI
+history, both synchronization remediations, and the fresh clean-tree campaign.
+This qualifies neither a production edge daemon/appliance nor physical hardware;
+whole M8 and whole-M8 Tier A remain open. The evidence is frozen in a separate
+documentation commit that continues to reference the tested source SHA.
+
 ### Testing and qualification
 
 Racket, Flutter unit/widget, and isolated real-process integration tests protect
-the checkout/security/recovery boundaries. CI checks repository and artifact
-contracts. [M6 reliability](docs/acceptance/m6/README.md) and
+the checkout/security/recovery boundaries. Rust tests protect protocol types,
+codec, Core admission, execution, binding epochs, and event continuity. CI checks
+source, repository, and artifact contracts.
+[M6 reliability](docs/acceptance/m6/README.md) and
 [M7 security](docs/acceptance/m7/README.md) have separate evidence records.
 
 M7's committed record has passing Tier A evidence, including x86_64 artifact
@@ -128,10 +200,9 @@ developer-surface changes.
 
 Card/payment-terminal integration, refunds, promotions, inventory integration,
 customer-display workflows, Rust hardware agents, cloud synchronization and
-remote management remain separately scoped future work. Rust, Supabase CLI,
-and OpenTofu tooling in the development shell are preparation, not evidence of
-implemented agents or cloud infrastructure. There is currently no Rust workspace
-or canonical cloud start/stop/plan workflow.
+remote management remain separately scoped future work. The Rust protocol
+library and development tools do not establish implemented hardware agents or
+cloud infrastructure. There is no canonical cloud start/stop/plan workflow.
 
 ## Development environment
 
@@ -260,8 +331,13 @@ Use the narrowest relevant existing recipe:
 | `just test-flutter` | Flutter unit/widget tests |
 | `just test-pos-integration` | Isolated Flutter ↔ Racket ↔ SQLite process tests |
 | `just analyze-flutter` | Flutter analysis |
-| `just test` | Racket and Flutter tests, without real-process integration |
-| `just check` | Analysis, both test suites, and real-process integration |
+| `just fmt-rust` | Format the Rust workspace |
+| `just check-rust-format` | Verify Rust formatting |
+| `just clippy-rust` | Locked workspace Clippy, with warnings denied |
+| `just test-rust` | Locked Rust workspace tests |
+| `just check-rust` | Rust formatting check, Clippy, and tests |
+| `just test` | Racket, Flutter, and Rust tests, without real-process integration |
+| `just check` | Flutter analysis, Rust format/Clippy, all three test suites, and real-process integration |
 
 The integration suite starts/owns its backend and temporary state; no separately
 started server or cloud service is needed. See the
@@ -287,14 +363,14 @@ just build-appliance-bundle
 
 These commands do not provision a register or mutate the host deployment.
 See the [Core service contract](docs/operations/pos-core-service.md) and appliance
-runbooks. `just --list` is the live command inventory; do not assume Rust tests,
-a multi-language formatter, or cloud orchestration exists before implemented
-recipes establish their contracts.
+runbooks. `just --list` is the live command inventory; no aggregate multi-language
+formatter or cloud orchestration recipe exists.
 
 ## Repository and deeper guidance
 
 Production application code lives under `pos-backend-racket/` and
-`flutter/apps/pos_terminal/`; `packaging/` contains appliance delivery and
+`flutter/apps/pos_terminal/`, with Rust protocol source under `rust/edge/`;
+`packaging/` contains appliance delivery and
 `scripts/` contains developer/qualification helpers.
 
 - [ADRs](docs/adr/README.md): accepted architecture and rationale.
