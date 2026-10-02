@@ -3,9 +3,12 @@
 ## Scope and disposition
 
 **M8.2 Generic Edge Foundation — Tier A PASS.** All fourteen mandatory
-deterministic generic-edge groups passed in authoritative attempt #2 on the
+deterministic generic-edge groups passed in authoritative attempt #3 on the
 recorded committed source tree. The final read-only source/evidence audit found
 no unresolved material defect within that scope.
+
+Qualified source: `30aa761cb759172d695a4d03bdd13679f1070af6`.
+Qualification machinery: `11ba5efacd96b761ea71fda08791dfa12f07b5e2`.
 
 This does **not** establish whole-M8 Tier A, deployed Linux Tier B, selected
 physical-device Tier C, integrated-lane Tier D, a production edge daemon, or
@@ -27,7 +30,11 @@ talks to edges, and the cloud coordinates. SQLite remains schema v12.
 | Qualification machinery | `11ba5efacd96b761ea71fda08791dfa12f07b5e2` | Phase-1 instrument, independently reviewed and committed |
 | Authoritative attempt #1 | `7e9ddca17ed87db5cd64ccc6a8013bcb0a27e19c` | FAIL: A-001 encountered `ConnectionRefused` in the event-stream transport test |
 | Readiness remediation | `c44a820016feb8e56d3f6c52c2d49c16a294b5bd` | Fixture startup now requires responsive HTTP, with deterministic regressions |
-| Authoritative attempt #2 | `c44a820016feb8e56d3f6c52c2d49c16a294b5bd` | All fourteen groups passed freshly; this is the qualified source |
+| Authoritative attempt #2 | `c44a820016feb8e56d3f6c52c2d49c16a294b5bd` | PASS: all fourteen groups passed freshly for that source/environment |
+| Previous evidence freeze | `6ce6ffc14d3e8a9136cb9a94d2de8aded7e50b05` | Documentation-only record of attempt #2 |
+| PR #11 CI failure | `6ce6ffc14d3e8a9136cb9a94d2de8aded7e50b05` | Lost-response test observed 2 POSTs / 1 dedupe / 0 starts at its fixed-sleep observation point |
+| Execution-observation remediation | `30aa761cb759172d695a4d03bdd13679f1070af6` | Bounded state synchronization, terminal succeeded/confirmed proof and deterministic delayed-execution regressions |
+| Authoritative attempt #3 | `30aa761cb759172d695a4d03bdd13679f1070af6` | PASS: all fourteen groups freshly passed; current definitive qualified source |
 
 The first failure was retained rather than rerun to green. Its generic connection
 helper did not record the exact historical connection stage. Remediation
@@ -35,16 +42,33 @@ deterministically reproduced the bind-before-listen failure and established a
 stronger startup contract without retrying normal post-readiness connections.
 The archived failing ledger remains under ignored
 `.local/acceptance/m8-2/failed-attempt-1/`; its bytes were verified unchanged.
-No successful group from attempt #1 contributes to this passing record.
+Attempt #2 remains a valid historical PASS for its exact source and environment.
+PR CI subsequently exposed a fixed 100-ms sleep used as a proxy for asynchronous
+executor progress. Admission and dedupe responses do not promise an adapter
+start by that observation time. The second remediation observes real command
+state within a three-second deadline, rejects duplicate starts immediately, and
+requires terminal `succeeded + confirmed` with exactly one start. An explicit
+qualification gate protects delay, timeout and queue-promotion cases without
+changing production cadence or retries.
+
+[PR CI run 36941208313](https://github.com/adarj/grocery-pos-platform/actions/runs/36941208313)
+passed all five jobs on the remediated source. This is separate supporting
+evidence, not part of the fourteen-group acceptance ledger. Before attempt #3,
+the prior passing logs/summary/ledger were copied into ignored
+`.local/acceptance/m8-2/passed-attempt-2/`. Both historical archives are preserved;
+neither supplies a group result to this record.
 
 ## Qualified provenance
 
 The branch was `feat/rust-edge-protocol`. HEAD before and after the campaign was
-exactly `c44a820016feb8e56d3f6c52c2d49c16a294b5bd`, with direct parent
-`7e9ddca17ed87db5cd64ccc6a8013bcb0a27e19c` and machinery grandparent
-`11ba5efacd96b761ea71fda08791dfa12f07b5e2`. The tracked tree, index, and
-nonignored untracked inventory were empty before execution. The canonical
-ledger and audit report were absent. No source edits preceded the run.
+exactly `30aa761cb759172d695a4d03bdd13679f1070af6`, with direct parent
+`6ce6ffc14d3e8a9136cb9a94d2de8aded7e50b05`. The complete ancestry through
+`c44a820016feb8e56d3f6c52c2d49c16a294b5bd`,
+`7e9ddca17ed87db5cd64ccc6a8013bcb0a27e19c` and machinery commit
+`11ba5efacd96b761ea71fda08791dfa12f07b5e2` was verified. The tracked tree,
+index, and nonignored untracked inventory were empty before execution. The
+committed ledger/audit still described attempt #2; they were retained before
+the new run. No source or documentation edits preceded qualification.
 
 The single authoritative command was:
 
@@ -52,20 +76,21 @@ The single authoritative command was:
 nix develop --command just accept-m8-2
 ```
 
-It started at **2026-10-01 16:05:38 UTC**, exited **0**, and published the ledger
-at **2026-10-01 16:33:33 UTC** (about 28 minutes). Completion was observed at
-16:33:52 UTC. The recorded environment was **Fedora 44, aarch64, kernel
-7.2.7-200.fc44.aarch64, Racket 9.1 [CS], rustc 1.95.0
+It started at **2026-10-02 00:14:04 UTC**, exited **0**, and generated the ledger
+at **2026-10-02 00:41:51 UTC** (27 minutes 47 seconds from launch). Completion
+was observed at **00:42:03 UTC**. The recorded environment was **Fedora 44,
+aarch64, kernel 7.2.7-200.fc44.aarch64, Racket 9.1 [CS], rustc 1.95.0
 (59807616e 2026-04-14)**, using the repository-pinned Nix development shell.
 
 The ledger has schema version 1, milestone 8, the M8.2 generic Tier-A
 submilestone, `authoritative: true`, `tested_worktree_state: clean`,
 `overall_status: passing`, and the exact qualified reference commit. Every
 group has exit 0 and no blocking issue. Current summary/ledger entries contain
-no `failed-attempt-1` reference. The runner reset its JSONL/summary and freshly
-executed every group; the archive was not an input.
+no `failed-attempt-1` or `passed-attempt-2` reference. All timestamps belong to
+this new run. The runner reset its JSONL/summary and freshly executed every
+group; neither archive was an input.
 
-Immediately after publication, the sole nonignored change was the generated
+Immediately after publication, the sole nonignored change was the refreshed
 ledger. The later evidence/documentation changes do not change the qualified
 source SHA. No executable, product, test, runner, manifest, lock, or patch was
 edited during or after qualification.
@@ -79,14 +104,14 @@ source references identify harnesses, not proof that they ran.
 
 | Group | Result | Actual current-run evidence |
 | --- | --- | --- |
-| M8.2-A-001 | passed | `just check-rust`: formatting and denied-warning Clippy; 132 Rust tests and 4 doctests |
+| M8.2-A-001 | passed | `just check-rust`: formatting and denied-warning Clippy; 136 Rust tests and 4 doctests |
 | M8.2-A-002 | passed | Focused Racket Edge protocol/client/process/session suites: 33 tests |
-| M8.2-A-003 | passed | `just check`: Flutter analysis; 638 Racket tests, 265 Flutter tests, 132 Rust tests and 4 doctests, 34 POS process/integration tests |
+| M8.2-A-003 | passed | `just check`: clean Flutter analysis; 638 Racket tests, 265 Flutter tests, 136 Rust tests and 4 doctests, 34 POS process/integration tests |
 | M8.2-A-004 | passed | Static v12, authority, seven-route, dependency, unsafe, simulator and opt-in checks |
 | M8.2-A-005 | passed | 27 Core actor identity/admission/retention tests |
 | M8.2-A-006 | passed | 25 executor/effect/resource tests, including qualification capacity cases |
 | M8.2-A-007 | passed | 17 binding/lifecycle/event-continuity tests |
-| M8.2-A-008 | passed | 33 protocol tests and 2 protocol doctests; 26 server tests; 16 Racket hostile-framing/session tests |
+| M8.2-A-008 | passed | 33 protocol tests and 2 protocol doctests; 30 server tests; 16 Racket hostile-framing/session tests |
 | M8.2-A-009 | passed | 18 Racket process/framing tests, including server-counted lost-response recovery |
 | M8.2-A-010 | passed | 11 focused Rust default-capacity/transport cases; 1,000-operation live load |
 | M8.2-A-011 | passed | 25 controlled edge process-death/new-agent cycles |
@@ -106,6 +131,14 @@ counter isolation, strict post-readiness refusal, and bounded/redacted drained
 diagnostics. The startup probe uses an authored unknown-route 404 through EOF,
 creates no Core command/event subscription, and leaves both small-fixture
 connection slots usable. The startup deadline remains three seconds.
+
+A-001 and A-008 also passed
+`lost_response_keeps_one_record_and_one_physical_start` and the four new
+execution-observation regressions: delayed terminal execution, delayed active
+queue promotion, a bounded wait with no executor progress, and duplicate-start
+rejection before another observation. The deliberately paused fixture remains
+at zero starts beyond the former 100-ms assumption; releasing it allows the
+same real HTTP → Core → executor path to reach one confirmed terminal success.
 
 ## E1–E30 disposition
 
@@ -283,6 +316,17 @@ deliberately lost, sent **zero implicit GETs and zero extra POSTs**, and produce
 with the **same command ID/semantics/deadline and a fresh request ID**. Its response
 was **HTTP 200 dedupe**. Final counters were **2 POSTs, 1 dedupe, 1 adapter start**.
 
+A-009's Racket lost-response case checks uncertainty, identity/correlation and
+those server counters; it does not assert a particular terminal outcome. The
+current Rust lost-response cases executed in A-001/A-008 additionally perform
+explicit observational GETs until the retained command is **terminal
+`succeeded + confirmed`**, with **exactly one start**. They first assert no
+implicit recovery requests before that explicit polling. Starts above one fail
+immediately; zero starts or absent completion cannot pass after the three-second
+deadline. A-010 also requires confirmed terminal success for every live-load
+operation. These are complementary executed proofs, not a claim that A-009
+alone checked terminal completion or that execution has a 100-ms latency SLA.
+
 These values are assertions in the executed test, not payload-bearing telemetry.
 This protects one retained synthetic semantic attempt from duplicate execution;
 it is not durable exactly-once hardware execution or automatic business recovery.
@@ -322,9 +366,9 @@ The current A-010 log recorded the following live-path observations:
 | Command events | 3,000: accepted, executing, terminal for every operation |
 | Command-cache high-water / final retained | 1,000 / 1,000 |
 | Rebinds | 0 |
-| Elapsed | 44.21374241 seconds |
-| Observed rate | 22.617402316385366 semantic operations/second |
-| Peak / final fixture RSS | 5,444 / 5,444 KiB |
+| Elapsed | 44.158266340000004 seconds |
+| Observed rate | 22.645816579401515 semantic operations/second |
+| Peak / final fixture RSS | 5,440 / 5,440 KiB |
 
 Each operation checked exact event phases, healthy continuity and confirmed
 terminal state; final cursor delta was 3,000 and device snapshots/revisions were
@@ -403,10 +447,10 @@ coupling. Source scans are tripwires supplemented by runtime tests and review.
 The Git source snapshot includes tracked/current and nonignored new source without
 staging; ignored logs/databases/build state/secrets/socket probes are excluded.
 The unchanged Nix deployable filter excludes `.local`, including the preserved
-failed-attempt archive. Source-isolation execution verified index preservation,
-owned live-socket exclusion and stable Core/terminal derivations under injected
-ignored markers. `edge-sim` remains optional qualification infrastructure and
-`edge-qualification-fixture` requires the explicit qualification feature; no
+failed-attempt and prior passing-run archives. Source-isolation execution verified
+index preservation, owned live-socket exclusion and stable Core/terminal
+derivations under injected ignored markers. `edge-sim` remains optional
+qualification infrastructure and `edge-qualification-fixture` requires the explicit qualification feature; no
 production daemon simulation activation path currently exists.
 
 Rust/Racket diagnostics use authored categories and bounded/redacted fixture
@@ -424,7 +468,7 @@ generic capability maps do not certify those paths; this record does not rewrite
 M8.1 or claim the entire future Tier-A table passed.
 
 Scanner observations, stable/unstable scale observations, printer paper-out,
-drawer conditions, device-specific internal observation overflow and real
+drawer conditions, customer-display hardware, device-specific internal observation overflow and real
 USB/HID/serial drivers require M8.3+ implementation and qualification.
 Production daemon/bootstrap, inherited-descriptor acquisition and secure agent
 epoch generation remain later composition work.
@@ -432,7 +476,7 @@ epoch generation remain later composition work.
 Tier B still requires booted systemd service/socket behavior, actual service
 identities, socket DAC/wrong real UID despite group access, udev/device cgroups,
 SELinux enforcing, filesystem/network sandboxing and production config ownership.
-Tier C still requires selected scanner/printer/drawer/scale hardware, physical
+Tier C still requires selected scanner/printer/drawer/display/scale hardware, physical
 hotplug and real driver conditions. Tier D still requires the representative
 Flutter → Racket → SQLite plus Racket → Rust → physical-device lane. Payments
 remain excluded from generic Edge Protocol v1. Whole M8 remains open.
@@ -440,12 +484,14 @@ remain excluded from generic Edge Protocol v1. Whole M8 remains open.
 ## Findings
 
 No unresolved material finding was identified in the current qualified generic
-source/evidence audit. The historical readiness defect was corrected before the
-qualified commit and is regression protected; its failed ledger was not erased
-or counted toward this PASS. No source fixes or additional authoritative reruns
-occurred during attempt #2.
+source/evidence audit. Both historical synchronization defects were corrected
+before the qualified commit and are regression protected: actual HTTP readiness
+replaces pathname existence, and bounded execution-state observation replaces
+guessed scheduler latency. The failed ledger was not erased or counted toward
+this PASS; the earlier PASS remains historical. No source fixes or additional
+authoritative reruns occurred during attempt #3.
 
 Future M8.8 should reference this frozen record rather than regenerate or rewrite
 it. Any product/instrument change needing qualification must be reviewed and
 committed before a new authoritative run; this docs-only evidence commit must
-continue to name `c44a820016feb8e56d3f6c52c2d49c16a294b5bd` as its tested source.
+continue to name `30aa761cb759172d695a4d03bdd13679f1070af6` as its tested source.

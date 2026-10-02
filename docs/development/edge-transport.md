@@ -20,7 +20,7 @@ server epoch and closes connections; it never becomes a recoverable HTTP 500.
 requests, 16 KiB HTTP buffer, 32 headers, 256 KiB command/non-stream JSON, 64 KiB
 per event, five-second header/body/control/write deadlines, ten-millisecond
 executor cadence, and ten-second heartbeat cadence. M8.2.7 qualified the generic
-defaults at `c44a820016feb8e56d3f6c52c2d49c16a294b5bd`; these are implementation
+defaults at `30aa761cb759172d695a4d03bdd13679f1070af6`; these are implementation
 bounds, not protocol constants or performance guarantees. HTTP/1 keep-alive is
 disabled. Write half-close is allowed
 because Racket's mature client closes its write half after response headers;
@@ -136,9 +136,13 @@ fragmented/coalesced NDJSON, fault ordering, disconnect cleanup, overflow/fresh
 snapshot, and restart without command replay.
 
 M8.2.7 froze the generic Tier-A qualification record at
-`c44a820016feb8e56d3f6c52c2d49c16a294b5bd` after the reviewed machinery,
-formatting and fixture-readiness commits. Authoritative attempt #2 passed all
-fourteen groups freshly; the earlier failed attempt remains historical evidence.
+`30aa761cb759172d695a4d03bdd13679f1070af6` after the reviewed machinery,
+formatting, fixture-readiness and execution-observation commits. Authoritative
+attempt #3 passed all fourteen groups freshly. The earlier failed attempt and
+attempt #2's PASS remain historical evidence; neither supplies current results.
+The committed regressions require responsive HTTP at startup and bounded
+observation of confirmed terminal execution, without automatic POST retries or
+a scheduler-latency guarantee.
 The documentation-only evidence commit retains the qualified source SHA. See
 [M8.2 acceptance](../acceptance/m8.2/README.md) and its audit report.
 Real hardware, discovery/selectors, complete production configuration, inherited

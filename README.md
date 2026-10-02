@@ -172,13 +172,13 @@ device-specific observations, production daemon/bootstrap composition,
 Linux service-identity/DAC/SELinux qualification, and physical qualification
 remain deferred. [M8.2 generic edge Tier-A qualification](docs/acceptance/m8.2/README.md)
 passed all fourteen mandatory groups at corrected source commit
-`c44a820016feb8e56d3f6c52c2d49c16a294b5bd`, including default-capacity/load,
+`30aa761cb759172d695a4d03bdd13679f1070af6`, including default-capacity/load,
 controlled process-death and qualification-instrument checks. The
-[frozen audit](docs/acceptance/m8.2/audit-report.md) records the earlier failed
-attempt, readiness remediation and fresh clean-tree campaign. This qualifies
-neither a production edge daemon/appliance nor physical hardware; whole M8 and
-whole-M8 Tier A remain open. The evidence is frozen in a separate documentation
-commit that continues to reference the tested source SHA.
+[frozen audit](docs/acceptance/m8.2/audit-report.md) records qualification and CI
+history, both synchronization remediations, and the fresh clean-tree campaign.
+This qualifies neither a production edge daemon/appliance nor physical hardware;
+whole M8 and whole-M8 Tier A remain open. The evidence is frozen in a separate
+documentation commit that continues to reference the tested source SHA.
 
 ### Testing and qualification
 

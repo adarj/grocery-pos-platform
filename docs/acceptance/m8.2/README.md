@@ -1,10 +1,10 @@
 # M8.2 Generic Edge Foundation — Tier A
 
 **M8.2 Generic Edge Foundation — Tier A PASS**, qualified at
-`c44a820016feb8e56d3f6c52c2d49c16a294b5bd` by authoritative attempt #2 on
-2026-10-01. All fourteen mandatory groups passed. M8.2 Tier-A passing does not
-mean whole-M8 Tier-A or Tier-B/C/D passing, a production hardware daemon, or
-durable exactly-once physical effects.
+`30aa761cb759172d695a4d03bdd13679f1070af6` by authoritative attempt #3 on
+2026-10-02. All fourteen mandatory groups passed freshly. M8.2 Tier-A passing
+does not mean whole-M8 Tier-A or Tier-B/C/D passing, a production hardware daemon,
+or durable exactly-once physical effects.
 
 The generic path is Racket → filesystem UDS HTTP/1.1 → strict codec → single-owner Core → real FIFO/executor → simulator → Core events → NDJSON → Racket EdgeSession. Tier A can qualify this software contract, boundedness and failure handling. Same-user `SO_PEERCRED` checks are repository evidence; separate deployed service UID/DAC/SELinux enforcement is Tier B. Real selected devices are Tier C; integrated lanes are Tier D. Controlled edge process death is not physical power loss.
 
@@ -15,9 +15,21 @@ Attempt #1 against formatting-normalized `7e9ddca17ed87db5cd64ccc6a8013bcb0a27e1
 failed A-001 on fixture startup readiness. The signed remediation commit
 `c44a820016feb8e56d3f6c52c2d49c16a294b5bd` added responsive-HTTP startup and
 deterministic regressions. Attempt #2 freshly ran every group on that exact
-clean tree; no earlier passing group was reused. The historical failing ledger
-remains in ignored `.local/acceptance/m8-2/failed-attempt-1/`. Current attempt #2
-logs remain at the ledger's ignored paths for local review.
+clean tree; no earlier passing group was reused. That PASS was frozen in
+`6ce6ffc14d3e8a9136cb9a94d2de8aded7e50b05` and remains historically valid for
+its source/environment. PR #11 CI then exposed a fixed-sleep assumption in the
+lost-response execution test. The reviewed remediation
+`30aa761cb759172d695a4d03bdd13679f1070af6` uses bounded state observation,
+requires terminal succeeded/confirmed with one start, and adds deterministic
+delayed-execution regressions. All five PR CI jobs passed; CI is separate
+supporting evidence. Attempt #3 independently ran every mandatory group against
+that exact clean source and supplies the current frozen record.
+
+The historical failing ledger remains in ignored
+`.local/acceptance/m8-2/failed-attempt-1/`; prior passing logs/summary/ledger are
+preserved under `.local/acceptance/m8-2/passed-attempt-2/`. Current attempt #3
+logs remain at the ledger's ignored paths for local review. Neither historical
+archive contributed any current group result.
 
 ## Two commits
 
