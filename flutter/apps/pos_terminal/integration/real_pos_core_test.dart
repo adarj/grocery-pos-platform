@@ -2340,7 +2340,10 @@ void main() {
       );
       await fixture.activateCatalogSnapshot(replacementFile.path);
 
-      final receipt = await cashier.client.fetchReceipt(transactionId);
+      final receipt = await fixture.observeOperation(
+        'Historical receipt GET after catalog activation barrier',
+        () => cashier.client.fetchReceipt(transactionId),
+      );
       final line = receipt.lineItems.single;
       expect(line.description, _developmentDescription);
       expect(line.unitPriceMinorUnits, 199);
@@ -2400,8 +2403,9 @@ void main() {
         replacementFile.path,
       );
 
-      final secondShift = await cashier.client.openShift(
-        _developmentOpeningCash,
+      final secondShift = await fixture.observeOperation(
+        'Open shift after register configuration activation barrier',
+        () => cashier.client.openShift(_developmentOpeningCash),
       );
       expect(
         secondShift.shift.registerDisplayName,
@@ -2419,8 +2423,9 @@ void main() {
         _snapshot(cashier.controller).transactionId,
       );
 
-      final oldReceiptAgain = await cashier.client.fetchReceipt(
-        firstTransactionId,
+      final oldReceiptAgain = await fixture.observeOperation(
+        'Historical receipt GET after register configuration activation',
+        () => cashier.client.fetchReceipt(firstTransactionId),
       );
       expect(oldReceiptAgain.register!.displayName, _developmentRegisterName);
       expect(oldReceiptAgain.cashier!.displayName, _developmentCashierName);

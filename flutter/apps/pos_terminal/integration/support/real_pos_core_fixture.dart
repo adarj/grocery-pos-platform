@@ -5,6 +5,8 @@ import 'dart:io';
 import 'package:pos_terminal/core/pos_core/http_pos_core_client.dart';
 import 'package:pos_terminal/core/pos_core/models/pos_core_failure.dart';
 
+import 'core_responsiveness.dart';
+
 final class RealPosCoreFixture {
   RealPosCoreFixture._({
     required this.repositoryRoot,
@@ -19,6 +21,9 @@ final class RealPosCoreFixture {
   static const _readinessPollInterval = Duration(milliseconds: 50);
   static const _shutdownTimeout = Duration(seconds: 5);
   static const _referenceDataActivationTimeout = Duration(seconds: 30);
+  // Observe a live process within the normal client request budget. This is
+  // distinct from CLI startup/migration time and never extends business GETs.
+  static const _postActivationTimeout = Duration(seconds: 3);
 
   static Future<RealPosCoreFixture> create() async {
     final repositoryRoot = await _findRepositoryRoot(Directory.current);
@@ -46,6 +51,7 @@ final class RealPosCoreFixture {
   bool _catalogPrepared = false;
   bool _operationalConfigurationPrepared = false;
   bool _operatorCredentialPrepared = false;
+  String _lastExternalMutation = 'No external mutation completed.';
 
   String get databasePath => _join(temporaryDirectory.path, 'pos.db');
 
@@ -164,6 +170,8 @@ final class RealPosCoreFixture {
       );
     }
     await _runCatalogActivation(catalogPath);
+    _lastExternalMutation = 'Catalog activation exit code: 0';
+    await _waitAfterExternalMutation('catalog activation');
   }
 
   Future<void> activateOperationalConfigurationSnapshot(
@@ -175,6 +183,8 @@ final class RealPosCoreFixture {
       );
     }
     await _runOperationalConfigurationActivation(configurationPath);
+    _lastExternalMutation = 'Register configuration activation exit code: 0';
+    await _waitAfterExternalMutation('register configuration activation');
   }
 
   Future<void> enrollIntegrationOperator({
@@ -220,23 +230,45 @@ final class RealPosCoreFixture {
     );
     process.stdin.writeln(newPin);
     await process.stdin.close();
-    final stdoutFuture = process.stdout.transform(utf8.decoder).join();
-    final stderrFuture = process.stderr.transform(utf8.decoder).join();
-    final exitCode = await process.exitCode.timeout(
-      _referenceDataActivationTimeout,
-      onTimeout: () {
-        process.kill(ProcessSignal.sigkill);
-        throw TimeoutException('Timed out resetting isolated operator PIN.');
-      },
-    );
-    final output = await stdoutFuture;
-    final errorOutput = await stderrFuture;
-    if (exitCode != 0) {
-      throw StateError(
-        'Isolated operator reset failed with exit code $exitCode.\n'
-        'stdout:\n$output\nstderr:\n$errorOutput',
+    final stdoutTail = _OutputTail();
+    final stderrTail = _OutputTail();
+    final stdoutFuture = process.stdout
+        .transform(utf8.decoder)
+        .forEach(stdoutTail.add);
+    final stderrFuture = process.stderr
+        .transform(utf8.decoder)
+        .forEach(stderrTail.add);
+    int exitCode;
+    try {
+      exitCode = await process.exitCode.timeout(
+        _referenceDataActivationTimeout,
+      );
+    } on TimeoutException {
+      process.kill(ProcessSignal.sigkill);
+      await process.exitCode.timeout(_shutdownTimeout);
+      await Future.wait([stdoutFuture, stderrFuture]);
+      throw TimeoutException(
+        diagnostics(
+          'Timed out resetting isolated operator PIN.\n'
+          'CLI stdout tail:\n${stdoutTail.value}\n'
+          'CLI stderr tail:\n${stderrTail.value}',
+        ),
+        _referenceDataActivationTimeout,
       );
     }
+    await Future.wait([stdoutFuture, stderrFuture]);
+    final output = stdoutTail.value;
+    final errorOutput = stderrTail.value;
+    if (exitCode != 0) {
+      throw StateError(
+        diagnostics(
+          'Isolated operator reset failed with exit code $exitCode.\n'
+          'stdout:\n$output\nstderr:\n$errorOutput',
+        ),
+      );
+    }
+    _lastExternalMutation = 'Operator reset exit code: 0';
+    await _waitAfterExternalMutation('operator reset');
   }
 
   Future<void> stop() async {
@@ -285,12 +317,57 @@ final class RealPosCoreFixture {
     final sections = <String>[
       ?heading,
       'POS Core fixture URI: ${_baseUri ?? 'not running'}',
+      'POS Core fixture PID: ${_process?.pid ?? 'not running'}',
       'SQLite path: $databasePath',
       'Process exit code: ${_observedExitCode ?? 'not observed'}',
+      _lastExternalMutation,
       'stdout tail:\n${_stdoutTail.value}',
       'stderr tail:\n${_stderrTail.value}',
     ];
     return sections.join('\n');
+  }
+
+  Future<T> observeOperation<T>(
+    String operation,
+    Future<T> Function() observe,
+  ) => observeCoreOperation(
+    operation: operation,
+    observe: observe,
+    diagnostics: diagnostics,
+  );
+
+  Future<void> _waitAfterExternalMutation(String operation) async {
+    // Pre-start preparation has no live process to synchronize with. A process
+    // that exited after start still has handles and must fail the barrier.
+    if (_process == null) {
+      return;
+    }
+    HttpPosCoreClient? probeClient;
+    try {
+      await waitUntilCoreResponsiveAfterExternalMutation(
+        operation: 'After $operation (CLI exit code 0)',
+        observe: (timeout) async {
+          final client = HttpPosCoreClient(baseUri: baseUri, timeout: timeout);
+          probeClient = client;
+          try {
+            // /ready opens the authoritative DB with production connection
+            // policy and reads schema history. /health does no database work.
+            return await client.fetchReadiness();
+          } finally {
+            client.close();
+          }
+        },
+        processExitCode: _exitCodeFuture!,
+        observedExitCode: () => _observedExitCode,
+        diagnostics: diagnostics,
+        timeout: _postActivationTimeout,
+        attemptTimeout: _readinessAttemptTimeout,
+        pollInterval: _readinessPollInterval,
+      );
+    } finally {
+      // Also cancel a pending request when process exit wins the observation.
+      probeClient?.close();
+    }
   }
 
   Future<void> _waitUntilReady() async {
@@ -372,8 +449,14 @@ final class RealPosCoreFixture {
       workingDirectory: backendDirectory,
       environment: Platform.environment,
     );
-    final stdoutFuture = process.stdout.transform(utf8.decoder).join();
-    final stderrFuture = process.stderr.transform(utf8.decoder).join();
+    final stdoutTail = _OutputTail();
+    final stderrTail = _OutputTail();
+    final stdoutFuture = process.stdout
+        .transform(utf8.decoder)
+        .forEach(stdoutTail.add);
+    final stderrFuture = process.stderr
+        .transform(utf8.decoder)
+        .forEach(stderrTail.add);
 
     int exitCode;
     try {
@@ -383,17 +466,25 @@ final class RealPosCoreFixture {
     } on TimeoutException {
       process.kill(ProcessSignal.sigkill);
       await process.exitCode.timeout(_shutdownTimeout);
+      await Future.wait([stdoutFuture, stderrFuture]);
       throw TimeoutException(
-        'Timed out activating the isolated development catalog.',
+        diagnostics(
+          'Timed out activating the isolated development catalog.\n'
+          'CLI stdout tail:\n${stdoutTail.value}\n'
+          'CLI stderr tail:\n${stderrTail.value}',
+        ),
         _referenceDataActivationTimeout,
       );
     }
-    final output = await stdoutFuture;
-    final errorOutput = await stderrFuture;
+    await Future.wait([stdoutFuture, stderrFuture]);
+    final output = stdoutTail.value;
+    final errorOutput = stderrTail.value;
     if (exitCode != 0) {
       throw StateError(
-        'Catalog activation for POS Core fixture failed with exit code '
-        '$exitCode.\nstdout:\n$output\nstderr:\n$errorOutput',
+        diagnostics(
+          'Catalog activation for POS Core fixture failed with exit code '
+          '$exitCode.\nstdout:\n$output\nstderr:\n$errorOutput',
+        ),
       );
     }
   }
@@ -413,8 +504,14 @@ final class RealPosCoreFixture {
       workingDirectory: backendDirectory,
       environment: Platform.environment,
     );
-    final stdoutFuture = process.stdout.transform(utf8.decoder).join();
-    final stderrFuture = process.stderr.transform(utf8.decoder).join();
+    final stdoutTail = _OutputTail();
+    final stderrTail = _OutputTail();
+    final stdoutFuture = process.stdout
+        .transform(utf8.decoder)
+        .forEach(stdoutTail.add);
+    final stderrFuture = process.stderr
+        .transform(utf8.decoder)
+        .forEach(stderrTail.add);
 
     int exitCode;
     try {
@@ -424,17 +521,25 @@ final class RealPosCoreFixture {
     } on TimeoutException {
       process.kill(ProcessSignal.sigkill);
       await process.exitCode.timeout(_shutdownTimeout);
+      await Future.wait([stdoutFuture, stderrFuture]);
       throw TimeoutException(
-        'Timed out activating isolated register configuration.',
+        diagnostics(
+          'Timed out activating isolated register configuration.\n'
+          'CLI stdout tail:\n${stdoutTail.value}\n'
+          'CLI stderr tail:\n${stderrTail.value}',
+        ),
         _referenceDataActivationTimeout,
       );
     }
-    final output = await stdoutFuture;
-    final errorOutput = await stderrFuture;
+    await Future.wait([stdoutFuture, stderrFuture]);
+    final output = stdoutTail.value;
+    final errorOutput = stderrTail.value;
     if (exitCode != 0) {
       throw StateError(
-        'Register configuration activation for POS Core fixture failed with '
-        'exit code $exitCode.\nstdout:\n$output\nstderr:\n$errorOutput',
+        diagnostics(
+          'Register configuration activation for POS Core fixture failed with '
+          'exit code $exitCode.\nstdout:\n$output\nstderr:\n$errorOutput',
+        ),
       );
     }
   }
