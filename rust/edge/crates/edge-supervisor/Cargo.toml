@@ -1,0 +1,16 @@
+[package]
+name = "edge-supervisor"
+description = "Privileged bounded configuration and physical candidate reconciliation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+edge-core = { path = "../edge-core" }
+edge-protocol = { path = "../edge-protocol" }
+serde.workspace = true
+toml = { version = "0.9.8", default-features = false, features = ["parse", "serde", "std"] }
+
+[lints]
+workspace = true

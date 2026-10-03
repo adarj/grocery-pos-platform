@@ -129,10 +129,14 @@ The configuration must declare:
 schema_version = 1
 ```
 
-M8.2 must supply strict, bounded configuration parsing and reject unsupported
-versions, unknown fields/adapters, duplicate logical IDs, and invalid selectors
-or capability declarations. This checkpoint does not invent the complete TOML
-slot syntax.
+M8.1 originally assigned strict bounded configuration to M8.2. The qualified
+M8.2 generic foundation explicitly deferred the production format and discovery;
+its frozen evidence retains that limitation. M8.3.1 now supplies the minimum
+[Edge configuration v1](edge-configuration-v1.md) schema, compiled-adapter metadata
+validation, bounded Linux USB snapshots, and deterministic global reconciliation
+in `edge-supervisor`. It stops at candidate eligibility. A scanner may have an
+allowed observation capability without a command resource, but sound
+observation-runtime installation and binding activation remain M8.3.2 work.
 
 | Edge configuration answers | Racket/register configuration answers |
 | --- | --- |

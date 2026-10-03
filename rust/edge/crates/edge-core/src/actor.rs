@@ -29,6 +29,7 @@ pub use events::{EventPoll, EventSubscription, SubscriptionError, SubscriptionTo
 
 struct CoreDevice {
     snapshot: DeviceSnapshot,
+    allowed_capabilities: BTreeSet<Capability>,
     resources: BTreeMap<Capability, ResourceId>,
 }
 
@@ -181,8 +182,20 @@ where
             if seed.capability_resources.len() > limits.max_capabilities_per_device {
                 return Err(CoreFatalError::TooManyCapabilities);
             }
+            if seed.allowed_capabilities.len() > limits.max_capabilities_per_device {
+                return Err(CoreFatalError::TooManyCapabilities);
+            }
+            let mut allowed_capabilities = BTreeSet::new();
+            for capability in seed.allowed_capabilities {
+                if !allowed_capabilities.insert(capability) {
+                    return Err(CoreFatalError::DuplicateAllowedCapability);
+                }
+            }
             let mut resources = BTreeMap::new();
             for (capability, resource) in seed.capability_resources {
+                if !allowed_capabilities.contains(&capability) {
+                    return Err(CoreFatalError::ResourceCapabilityNotAllowed);
+                }
                 if resources.insert(capability, resource).is_some() {
                     return Err(CoreFatalError::DuplicateResourceMapping);
                 }
@@ -217,6 +230,7 @@ where
                 snapshot.device_id.clone(),
                 CoreDevice {
                     snapshot,
+                    allowed_capabilities,
                     resources,
                 },
             );
@@ -351,7 +365,11 @@ where
             ));
         }
         let Some(&resource) = device.resources.get(&capability) else {
-            return Err(CoreFatalError::MissingResourceMapping);
+            // An allowed observation is not executable authority. Compiled
+            // command admission cannot manufacture a resource for it.
+            return Ok(AdmissionDecision::Rejected(
+                AdmissionRejection::CapabilityUnavailable,
+            ));
         };
         // 8–9. Reclaim only safe terminal identities, then enforce the bound.
         self.reclaim_for_admission(now)?;

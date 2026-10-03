@@ -905,6 +905,7 @@ fn partial_installation_rejection_drops_all_fresh_adapters() {
 #[test]
 fn resource_less_installation_cannot_fabricate_a_bound_device() {
     let mut slot = seed();
+    slot.allowed_capabilities = vec![Capability::new("scanner.barcode").unwrap()];
     slot.capability_resources.clear();
     let (producer, consumer) = bounded_executor_queue([], 1, 1).unwrap();
     let mut core = CoreActor::new(

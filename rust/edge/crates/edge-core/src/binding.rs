@@ -319,7 +319,7 @@ impl<P: CoreCommand, C: AgentClock, Q: ExecutorQueuePort<P>> CoreActor<P, C, Q> 
         if state
             .capabilities
             .iter()
-            .any(|cap| !slot.resources.contains_key(cap))
+            .any(|cap| !slot.allowed_capabilities.contains(cap))
         {
             return Err(LifecycleError::Rejected(
                 LifecycleRejection::CapabilityNotConfigured,

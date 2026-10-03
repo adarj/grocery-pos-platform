@@ -5,6 +5,7 @@ members = [
     "crates/edge-core",
     "crates/edge-sim",
     "crates/edge-server",
+    "crates/edge-supervisor",
 ]
 resolver = "3"
 

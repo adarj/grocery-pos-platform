@@ -35,6 +35,7 @@ impl AgentClock for FakeClock {
 enum SyntheticKind {
     Observe,
     Signal,
+    Barcode,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -48,6 +49,7 @@ impl TypedCommandPayload for SyntheticCommand {
         match self.variant {
             SyntheticKind::Observe => "synthetic.observe",
             SyntheticKind::Signal => "synthetic.signal",
+            SyntheticKind::Barcode => "scanner.barcode",
         }
     }
 }
@@ -187,6 +189,12 @@ fn seed(
             conditions: BTreeSet::new(),
             capabilities: caps.iter().map(|cap| capability(cap)).collect(),
         },
+        allowed_capabilities: mappings
+            .iter()
+            .map(|(cap, _)| capability(cap))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
         capability_resources: mappings
             .iter()
             .map(|(cap, resource)| (capability(cap), *resource))
@@ -205,6 +213,206 @@ fn normal_seed() -> CoreDeviceSeed {
             ("synthetic.signal", ResourceId::new(7)),
         ],
     )
+}
+
+#[test]
+fn observation_only_registry_is_valid_and_remains_unbound() {
+    for availability in [DeviceAvailability::Absent, DeviceAvailability::Disabled] {
+        let mut slot = normal_seed();
+        slot.snapshot.availability = availability;
+        slot.allowed_capabilities = vec![capability("scanner.barcode")];
+        slot.capability_resources.clear();
+        let core = TestCore::new(
+            agent(),
+            vec![slot],
+            limits(),
+            FakeClock::new(100),
+            FakeQueue::default(),
+        )
+        .unwrap();
+        let snapshot = core.device_snapshot(&device_id("lane-a.device")).unwrap();
+        assert_eq!(snapshot.availability, availability);
+        assert!(snapshot.capabilities.is_empty());
+        assert!(snapshot.binding_instance_id.is_none());
+        assert_eq!(snapshot.state_revision.get(), 0);
+    }
+}
+
+#[test]
+fn allowed_observation_is_publishable_but_not_executable_without_a_resource() {
+    let mut slot = normal_seed();
+    slot.capability_resources
+        .retain(|(cap, _)| cap.as_str() == "synthetic.signal");
+    let mut core = TestCore::new(
+        agent(),
+        vec![slot],
+        limits(),
+        FakeClock::new(100),
+        FakeQueue::default(),
+    )
+    .unwrap();
+    core.begin_connecting(&device_id("lane-a.device")).unwrap();
+    let witness = core
+        .installation_witness(
+            &device_id("lane-a.device"),
+            &binding("binding-a"),
+            [ResourceId::new(7)].into(),
+            Rc::new(Cell::new(true)),
+        )
+        .unwrap();
+    core.activate_binding(
+        witness,
+        BoundDeviceState {
+            availability: BoundAvailability::Ready,
+            conditions: BTreeSet::new(),
+            capabilities: [
+                capability("synthetic.signal"),
+                capability("synthetic.observe"),
+            ]
+            .into(),
+        },
+    )
+    .unwrap();
+    let mut submission = command("observation-as-command", "request", 110, 10);
+    submission.kind = CommandKind::new("synthetic.observe").unwrap();
+    submission.payload.variant = SyntheticKind::Observe;
+    assert!(matches!(
+        core.submit_command(submission),
+        Ok(AdmissionDecision::Rejected(
+            AdmissionRejection::CapabilityUnavailable
+        ))
+    ));
+    assert_eq!(core.retained_command_count(), 0);
+    assert_eq!(core.queue.reserve_calls, 0);
+}
+
+#[test]
+fn invalid_configured_allowlists_fail_before_registry_construction() {
+    let mut duplicate = normal_seed();
+    duplicate
+        .allowed_capabilities
+        .push(capability("synthetic.signal"));
+    assert_eq!(
+        TestCore::new(
+            agent(),
+            vec![duplicate],
+            limits(),
+            FakeClock::new(100),
+            FakeQueue::default()
+        )
+        .unwrap_err(),
+        CoreFatalError::DuplicateAllowedCapability
+    );
+    let mut unmapped_authority = normal_seed();
+    unmapped_authority.allowed_capabilities.clear();
+    assert_eq!(
+        TestCore::new(
+            agent(),
+            vec![unmapped_authority],
+            limits(),
+            FakeClock::new(100),
+            FakeQueue::default()
+        )
+        .unwrap_err(),
+        CoreFatalError::ResourceCapabilityNotAllowed
+    );
+    let mut too_many = normal_seed();
+    too_many.allowed_capabilities = (0..=limits().max_capabilities_per_device)
+        .map(|n| capability(&format!("observe.{n}")))
+        .collect();
+    assert_eq!(
+        TestCore::new(
+            agent(),
+            vec![too_many],
+            limits(),
+            FakeClock::new(100),
+            FakeQueue::default()
+        )
+        .unwrap_err(),
+        CoreFatalError::TooManyCapabilities
+    );
+}
+
+#[test]
+fn observation_only_publication_never_reserves_or_records_a_command() {
+    let mut slot = normal_seed();
+    slot.allowed_capabilities = vec![capability("scanner.barcode")];
+    slot.capability_resources.clear();
+    let mut core = TestCore::new(
+        agent(),
+        vec![slot],
+        limits(),
+        FakeClock::new(100),
+        FakeQueue::default(),
+    )
+    .unwrap();
+    let state = BoundDeviceState {
+        availability: BoundAvailability::Ready,
+        conditions: BTreeSet::new(),
+        capabilities: [capability("scanner.barcode")].into(),
+    };
+    // The capability validator permits future observation publication. Actual
+    // installation cannot activate it today: the executor still needs resources.
+    // Model that future public state only inside this private admission test,
+    // without fabricating or weakening an executor installation witness.
+    let snapshot = &mut core
+        .devices
+        .get_mut(&device_id("lane-a.device"))
+        .unwrap()
+        .snapshot;
+    snapshot.binding_instance_id = Some(binding("binding-a"));
+    core.update_bound_device_state(&device_id("lane-a.device"), &binding("binding-a"), state)
+        .unwrap();
+    let mut submission = command("barcode-as-command", "request", 110, 10);
+    submission.kind = CommandKind::new("scanner.barcode").unwrap();
+    submission.payload.variant = SyntheticKind::Barcode;
+    assert_eq!(
+        rejected(core.submit_command(submission).unwrap()),
+        AdmissionRejection::CapabilityUnavailable
+    );
+    assert_eq!(core.retained_command_count(), 0);
+    assert_eq!(core.queue.reserve_calls, 0);
+    assert_eq!(core.queue.commit_calls, 0);
+    assert_eq!(core.next_admission_sequence, 0);
+    assert!(core.fatal.is_none());
+}
+
+#[test]
+fn empty_allowlist_registry_and_resource_mapping_bounds_are_explicit() {
+    let make = |slot| {
+        TestCore::new(
+            agent(),
+            vec![slot],
+            limits(),
+            FakeClock::new(0),
+            FakeQueue::default(),
+        )
+    };
+    let mut empty = normal_seed();
+    empty.allowed_capabilities.clear();
+    empty.capability_resources.clear();
+    assert!(make(empty).is_ok());
+    assert!(
+        TestCore::new(
+            agent(),
+            vec![],
+            limits(),
+            FakeClock::new(0),
+            FakeQueue::default()
+        )
+        .unwrap()
+        .device_snapshots()
+        .is_empty()
+    );
+    let mut excess = normal_seed();
+    excess.capability_resources = vec![
+        (capability("synthetic.signal"), ResourceId::new(7));
+        limits().max_capabilities_per_device + 1
+    ];
+    assert_eq!(
+        make(excess).unwrap_err(),
+        CoreFatalError::TooManyCapabilities
+    );
 }
 
 fn core(clock: FakeClock, limits: CoreLimits, queue: FakeQueue) -> TestCore {
@@ -897,7 +1105,7 @@ fn sequence_overflow_releases_the_uncommitted_reservation() {
 }
 
 #[test]
-fn bound_published_capability_requires_a_resource_mapping() {
+fn bound_published_capability_requires_configured_allowlist_authority() {
     let mut core = core(FakeClock::new(100), limits(), FakeQueue::default());
     let before = core
         .device_snapshot(&device_id("lane-a.device"))

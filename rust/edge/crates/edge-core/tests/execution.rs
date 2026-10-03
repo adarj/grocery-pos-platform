@@ -106,6 +106,10 @@ fn seed() -> CoreDeviceSeed {
             conditions: BTreeSet::new(),
             capabilities: BTreeSet::new(),
         },
+        allowed_capabilities: vec![
+            Capability::new("synthetic.signal").unwrap(),
+            Capability::new("synthetic.observe").unwrap(),
+        ],
         capability_resources: vec![
             (
                 Capability::new("synthetic.signal").unwrap(),

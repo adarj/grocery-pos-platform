@@ -167,8 +167,16 @@ An application hook panic or double panic during unwinding is not containable.
 Simulation is repository qualification infrastructure only, with no production
 activation path yet.
 
-OS discovery/selectors, complete production `edge.toml`, real adapters,
-device-specific observations, production daemon/bootstrap composition,
+M8.3.1 adds `edge-supervisor`: strict bounded
+[configuration v1](docs/architecture/edge-configuration-v1.md), read-only Linux
+USB candidate discovery, exact selectors, and deterministic global reconciliation.
+Configured observation capabilities are independent of command resources; an
+unbound scanner slot publishes no active capability. Unique configured matches
+are provisionally eligible, subject to binding-time revalidation. Scanner
+observation-runtime installation and actual binding remain M8.3.2 work.
+No scanner driver or barcode I/O exists yet.
+
+Real adapters, device-specific observations, production daemon/bootstrap composition,
 Linux service-identity/DAC/SELinux qualification, and physical qualification
 remain deferred. [M8.2 generic edge Tier-A qualification](docs/acceptance/m8.2/README.md)
 passed all fourteen mandatory groups at corrected source commit

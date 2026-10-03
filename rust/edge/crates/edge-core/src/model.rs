@@ -30,15 +30,16 @@ pub trait AgentClock {
     fn now(&self) -> AgentUptimeMs;
 }
 
-/// Prevalidated configured logical slot plus internal executable-resource map.
+/// Configured logical slot, semantic allowlist, and executable-resource subset.
 /// Multiple capabilities of one device may share a resource. Resource IDs may
 /// not be shared by different logical devices in this v1 admission registry.
-/// Seeds are unbound, revision-zero public states. The resource map is the
-/// configured command allowlist and survives disconnect/rebind. Binding authority
-/// is established separately with an executor installation witness. Event-only
-/// capabilities are not modeled as unmapped command capabilities.
+/// Seeds are unbound, revision-zero public states. Allowed capabilities include
+/// observations with no command resource; configuration alone never publishes
+/// them. Both maps survive disconnect/rebind. Binding authority still requires
+/// an executor installation witness; observation-only installation is deferred.
 pub struct CoreDeviceSeed {
     pub snapshot: DeviceSnapshot,
+    pub allowed_capabilities: Vec<Capability>,
     pub capability_resources: Vec<(Capability, ResourceId)>,
 }
 
@@ -121,6 +122,8 @@ pub enum CoreFatalError {
     DuplicateDevice,
     RegistryAgentMismatch,
     MissingResourceMapping,
+    DuplicateAllowedCapability,
+    ResourceCapabilityNotAllowed,
     DuplicateResourceMapping,
     InvalidInitialDeviceState,
     ResourceSharedAcrossDevices,

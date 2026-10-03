@@ -372,6 +372,7 @@ fn main() {
                     conditions: BTreeSet::new(),
                     capabilities: BTreeSet::new(),
                 },
+                allowed_capabilities: vec![Capability::new("synthetic.signal").unwrap()],
                 capability_resources: vec![(
                     Capability::new("synthetic.signal").unwrap(),
                     ResourceId::new(7),
