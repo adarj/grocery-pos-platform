@@ -13,6 +13,9 @@ use super::{AgentClock, CoreActor, CoreCommand, CoreFatalError, ExecutorQueuePor
 pub enum BindingInvalidation {
     Disconnected,
     ExecutionFault,
+    ObservationFault,
+    ObservationContinuityLost,
+    DiscoveryFault,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -21,7 +24,7 @@ pub enum BoundAvailability {
     Degraded,
 }
 
-/// Privileged typed current-hardware facts, constrained by the configured command
+/// Privileged typed current-hardware facts, constrained by the configured capability
 /// allowlist. The caller reports the intersection of compiled adapter support and
 /// current hardware support, with authored condition codes, never raw driver text.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -63,11 +66,12 @@ impl From<CoreFatalError> for LifecycleError {
     }
 }
 
-/// Executor-issued proof of a complete fresh adapter installation. No public
+/// Runtime-issued proof of installed components. Activation checks completeness
+/// against both command resources and observation capabilities. No public
 /// constructor, adapter handles, or independent "installed" flag. Replacing
-/// an unactivated installation invalidates all older witnesses for its resources.
+/// an unactivated installation invalidates older witnesses for its components.
 /// Dropping or rejecting this move-only witness cancels the pending installation:
-/// it cannot activate, and the next executor drive discards its fresh adapters.
+/// it cannot activate, and the next supervisor drive discards its fresh runtimes.
 /// Successful activation transfers cleanup ownership to the supervisor.
 /// The same witness cannot be replayed:
 ///
@@ -88,13 +92,36 @@ pub struct BindingInstallationWitness {
     pub(crate) binding: BindingInstanceId,
     pub(crate) revision: StateRevision,
     pub(crate) resources: BTreeSet<ResourceId>,
+    pub(crate) observations: BTreeSet<Capability>,
     // Installation lifetime proof only; never a second binding/execution truth.
-    live: Option<Rc<Cell<bool>>>,
+    live: Vec<Rc<Cell<bool>>>,
+}
+
+impl BindingInstallationWitness {
+    /// Join independently installed command and observation components. Neither
+    /// component alone can activate a mixed slot. Errors cancel both installs.
+    pub fn combine(mut self, mut other: Self) -> Result<Self, LifecycleError> {
+        if !Rc::ptr_eq(&self.owner, &other.owner)
+            || self.device_id != other.device_id
+            || self.binding != other.binding
+            || self.revision != other.revision
+            || !self.resources.is_disjoint(&other.resources)
+            || !self.observations.is_disjoint(&other.observations)
+        {
+            return Err(LifecycleError::Rejected(
+                LifecycleRejection::StaleInstallation,
+            ));
+        }
+        self.resources.append(&mut other.resources);
+        self.observations.append(&mut other.observations);
+        self.live.append(&mut other.live);
+        Ok(self)
+    }
 }
 
 impl Drop for BindingInstallationWitness {
     fn drop(&mut self) {
-        if let Some(live) = self.live.take() {
+        for live in self.live.drain(..) {
             live.set(false);
         }
     }
@@ -168,6 +195,21 @@ impl<P: CoreCommand, C: AgentClock, Q: ExecutorQueuePort<P>> CoreActor<P, C, Q> 
                 next.conditions.insert(condition);
                 DeviceAvailability::Faulted
             }
+            BindingInvalidation::ObservationFault
+            | BindingInvalidation::ObservationContinuityLost
+            | BindingInvalidation::DiscoveryFault => {
+                next.conditions.insert(
+                    ConditionCode::new(match reason {
+                        BindingInvalidation::ObservationContinuityLost => {
+                            "edge.observation_continuity_lost"
+                        }
+                        BindingInvalidation::DiscoveryFault => "edge.discovery_failed",
+                        _ => "edge.observation_fault",
+                    })
+                    .expect("authored condition"),
+                );
+                DeviceAvailability::Faulted
+            }
         };
         self.commit_device_state(next).map_err(Into::into)
     }
@@ -200,17 +242,19 @@ impl<P: CoreCommand, C: AgentClock, Q: ExecutorQueuePort<P>> CoreActor<P, C, Q> 
             ));
         }
         let mut next = self.lifecycle_snapshot(&witness.device_id)?;
-        if witness.live.as_ref().is_none_or(|live| !live.get())
+        if witness.live.is_empty()
+            || witness.live.iter().any(|live| !live.get())
             || next.state_revision != witness.revision
         {
             return Err(LifecycleError::Rejected(
                 LifecycleRejection::StaleInstallation,
             ));
         }
-        let resources = self.installation_resources(&witness.device_id, &witness.binding)?;
-        if resources != witness.resources {
-            return Err(LifecycleError::Fatal(
-                self.stop(CoreFatalError::BindingInstallationInvariant),
+        let (resources, observations) =
+            self.installation_requirements(&witness.device_id, &witness.binding)?;
+        if resources != witness.resources || observations != witness.observations {
+            return Err(LifecycleError::Rejected(
+                LifecycleRejection::IncompleteInstallation,
             ));
         }
         self.validate_bound_state(&witness.device_id, &state)?;
@@ -227,7 +271,7 @@ impl<P: CoreCommand, C: AgentClock, Q: ExecutorQueuePort<P>> CoreActor<P, C, Q> 
         self.publish_state_event(event);
         // Only a committed activation disarms pending-installation cleanup.
         // Every rejection/fatal early return cancels through witness Drop.
-        witness.live.take();
+        witness.live.clear();
         Ok(LifecycleChange::Changed)
     }
 
@@ -236,6 +280,21 @@ impl<P: CoreCommand, C: AgentClock, Q: ExecutorQueuePort<P>> CoreActor<P, C, Q> 
         device: &DeviceId,
         binding: &BindingInstanceId,
     ) -> Result<BTreeSet<ResourceId>, LifecycleError> {
+        let (resources, _) = self.installation_requirements(device, binding)?;
+        // Preserve the command executor's refusal of empty installations.
+        if resources.is_empty() {
+            return Err(LifecycleError::Rejected(
+                LifecycleRejection::IncompleteInstallation,
+            ));
+        }
+        Ok(resources)
+    }
+
+    pub(crate) fn installation_requirements(
+        &self,
+        device: &DeviceId,
+        binding: &BindingInstanceId,
+    ) -> Result<(BTreeSet<ResourceId>, BTreeSet<Capability>), LifecycleError> {
         self.ensure_live()?;
         let slot = self
             .devices
@@ -248,10 +307,7 @@ impl<P: CoreCommand, C: AgentClock, Q: ExecutorQueuePort<P>> CoreActor<P, C, Q> 
                 LifecycleRejection::InvalidTransition,
             ));
         }
-        // This checkpoint models command-resource adapters. An empty install
-        // cannot witness a physical attachment; disabled/unconfigured execution
-        // slots may remain unbound. Observation-only attachment is not modeled.
-        if slot.resources.is_empty() {
+        if slot.allowed_capabilities.is_empty() {
             return Err(LifecycleError::Rejected(
                 LifecycleRejection::IncompleteInstallation,
             ));
@@ -264,7 +320,14 @@ impl<P: CoreCommand, C: AgentClock, Q: ExecutorQueuePort<P>> CoreActor<P, C, Q> 
                 LifecycleRejection::BindingHistoryFull,
             ));
         }
-        Ok(slot.resources.values().copied().collect())
+        Ok((
+            slot.resources.values().copied().collect(),
+            slot.allowed_capabilities
+                .iter()
+                .filter(|cap| !slot.resources.contains_key(*cap))
+                .cloned()
+                .collect(),
+        ))
     }
 
     pub(crate) fn installation_witness(
@@ -286,8 +349,46 @@ impl<P: CoreCommand, C: AgentClock, Q: ExecutorQueuePort<P>> CoreActor<P, C, Q> 
             binding: binding.clone(),
             revision,
             resources,
-            live: Some(live),
+            observations: BTreeSet::new(),
+            live: vec![live],
         })
+    }
+
+    /// Privileged reconciliation facts for an unbound configured slot only.
+    /// No public capabilities or binding authority can be created here.
+    pub fn update_unbound_state(
+        &mut self,
+        device: &DeviceId,
+        availability: DeviceAvailability,
+        conditions: BTreeSet<ConditionCode>,
+    ) -> Result<LifecycleChange, LifecycleError> {
+        self.ensure_live()?;
+        let mut next = self.lifecycle_snapshot(device)?;
+        if next.binding_instance_id.is_some()
+            || matches!(
+                availability,
+                DeviceAvailability::Ready
+                    | DeviceAvailability::Degraded
+                    | DeviceAvailability::Connecting
+            )
+            || (next.availability == DeviceAvailability::Disabled
+                && availability != DeviceAvailability::Disabled)
+            || (next.availability != DeviceAvailability::Disabled
+                && availability == DeviceAvailability::Disabled)
+        {
+            return Err(LifecycleError::Rejected(
+                LifecycleRejection::InvalidTransition,
+            ));
+        }
+        if conditions.len() > self.limits.max_conditions_per_device {
+            return Err(LifecycleError::Rejected(
+                LifecycleRejection::TooManyConditions,
+            ));
+        }
+        next.availability = availability;
+        next.conditions = conditions;
+        next.capabilities.clear();
+        self.commit_device_state(next).map_err(Into::into)
     }
 
     fn lifecycle_snapshot(&self, device: &DeviceId) -> Result<DeviceSnapshot, LifecycleError> {

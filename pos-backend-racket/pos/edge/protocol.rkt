@@ -11,6 +11,9 @@
          (struct-out edge-snapshot-event)
          (struct-out edge-device-event)
          (struct-out edge-command-event)
+         (struct-out edge-observation-event)
+         (struct-out edge-scanner-barcode)
+         barcode-max-bytes
          (struct-out edge-heartbeat)
          (struct-out exn:fail:edge-protocol)
          parse-edge-health
@@ -32,6 +35,8 @@
 (define event-record-max-bytes (* 64 1024))
 
 (define non-stream-max-bytes (* 256 1024))
+
+(define barcode-max-bytes 4096)
 
 (struct exn:fail:edge-protocol exn:fail (code) #:transparent)
 
@@ -61,6 +66,14 @@
 (struct edge-device-event (agent-id sequence device) #:transparent)
 
 (struct edge-command-event (agent-id sequence command) #:transparent)
+
+;; Opaque printing prevents barcode content leaking through an event diagnostic.
+;; The immutable decoded string is available only through the explicit accessor.
+(struct edge-scanner-barcode (barcode))
+
+(struct edge-observation-event
+  (agent-id sequence device-id binding-id revision observation)
+  #:transparent)
 
 (struct edge-heartbeat (agent-id uptime) #:transparent)
 
@@ -210,7 +223,7 @@
 
 (define (parse-edge-event obj)
   (define agent (id obj 'agent_instance_id))
-  (case (enum obj 'type '("snapshot" "device.state_changed" "command.state_changed" "heartbeat"))
+  (case (enum obj 'type '("snapshot" "device.state_changed" "command.state_changed" "device.observation" "heartbeat"))
     [(snapshot)
      (edge-snapshot-event
       agent
@@ -218,6 +231,22 @@
       (uint obj 'agent_uptime_ms)
       (devices obj agent))]
     [(heartbeat) (edge-heartbeat agent (uint obj 'agent_uptime_ms))]
+    [(device.observation)
+     (define observation (field obj 'observation hash?))
+     (unless (and (= (hash-count observation) 2)
+                  (hash-has-key? observation 'kind)
+                  (hash-has-key? observation 'barcode))
+       (invalid 'observation-schema))
+     (enum observation 'kind '("scanner.barcode"))
+     (define barcode
+       (field observation 'barcode
+              (lambda (v)
+                (and (string? v)
+                     (<= 1 (bytes-length (string->bytes/utf-8 v)) barcode-max-bytes)))))
+     (edge-observation-event
+       agent (uint obj 'sequence) (id obj 'device_id) (id obj 'binding_instance_id)
+       (uint obj 'state_revision)
+       (edge-scanner-barcode (string->immutable-string barcode)))]
     [(device.state_changed)
      (define device (parse-edge-device (field obj 'device hash?)))
      (unless (and

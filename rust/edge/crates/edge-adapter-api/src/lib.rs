@@ -107,3 +107,26 @@ pub trait DeviceAdapter<P> {
 
     fn begin(&mut self, payload: Arc<P>) -> Result<Self::Operation, AdapterErrorCode>;
 }
+
+/// A source owns one exact prepared attachment. It must never transparently
+/// migrate to a replacement. Every poll and Drop is bounded; no autonomous I/O
+/// survives ownership. Drop stops future I/O and must not panic. Drivers unable
+/// to satisfy this need process isolation, not a weaker in-process contract.
+pub trait ObservationSource {
+    fn poll(&mut self) -> ObservationPoll;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ObservationPoll {
+    Pending,
+    Observation(edge_protocol::DeviceObservation),
+    BindingLost(AdapterErrorCode),
+    /// Internal loss cannot be hidden by resuming an apparently healthy stream.
+    ContinuityLost(AdapterErrorCode),
+}
+
+impl<T: ObservationSource + ?Sized> ObservationSource for Box<T> {
+    fn poll(&mut self) -> ObservationPoll {
+        (**self).poll()
+    }
+}

@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AgentInstanceId, AgentUptimeMs, BindingInstanceId, CommandState, DeviceId, DeviceSnapshot,
-    EventCursor, EventSequence, StateRevision,
+    AgentInstanceId, AgentUptimeMs, BindingInstanceId, CommandState, DeviceId, DeviceObservation,
+    DeviceSnapshot, EventCursor, EventSequence, StateRevision,
 };
 
 /// Generic event vocabulary only; no NDJSON framing, subscription, or replay machinery.
@@ -17,8 +17,21 @@ pub enum EdgeEvent {
     DeviceStateChanged(Box<DeviceStateChangedEvent>),
     #[serde(rename = "command.state_changed")]
     CommandStateChanged(Box<CommandStateChangedEvent>),
+    #[serde(rename = "device.observation")]
+    DeviceObservation(Box<DeviceObservationEvent>),
     #[serde(rename = "heartbeat")]
     Heartbeat(HeartbeatEvent),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceObservationEvent {
+    pub agent_instance_id: AgentInstanceId,
+    pub sequence: EventSequence,
+    pub device_id: DeviceId,
+    pub binding_instance_id: BindingInstanceId,
+    pub state_revision: StateRevision,
+    pub observation: DeviceObservation,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

@@ -106,12 +106,13 @@ Core validates later published capabilities against the independent allowlist,
 while command admission requires both publication and an actual command-resource
 mapping. An allowed observation cannot manufacture executable authority.
 
-**Registry/configuration support for an observation-only scanner now exists;
-actual observation-runtime installation and binding activation remain M8.3.2
-work.** The current executor witness still rejects empty/incomplete installation.
+M8.3.1 established registry/configuration support for observation-only slots.
+M8.3.2 now provides [owned observation runtimes and complete binding proofs](edge-observations.md).
+The command executor still rejects empty/incomplete installation; observation-only
+activation requires a real owned source component.
 There is no synthetic `scanner.read`, trigger/noop command, or dummy resource.
-Future binding must additionally intersect allowed/compiled capabilities with
-verified hardware support and supply a sound observation-runtime witness.
+Binding must additionally intersect allowed/compiled capabilities with verified
+hardware support. Synthetic runtime tests establish composition, not physical proof.
 
 ## Linux discovery and physical topology
 
@@ -172,15 +173,19 @@ permit reuse of a binding epoch.
 Snapshots are bounded scans, not an atomic kernel hotplug transaction or binding
 proof. I/O failure during a scan discards it. Future udev add/remove/change events
 will be hints to call `DiscoverySource::snapshot()` again, not inputs that directly
-grant a role. Before opening/activating future adapters, M8.3.2 must reconcile
-current truth and fence disappearance/replacement through binding lifecycle.
+grant a role. Binding begins with current global reconciliation and fences
+disappearance/replacement through the binding lifecycle.
 `Eligible` is provisional: a scan can miss an insertion occurring during
-enumeration or retain facts read immediately before removal. **M8.3.2 must
-revalidate current discovery and global reconciliation, or establish an
-equivalent safe binding-time observation protocol, before adapter opening,
-installation, and creation of Core binding authority.** An old eligibility
+enumeration or retain facts read immediately before removal. **After preparing
+an owned attachment, M8.3.2 revalidates current discovery and global
+reconciliation and checks that held attachment before installation and creation
+of Core binding authority.** An old eligibility
 result or reused sysfs identity is never sufficient authorization or an
 installation witness. Revalidation must also protect the gap through activation.
+The M8.3.2 `BindingManager` now performs preparation, fresh global reconciliation
+and a held-attachment check before complete runtime installation. The compiled
+factory must hold the exact attachment and reject replacement rather than follow
+a reused path. Real hardware must qualify that factory/handle contract later.
 
 ## Selectors and global reconciliation
 
@@ -219,13 +224,14 @@ malformed attributes, descriptor non-reading, and redacted diagnostics. Existing
 Core/executor/transport regressions still protect command identity and binding
 witnesses. `just check-rust` and `just check` remain canonical development gates.
 
-M8.3.2+ must supply observation-runtime installation, scanner adapters, barcode
-decoding/events, Racket consumption/business decisions, Flutter presentation, and
+M8.3.2 supplies generic observation installation, typed barcode events and opt-in
+Racket callback delivery. Later M8.3 work must supply scanner adapters, physical
+barcode decoding, Racket business decisions, Flutter presentation, and
 selected physical-device qualification. Production bootstrap, hotplug orchestration,
 service identities/DAC/udev/SELinux policy, printers/drawers/displays/scales,
 payments, and integrated-lane qualification remain later work. No DS2208 hardware
 or driver claim is made. SQLite stays v12 and Rust gains no persistence authority.
 Frozen M8.2 acceptance remains unchanged for its recorded source commit.
-The current M8.3.1 Core source is newer than that qualified source; frozen M8.2
+The current cumulative M8.3 Core source is newer than that qualified source; frozen M8.2
 evidence does not directly certify this refactor. Later cumulative M8
 qualification must establish the current hardware-edge contract.

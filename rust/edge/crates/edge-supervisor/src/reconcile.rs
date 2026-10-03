@@ -6,8 +6,8 @@ use crate::config::Configuration;
 use crate::discovery::{CandidateId, DiscoverySnapshot};
 
 /// Provisional eligibility from a non-atomic scan, never a binding witness.
-/// Before adapter open/installation, the future supervisor must revalidate
-/// current attachment and global authorization and fence changes until binding.
+/// BindingManager prepares an owned attachment, revalidates current global
+/// authorization, and checks the held attachment before runtime installation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SlotDisposition {
     Disabled,

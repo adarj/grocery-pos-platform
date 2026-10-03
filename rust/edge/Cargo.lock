@@ -66,12 +66,14 @@ name = "edge-sim"
 version = "0.1.0"
 dependencies = [
  "edge-adapter-api",
+ "edge-protocol",
 ]
 
 [[package]]
 name = "edge-supervisor"
 version = "0.1.0"
 dependencies = [
+ "edge-adapter-api",
  "edge-core",
  "edge-protocol",
  "serde",

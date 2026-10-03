@@ -1,10 +1,14 @@
 #![forbid(unsafe_code)]
 //! Repository-only synthetic process fixture, never a production daemon.
-use edge_adapter_api::{AdapterErrorCode, DeviceAdapter, EffectClass};
+use edge_adapter_api::{
+    AdapterErrorCode, DeviceAdapter, EffectClass, ObservationPoll, ObservationSource,
+};
 use edge_core::*;
 use edge_protocol::*;
 use edge_server::*;
-use edge_sim::{Script, ScriptedAdapter, ScriptedOperation, Step};
+use edge_sim::{
+    ObservationStep, Script, ScriptedAdapter, ScriptedObservationSource, ScriptedOperation, Step,
+};
 use serde::Deserialize;
 use std::{
     cell::Cell, collections::BTreeSet, io::Read, path::PathBuf, rc::Rc, sync::Arc, time::Duration,
@@ -98,8 +102,29 @@ impl DeviceAdapter<Payload> for Adapter {
 }
 type Runtime = ControlRuntime<Payload, MonotonicClock, Adapter>;
 
+struct Observations {
+    source: ScriptedObservationSource,
+    release: PathBuf,
+    published: Rc<Cell<usize>>,
+}
+
+impl ObservationSource for Observations {
+    fn poll(&mut self) -> ObservationPoll {
+        if !self.release.exists() {
+            return ObservationPoll::Pending;
+        }
+        let poll = self.source.poll();
+        if matches!(poll, ObservationPoll::Observation(_)) {
+            self.published.set(self.published.get() + 1);
+        }
+        poll
+    }
+}
+
 struct Fixture {
     runtime: Runtime,
+    observations: ObservationSupervisor<Observations>,
+    observation_count: Rc<Cell<usize>>,
     begins: Rc<Cell<usize>>,
     metrics: PathBuf,
     posts: usize,
@@ -111,6 +136,7 @@ struct Fixture {
     flood_left: usize,
     flood_start: Option<std::time::Instant>,
     rebind: bool,
+    compatibility_v1_0: bool,
     drive_release: Option<PathBuf>,
 }
 
@@ -124,14 +150,15 @@ impl Fixture {
             .collect::<Vec<_>>()
             .join("\n");
         let value = format!(
-            "{}\n{}\n{}\n{}\nrequests_total={}\nretained={}\ncommand_high_water={}\n",
+            "{}\n{}\n{}\n{}\nrequests_total={}\nretained={}\ncommand_high_water={}\nobservations={}\n",
             self.posts,
             self.dedup,
             self.begins.get(),
             ids,
             self.requests_total,
             self.runtime.core.retained_command_count(),
-            self.command_high_water
+            self.command_high_water,
+            self.observation_count.get()
         );
         let next = self.metrics.with_extension("next");
         std::fs::write(&next, value).expect("fixture metric file");
@@ -148,7 +175,13 @@ impl ControlPlane<Payload> for Fixture {
                 self.requests.push(sub.request_id.clone());
             }
         }
-        let result = self.runtime.request(op)?;
+        let mut result = self.runtime.request(op)?;
+        // Qualification-only legacy metadata; production always reports CURRENT.
+        if self.compatibility_v1_0
+            && let ControlReply::Status(status) = &mut result
+        {
+            status.protocol_version = ProtocolVersion::V1;
+        }
         if matches!(
             &result,
             ControlReply::Admission(AdmissionDecision::Deduplicated(_))
@@ -180,6 +213,7 @@ impl ControlPlane<Payload> for Fixture {
             self.drive_release = None;
         }
         self.runtime.drive()?;
+        self.observations.drive(&mut self.runtime.core)?;
         if self.rebind && self.posts >= 2 && self.begins.get() > 0 {
             self.rebind = false;
             let device = DeviceId::new("fixture.device").unwrap();
@@ -345,7 +379,7 @@ fn main() {
         limits,
         move || {
             let begins = Rc::new(Cell::new(0));
-            let mut core_limits = CoreLimits::with_registry_bounds(1, 1, 1, 256);
+            let mut core_limits = CoreLimits::with_registry_bounds(1, 1, 2, 256);
             if mode == "cache" {
                 core_limits.max_command_records = 1;
             }
@@ -372,7 +406,14 @@ fn main() {
                     conditions: BTreeSet::new(),
                     capabilities: BTreeSet::new(),
                 },
-                allowed_capabilities: vec![Capability::new("synthetic.signal").unwrap()],
+                allowed_capabilities: if mode == "observations" {
+                    vec![
+                        Capability::new("synthetic.signal").unwrap(),
+                        Capability::new("scanner.barcode").unwrap(),
+                    ]
+                } else {
+                    vec![Capability::new("synthetic.signal").unwrap()]
+                },
                 capability_resources: vec![(
                     Capability::new("synthetic.signal").unwrap(),
                     ResourceId::new(7),
@@ -387,7 +428,7 @@ fn main() {
             )?;
             core.begin_connecting(&device).unwrap();
             let mut executor = ExecutorSupervisor::new(consumer)?;
-            let witness = executor
+            let mut witness = executor
                 .install_binding(
                     &mut core,
                     &device,
@@ -400,11 +441,38 @@ fn main() {
                     )],
                 )
                 .unwrap();
-            core.activate_binding(witness, bound()).unwrap();
+            let mut observations = ObservationSupervisor::new();
+            let observation_count = Rc::new(Cell::new(0));
+            let mut state = bound();
+            if mode == "observations" {
+                let caps = BTreeSet::from([Capability::new("scanner.barcode").unwrap()]);
+                let script = ["049000001234", "049000001234", "other"]
+                    .into_iter()
+                    .map(|v| {
+                        ObservationStep::Poll(ObservationPoll::Observation(
+                            DeviceObservation::ScannerBarcode {
+                                barcode: BarcodeValue::new(v).unwrap(),
+                            },
+                        ))
+                    });
+                let source = Observations {
+                    source: ScriptedObservationSource::new(script).unwrap(),
+                    release: metrics.with_extension("observations"),
+                    published: observation_count.clone(),
+                };
+                let proof = observations
+                    .install_binding(&mut core, &device, &binding, caps.clone(), source)
+                    .unwrap();
+                witness = witness.combine(proof).unwrap();
+                state.capabilities.extend(caps);
+            }
+            core.activate_binding(witness, state).unwrap();
             let drive_release = matches!(mode.as_str(), "lost-paused-drive" | "small-paused-drive")
                 .then(|| metrics.with_extension("resume"));
             let f = Fixture {
                 runtime: ControlRuntime { core, executor },
+                observations,
+                observation_count,
                 begins,
                 metrics,
                 posts: 0,
@@ -416,6 +484,7 @@ fn main() {
                 flood_left: 0,
                 flood_start: None,
                 rebind: mode == "rebind",
+                compatibility_v1_0: mode == "version-1-0",
                 drive_release,
             };
             f.metrics();

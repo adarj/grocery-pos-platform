@@ -252,7 +252,7 @@ fn allowed_observation_is_publishable_but_not_executable_without_a_resource() {
     )
     .unwrap();
     core.begin_connecting(&device_id("lane-a.device")).unwrap();
-    let witness = core
+    let mut witness = core
         .installation_witness(
             &device_id("lane-a.device"),
             &binding("binding-a"),
@@ -260,6 +260,25 @@ fn allowed_observation_is_publishable_but_not_executable_without_a_resource() {
             Rc::new(Cell::new(true)),
         )
         .unwrap();
+    // This unit test supplies internal command proof; the observation component
+    // now requires real source ownership even though commands remain forbidden.
+    struct PendingObservation;
+    impl edge_adapter_api::ObservationSource for PendingObservation {
+        fn poll(&mut self) -> edge_adapter_api::ObservationPoll {
+            edge_adapter_api::ObservationPoll::Pending
+        }
+    }
+    let mut observations = ObservationSupervisor::new();
+    let observation = observations
+        .install_binding(
+            &mut core,
+            &device_id("lane-a.device"),
+            &binding("binding-a"),
+            [capability("synthetic.observe")].into(),
+            PendingObservation,
+        )
+        .unwrap();
+    witness = witness.combine(observation).unwrap();
     core.activate_binding(
         witness,
         BoundDeviceState {

@@ -80,6 +80,7 @@
        (cond
          [(edge-device-event? event) (edge-device-event-agent-id event)]
          [(edge-command-event? event) (edge-command-event-agent-id event)]
+         [(edge-observation-event? event) (edge-observation-event-agent-id event)]
          [(edge-heartbeat? event) (edge-heartbeat-agent-id event)]
          [else #f]))
      (cond
@@ -95,11 +96,24 @@
              [last-record local]))]
        [else
         (define sequence
-          (if (edge-device-event? event)
-              (edge-device-event-sequence event)
-              (edge-command-event-sequence event)))
+          (cond [(edge-device-event? event) (edge-device-event-sequence event)]
+                [(edge-observation-event? event) (edge-observation-event-sequence event)]
+                [else (edge-command-event-sequence event)]))
         (cond
           [(not (= sequence (add1 (edge-session-state-cursor state)))) (fail 'sequence-gap)]
+          [(edge-observation-event? event)
+           (define device
+             (hash-ref (edge-session-state-devices state)
+                       (edge-observation-event-device-id event) #f))
+           (if (and device
+                    (edge-scanner-barcode? (edge-observation-event-observation event))
+                    (equal? (edge-device-snapshot-binding-id device)
+                            (edge-observation-event-binding-id event))
+                    (= (edge-device-snapshot-revision device)
+                       (edge-observation-event-revision event))
+                    (member "scanner.barcode" (edge-device-snapshot-capabilities device)))
+               (struct-copy edge-session-state state [cursor sequence] [last-record local])
+               (fail 'observation-state))]
           [(edge-device-event? event)
            (define device (edge-device-event-device event))
            (define old
@@ -151,6 +165,7 @@
          #:previous [previous (empty-edge-session-state)]
          #:stale-ms [stale-ms 45000]
          #:on-command [on-command void]
+         #:on-observation [on-observation void]
          #:on-epoch-ended [on-epoch-ended void])
   (unless (and (exact-integer? stale-ms) (positive? stale-ms))
     (raise-argument-error 'start-edge-session "positive stale milliseconds" stale-ms))
@@ -159,6 +174,37 @@
   (define stream-box (box #f))
   (define stopped (box #f))
   (define session (edge-session state cust stream-box stopped))
+  (define (deliver-observation event)
+    (define returned? #f)
+    (dynamic-wind
+     void
+     (lambda ()
+       ;; Racket can raise arbitrary values, not just exn:fail?. Never retain or
+       ;; print callback payloads. A barrier prevents later continuation reentry.
+       (with-handlers ([(lambda (_) #t)
+                        (lambda (_)
+                          (raise (exn:fail:edge-protocol
+                                  "Edge observation callback failed"
+                                  (current-continuation-marks)
+                                  'observation-callback)))])
+         ;; The default abort protocol carries an arbitrary thunk. Intercept it
+         ;; here: invoking it outside this boundary could print private data.
+         (call-with-continuation-prompt
+          (lambda () (call-with-continuation-barrier (lambda () (on-observation event))))
+          (default-continuation-prompt-tag)
+          (lambda _
+            (raise (exn:fail:edge-protocol
+                    "Edge observation callback failed"
+                    (current-continuation-marks)
+                    'observation-callback))))
+         (set! returned? #t)))
+     (lambda ()
+       ;; A nonlocal escape closes the stream through the outer dynamic-wind.
+       ;; It must not leave its committed cursor marked healthy. Self-stop kills
+       ;; the callback's custodian; preserve the deliberately published stopped
+       ;; state in that case rather than overwriting it as a callback failure.
+       (unless (or returned? (unbox stopped))
+         (set-box! state (stale (unbox state) 'observation-callback))))))
   (parameterize ([current-custodian cust])
     (thread
      (lambda ()
@@ -204,6 +250,8 @@
                         (on-epoch-ended (edge-session-state-agent-id old)))
                       (when (edge-command-event? event)
                         (on-command (edge-command-event-command event)))
+                      (when (edge-observation-event? event)
+                        (deliver-observation event))
                       (loop))])))
              (lambda ()
                (close-edge-stream! stream)

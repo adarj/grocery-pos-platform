@@ -44,6 +44,14 @@ command schemas require explicit client/server support; response tolerance
 does not authorize sending fields an older server rejects. A reported or newly
 implemented capability still requires configuration allowlisting.
 
+M8.3.2 reports protocol **1.1** and adds the closed `device.observation` event
+with the `scanner.barcode` variant. `/v1` and its seven routes are unchanged.
+Rust/Racket are upgraded together; an older client must fail its stream on an
+unknown safety-relevant event rather than skip a sequence position. The current
+client still accepts 1.0 streams and bounded future major-1 minor metadata; that
+metadata does not authorize unknown semantics. Additive event vocabulary cannot
+be ignored while claiming complete ordered-stream continuity.
+
 ## HTTP surface and meaning
 
 | Endpoint | Meaning |
@@ -501,13 +509,29 @@ consume sequence numbers. Device revisions and event sequence have separate
 purposes: snapshot ordering for one logical device versus continuity of the
 whole stream.
 
-Conceptual categories are `device.state_changed`, `command.state_changed`,
-`scanner.barcode_observed`, and future scale observations. State events prefer
+Categories are `device.state_changed`, `command.state_changed`, and the generic
+`device.observation` envelope. Its first closed semantic variant is
+`scanner.barcode`; future scale observations may add typed variants. State events prefer
 complete replacement snapshots over deltas. Core attaches agent, logical device,
 binding, state revision, and event sequence; adapters do not assign them.
 Command events refer to their command's binding, even if that binding has since
 been invalidated. Invalidated-binding observations cannot be attributed to its
 replacement.
+
+The v1.1 scanner event has this exact shape:
+
+```json
+{"type":"device.observation","agent_instance_id":"agent","sequence":42,"device_id":"lane-01.scanner","binding_instance_id":"binding","state_revision":3,"observation":{"kind":"scanner.barcode","barcode":"049000001234"}}
+```
+
+Barcode is nonempty opaque UTF-8, at most 4,096 encoded bytes, with no trimming,
+numeric conversion or normalization. Spaces, controls and NUL are preserved
+through JSON escaping. Unknown kinds and invalid bounded values fail closed.
+Core checks current installed runtime/binding and published observation capability
+before consuming sequence, attaches the current revision, and does not increment
+revision for an observation. Repeated identical barcodes remain separate events.
+The [observation contract](edge-observations.md) defines ownership, privacy,
+runtime completeness and Racket binding/revision validation.
 
 The initial snapshot contains device state, not durable history or all command
 results. Racket queries retained outstanding command IDs separately. Event
@@ -518,7 +542,7 @@ observations do not establish sale lines, cash movements, or money.
 Events are ephemeral. v1 has no durable Rust event broker or replay API. A
 disconnected Racket may lose transient scanner input; losing it is preferable
 to replaying stale human input later. A new snapshot recovers current state,
-not missed scans. Sequence gaps are explicit continuity failures and must not
+not missed scans; the cashier must rescan after scanner continuity loss. Sequence gaps are explicit continuity failures and must not
 be silently ignored.
 
 All event and observation channels are bounded. If the subscriber falls behind,

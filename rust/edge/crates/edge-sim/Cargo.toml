@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 edge-adapter-api = { path = "../edge-adapter-api" }
+edge-protocol = { path = "../edge-protocol" }
 
 [lints]
 workspace = true

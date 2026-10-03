@@ -172,11 +172,15 @@ M8.3.1 adds `edge-supervisor`: strict bounded
 USB candidate discovery, exact selectors, and deterministic global reconciliation.
 Configured observation capabilities are independent of command resources; an
 unbound scanner slot publishes no active capability. Unique configured matches
-are provisionally eligible, subject to binding-time revalidation. Scanner
-observation-runtime installation and actual binding remain M8.3.2 work.
+are provisionally eligible, subject to binding-time revalidation. M8.3.2 adds
+[owned observation runtimes and binding proofs](docs/architecture/edge-observations.md),
+fresh global revalidation, and typed `scanner.barcode` events on the existing
+Edge Protocol v1.1 stream. The opt-in Racket session checks binding/revision and
+delivers a callback without barcode history or business mutation. Command-only,
+observation-only and mixed runtimes require complete installation proofs.
 No scanner driver or barcode I/O exists yet.
 
-Real adapters, device-specific observations, production daemon/bootstrap composition,
+Real adapters, physical observations, production daemon/bootstrap composition,
 Linux service-identity/DAC/SELinux qualification, and physical qualification
 remain deferred. [M8.2 generic edge Tier-A qualification](docs/acceptance/m8.2/README.md)
 passed all fourteen mandatory groups at corrected source commit
@@ -187,6 +191,8 @@ history, both synchronization remediations, and the fresh clean-tree campaign.
 This qualifies neither a production edge daemon/appliance nor physical hardware;
 whole M8 and whole-M8 Tier A remain open. The evidence is frozen in a separate
 documentation commit that continues to reference the tested source SHA.
+Current cumulative M8.3 Core/protocol source is newer; it requires later M8
+qualification rather than inheriting certification from the historical record.
 
 ### Testing and qualification
 

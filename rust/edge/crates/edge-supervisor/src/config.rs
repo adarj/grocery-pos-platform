@@ -100,6 +100,14 @@ impl ConfiguredSlot {
     pub fn enabled(&self) -> bool {
         self.enabled
     }
+
+    pub fn adapter_kind(&self) -> &AdapterKind {
+        &self.adapter_kind
+    }
+
+    pub fn allowed_capabilities(&self) -> &BTreeSet<Capability> {
+        &self.allowed_capabilities
+    }
 }
 
 #[derive(Clone, Debug)]

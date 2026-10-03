@@ -15,10 +15,10 @@
 //! by this in-process contract.
 //!
 //! Logical slots start unbound at revision zero. Privileged lifecycle facts
-//! drive Connecting → executor installation → witness-validated activation.
+//! drive Connecting → complete runtime installation → witness-validated activation.
 //! Fresh binding IDs are supplied by that caller; Core bounds and remembers
 //! activated IDs for this agent epoch. Installed adapters must remain owned by
-//! this supervisor until exact invalidation; destroying the supervisor abandons
+//! the runtime supervisors until exact invalidation; destroying a supervisor abandons
 //! the Core epoch rather than establishing another binding. Device revisions
 //! and state-event sequences never reset inside an epoch. Subscriber overflow
 //! closes continuity without rolling back state; reconnect is snapshot-only.
@@ -30,11 +30,15 @@ mod fifo;
 mod model;
 mod panic_boundary;
 mod queue;
+mod runtime;
+
+pub use runtime::{PreparationError, PreparedRuntime, prepare_runtime};
 
 pub use actor::{
     BindingInstallationWitness, BindingInvalidation, BoundAvailability, BoundDeviceState,
     CoreActor, EventPoll, EventSubscription, LifecycleChange, LifecycleError, LifecycleRejection,
-    SubscriptionError, SubscriptionToken,
+    ObservationDisposition, ObservationSupervisor, ObservationToken, SubscriptionError,
+    SubscriptionToken,
 };
 pub use executor::ExecutorSupervisor;
 pub use fifo::{

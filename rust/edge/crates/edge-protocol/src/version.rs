@@ -47,6 +47,11 @@ pub struct ProtocolVersion {
 }
 
 impl ProtocolVersion {
+    pub const CURRENT: Self = Self {
+        major: ProtocolMajor::V1,
+        minor: 1,
+    };
+    /// Historical 1.0 metadata for compatibility fixtures.
     pub const V1: Self = Self {
         major: ProtocolMajor::V1,
         minor: 0,

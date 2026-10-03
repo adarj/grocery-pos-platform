@@ -22,6 +22,7 @@ mod error;
 mod event;
 mod ids;
 mod numbers;
+mod observation;
 mod response;
 mod text;
 mod version;
@@ -39,12 +40,14 @@ pub use command::{
 pub use device::{AdapterKind, Capability, ConditionCode, DeviceAvailability, DeviceSnapshot};
 pub use error::{ErrorCode, MAX_ERROR_MESSAGE_BYTES, ProtocolError, SafeErrorMessage};
 pub use event::{
-    CommandStateChangedEvent, DeviceStateChangedEvent, EdgeEvent, HeartbeatEvent, SnapshotEvent,
+    CommandStateChangedEvent, DeviceObservationEvent, DeviceStateChangedEvent, EdgeEvent,
+    HeartbeatEvent, SnapshotEvent,
 };
 pub use ids::{
     AgentInstanceId, BindingInstanceId, CommandId, DeviceId, MAX_IDENTIFIER_BYTES, RequestId,
 };
 pub use numbers::{AgentUptimeMs, CommandTimeoutMs, EventCursor, EventSequence, StateRevision};
+pub use observation::{BarcodeValue, DeviceObservation, MAX_BARCODE_BYTES};
 pub use text::{MAX_SEMANTIC_NAME_BYTES, TextError};
 pub use version::{ProtocolMajor, ProtocolVersion, UnsupportedProtocolMajor};
 

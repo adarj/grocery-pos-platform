@@ -16,7 +16,83 @@ use std::sync::Arc;
 
 use edge_adapter_api::{
     AdapterErrorCode, AdapterOperation, AdapterPoll, AdapterPollContext, DeviceAdapter,
+    ObservationPoll, ObservationSource,
 };
+
+#[derive(Clone, Debug)]
+pub enum ObservationStep {
+    Poll(ObservationPoll),
+    Panic,
+}
+
+/// Synthetic source follows the production polling/ownership contract. Values
+/// are retained only in this explicitly selected, bounded qualification script.
+pub struct ScriptedObservationSource(VecDeque<ObservationStep>);
+
+impl ScriptedObservationSource {
+    pub fn new(steps: impl IntoIterator<Item = ObservationStep>) -> Result<Self, ScriptError> {
+        let mut bounded = VecDeque::new();
+        for step in steps {
+            if bounded.len() == MAX_SCRIPT_STEPS {
+                return Err(ScriptError::TooManySteps);
+            }
+            bounded.push_back(step);
+        }
+        Ok(Self(bounded))
+    }
+}
+
+impl fmt::Debug for ScriptedObservationSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ScriptedObservationSource")
+            .field("remaining", &self.0.len())
+            .finish()
+    }
+}
+
+impl ObservationSource for ScriptedObservationSource {
+    fn poll(&mut self) -> ObservationPoll {
+        match self.0.pop_front() {
+            Some(ObservationStep::Poll(poll)) => poll,
+            Some(ObservationStep::Panic) => panic!("synthetic observation panic"),
+            None => ObservationPoll::Pending,
+        }
+    }
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    use edge_protocol::{BarcodeValue, DeviceObservation};
+
+    #[test]
+    fn bounded_scripts_preserve_repeated_values_and_explicit_loss() {
+        let observation = ObservationPoll::Observation(DeviceObservation::ScannerBarcode {
+            barcode: BarcodeValue::new("PRIVATE_BARCODE_SENTINEL").unwrap(),
+        });
+        let steps = [
+            ObservationPoll::Pending,
+            observation.clone(),
+            observation.clone(),
+            ObservationPoll::BindingLost(AdapterErrorCode::new("sim.lost")),
+            ObservationPoll::ContinuityLost(AdapterErrorCode::new("sim.loss")),
+        ];
+        let mut source =
+            ScriptedObservationSource::new(steps.clone().map(ObservationStep::Poll)).unwrap();
+        assert!(!format!("{source:?}").contains("PRIVATE_BARCODE_SENTINEL"));
+        for expected in steps {
+            assert_eq!(source.poll(), expected);
+        }
+        assert_eq!(source.poll(), ObservationPoll::Pending);
+        assert!(
+            ScriptedObservationSource::new(std::iter::repeat_n(ObservationStep::Panic, 64)).is_ok()
+        );
+        assert!(
+            ScriptedObservationSource::new(std::iter::repeat_n(ObservationStep::Panic, 65))
+                .is_err()
+        );
+    }
+}
 
 pub const MAX_SCRIPT_STEPS: usize = 64;
 pub const MAX_ADAPTER_SCRIPTS: usize = 64;

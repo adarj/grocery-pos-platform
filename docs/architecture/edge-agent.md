@@ -134,9 +134,11 @@ M8.2 generic foundation explicitly deferred the production format and discovery;
 its frozen evidence retains that limitation. M8.3.1 now supplies the minimum
 [Edge configuration v1](edge-configuration-v1.md) schema, compiled-adapter metadata
 validation, bounded Linux USB snapshots, and deterministic global reconciliation
-in `edge-supervisor`. It stops at candidate eligibility. A scanner may have an
-allowed observation capability without a command resource, but sound
-observation-runtime installation and binding activation remain M8.3.2 work.
+in `edge-supervisor`. That checkpoint stopped at provisional candidate eligibility.
+M8.3.2 adds [observation runtime and binding](edge-observations.md): prepared
+attachment ownership, fresh global revalidation, complete command/observation
+installation proofs, and typed barcode events through an opt-in Racket callback.
+There is still no physical scanner adapter or production daemon.
 
 | Edge configuration answers | Racket/register configuration answers |
 | --- | --- |
@@ -203,8 +205,10 @@ OS device add
   → BindingManager reconciliation
   → selector match
   → global uniqueness check
-  → adapter bind
+  → prepare exact owned attachment
+  → fresh discovery/global reconciliation and held-attachment check
   → new binding_instance_id
+  → complete runtime installation proof for that epoch
   → Core device-state update
 ```
 
@@ -370,7 +374,7 @@ ephemeral edge deduplication does not supply exactly-once physical effects.
 The reference scanner path is:
 
 ```text
-physical scanner → edge-owned hardware interface → normalized barcode observation
+physical scanner → edge-owned hardware interface → decoded opaque barcode observation
   → Racket catalog/business authority → transaction mutation → Flutter
 ```
 

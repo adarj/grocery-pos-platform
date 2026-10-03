@@ -74,8 +74,8 @@ impl EventState {
 }
 
 pub(super) struct PreparedEvent {
-    sequence: u64,
-    event: EdgeEvent,
+    pub(super) sequence: u64,
+    pub(super) event: EdgeEvent,
 }
 
 impl<P: CoreCommand, C: AgentClock, Q: ExecutorQueuePort<P>> CoreActor<P, C, Q> {
@@ -196,14 +196,14 @@ impl<P: CoreCommand, C: AgentClock, Q: ExecutorQueuePort<P>> CoreActor<P, C, Q> 
         Ok(())
     }
 
-    fn check_event(&mut self, event: &EdgeEvent) -> Result<(), CoreFatalError> {
+    pub(super) fn check_event(&mut self, event: &EdgeEvent) -> Result<(), CoreFatalError> {
         let result = encode_json_bounded(event, self.limits.max_event_record_bytes)
             .map(|_| ())
             .map_err(|_| CoreFatalError::EventNotRepresentable);
         self.latch(result)
     }
 
-    fn next_event_sequence(&mut self) -> Result<u64, CoreFatalError> {
+    pub(super) fn next_event_sequence(&mut self) -> Result<u64, CoreFatalError> {
         self.ensure_live()?;
         let result = self
             .events

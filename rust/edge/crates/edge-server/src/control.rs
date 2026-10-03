@@ -76,7 +76,7 @@ impl<P: CoreCommand, C: AgentClock, A: DeviceAdapter<P>> ControlPlane<P>
         Ok(match request {
             ControlOperation::Status => ControlReply::Status(AgentStatusResponse {
                 agent_instance_id: self.core.agent_instance_id().clone(),
-                protocol_version: ProtocolVersion::V1,
+                protocol_version: ProtocolVersion::CURRENT,
                 agent_uptime_ms: uptime,
             }),
             ControlOperation::Devices => ControlReply::Devices(DeviceListResponse {
@@ -417,6 +417,7 @@ pub(crate) mod tests {
         drives: Arc<AtomicUsize>,
         heartbeat_observer: Option<mpsc::Sender<()>>,
         request_drive_observer: Option<Arc<AtomicUsize>>,
+        observations: Option<edge_core::ObservationSupervisor<GatedLossSource>>,
     }
 
     impl Plane {
@@ -453,6 +454,9 @@ pub(crate) mod tests {
 
         fn drive(&mut self) -> Result<(), CoreFatalError> {
             self.drives.fetch_add(1, Ordering::Relaxed);
+            if let Some(observations) = &mut self.observations {
+                observations.drive(&mut self.runtime.core)?;
+            }
             self.runtime.drive()
         }
 
@@ -509,7 +513,162 @@ pub(crate) mod tests {
             started: None,
             heartbeat_observer: None,
             request_drive_observer: None,
+            observations: None,
         }
+    }
+
+    struct GatedLossSource {
+        entered: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    }
+
+    impl edge_adapter_api::ObservationSource for GatedLossSource {
+        fn poll(&mut self) -> edge_adapter_api::ObservationPoll {
+            edge_adapter_api::ObservationPoll::BindingLost(AdapterErrorCode::new("sim.lost"))
+        }
+    }
+
+    impl Drop for GatedLossSource {
+        fn drop(&mut self) {
+            let _ = self.entered.send(());
+            // Bounded test gate; never panic in an adapter destructor.
+            let _ = self.release.recv_timeout(Duration::from_secs(2));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn observation_cleanup_and_binding_invalidation_serialize_before_command_admission() {
+        use edge_core::{
+            BoundAvailability, BoundDeviceState, CoreDeviceSeed, ObservationSupervisor, ResourceId,
+        };
+        use edge_protocol::*;
+        use std::collections::BTreeSet;
+        let (entered, observe_drop) = mpsc::channel();
+        let (release, gate) = mpsc::channel();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let r = requests.clone();
+        let (handle, thread) = spawn(
+            move || {
+                let resource = ResourceId::new(1);
+                let device = DeviceId::new("mixed").unwrap();
+                let binding = BindingInstanceId::new("binding-a").unwrap();
+                let capabilities: BTreeSet<_> = ["synthetic.signal", "scanner.barcode"]
+                    .map(|s| Capability::new(s).unwrap())
+                    .into();
+                let (producer, consumer) = bounded_executor_queue([resource], 2, 2).unwrap();
+                let mut core = CoreActor::new(
+                    AgentInstanceId::new("test-agent").unwrap(),
+                    vec![CoreDeviceSeed {
+                        snapshot: DeviceSnapshot {
+                            agent_instance_id: AgentInstanceId::new("test-agent").unwrap(),
+                            device_id: device.clone(),
+                            binding_instance_id: None,
+                            state_revision: StateRevision::new(0),
+                            adapter_kind: AdapterKind::new("synthetic").unwrap(),
+                            availability: DeviceAvailability::Absent,
+                            conditions: BTreeSet::new(),
+                            capabilities: BTreeSet::new(),
+                        },
+                        allowed_capabilities: capabilities.iter().cloned().collect(),
+                        capability_resources: vec![(
+                            Capability::new("synthetic.signal").unwrap(),
+                            resource,
+                        )],
+                    }],
+                    CoreLimits::with_registry_bounds(2, 2, 2, 2),
+                    Clock(Arc::new(AtomicU64::new(100))),
+                    producer,
+                )
+                .unwrap();
+                let mut executor = ExecutorSupervisor::new(consumer).unwrap();
+                let mut observations = ObservationSupervisor::new();
+                core.begin_connecting(&device).unwrap();
+                let command = executor
+                    .install_binding(&mut core, &device, &binding, [(resource, Adapter)])
+                    .unwrap();
+                let observation = observations
+                    .install_binding(
+                        &mut core,
+                        &device,
+                        &binding,
+                        [Capability::new("scanner.barcode").unwrap()].into(),
+                        GatedLossSource {
+                            entered,
+                            release: gate,
+                        },
+                    )
+                    .unwrap();
+                core.activate_binding(
+                    command.combine(observation).unwrap(),
+                    BoundDeviceState {
+                        availability: BoundAvailability::Ready,
+                        conditions: BTreeSet::new(),
+                        capabilities,
+                    },
+                )
+                .unwrap();
+                Ok(Plane {
+                    runtime: ControlRuntime { core, executor },
+                    requests: r,
+                    gate: None,
+                    started: None,
+                    drives: Arc::new(AtomicUsize::new(0)),
+                    heartbeat_observer: None,
+                    request_drive_observer: None,
+                    observations: Some(observations),
+                })
+            },
+            &ServerLimits::default(),
+        )
+        .unwrap();
+        observe_drop.recv_timeout(Duration::from_secs(2)).unwrap();
+        let submission = CommandSubmission {
+            request_id: RequestId::new("request").unwrap(),
+            command_id: CommandId::new("command").unwrap(),
+            expected_agent_instance_id: AgentInstanceId::new("test-agent").unwrap(),
+            device_id: DeviceId::new("mixed").unwrap(),
+            expected_binding_instance_id: BindingInstanceId::new("binding-a").unwrap(),
+            not_after_agent_uptime_ms: AgentUptimeMs::new(200),
+            kind: CommandKind::new("synthetic.signal").unwrap(),
+            timeout_ms: CommandTimeoutMs::new(100).unwrap(),
+            payload: Payload,
+        };
+        let (reply, mut receive) = oneshot::channel();
+        handle
+            .sender
+            .try_send(Message {
+                work: Work::Request(ControlOperation::Submit(submission)),
+                reply,
+            })
+            .unwrap();
+        assert!(matches!(
+            receive.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(requests.load(Ordering::Acquire), 0);
+        release.send(()).unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(2), receive)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            reply,
+            Reply::Value(ControlReply::Admission(AdmissionDecision::Rejected(
+                edge_core::AdmissionRejection::BindingInstanceConflict
+            )))
+        ));
+        assert_eq!(requests.load(Ordering::Acquire), 1);
+        assert!(matches!(
+            handle
+                .request(ControlOperation::Command(
+                    CommandId::new("command").unwrap()
+                ))
+                .await
+                .unwrap(),
+            Reply::Value(ControlReply::Command(None))
+        ));
+        handle.shutdown();
+        thread.join().unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]

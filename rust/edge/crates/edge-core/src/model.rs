@@ -35,8 +35,9 @@ pub trait AgentClock {
 /// not be shared by different logical devices in this v1 admission registry.
 /// Seeds are unbound, revision-zero public states. Allowed capabilities include
 /// observations with no command resource; configuration alone never publishes
-/// them. Both maps survive disconnect/rebind. Binding authority still requires
-/// an executor installation witness; observation-only installation is deferred.
+/// them. Both maps survive disconnect/rebind. Binding authority requires a complete
+/// installed-runtime witness. In v1, unmapped allowed capabilities require an
+/// observation source; mapped capabilities require command executors.
 pub struct CoreDeviceSeed {
     pub snapshot: DeviceSnapshot,
     pub allowed_capabilities: Vec<Capability>,

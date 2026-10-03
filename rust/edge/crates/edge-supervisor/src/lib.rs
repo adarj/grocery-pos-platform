@@ -1,6 +1,8 @@
-//! Privileged restart-only configuration and discovery eligibility. This crate
-//! neither installs adapters nor grants physical presence public Core authority.
+//! Privileged restart-only configuration, discovery, reconciliation and binding
+//! composition. Fresh authorization and owned attachment runtime installation
+//! are required before Core activation; presence alone grants no authority.
 
+pub mod binding;
 pub mod catalog;
 pub mod config;
 pub mod discovery;

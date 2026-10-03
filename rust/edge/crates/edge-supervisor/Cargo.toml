@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 edge-core = { path = "../edge-core" }
+edge-adapter-api = { path = "../edge-adapter-api" }
 edge-protocol = { path = "../edge-protocol" }
 serde.workspace = true
 toml = { version = "0.9.8", default-features = false, features = ["parse", "serde", "std"] }

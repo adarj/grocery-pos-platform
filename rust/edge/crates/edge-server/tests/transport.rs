@@ -865,6 +865,84 @@ fn execution_wait_rejects_duplicate_starts_before_polling() {
 }
 
 #[test]
+fn synthetic_observations_use_the_existing_bounded_ndjson_event_path() {
+    use edge_protocol::{DeviceObservation, EdgeEvent};
+    use std::io::{BufRead, BufReader};
+    let f = Fixture::new("observations");
+    let mut stream = f.connect_at("observation event stream");
+    stream.write_all(&get("/v1/events")).unwrap();
+    let mut reader = BufReader::new(stream);
+    let deadline = Instant::now() + EXECUTION_TIMEOUT;
+    let mut header_bytes = 0;
+    loop {
+        let mut line = String::new();
+        let n = reader.by_ref().take(16_385).read_line(&mut line).unwrap();
+        header_bytes += n;
+        assert!(n > 0 && header_bytes <= 16_384);
+        if line == "\r\n" {
+            break;
+        }
+    }
+    let mut cursor = None;
+    let mut observations = Vec::new();
+    let mut record = Vec::new();
+    while observations.len() < 3 {
+        assert!(Instant::now() < deadline, "observation stream deadline");
+        reader
+            .get_mut()
+            .set_read_timeout(Some(deadline.saturating_duration_since(Instant::now())))
+            .unwrap();
+        let mut length = String::new();
+        let n = reader.by_ref().take(34).read_line(&mut length).unwrap();
+        assert!(n > 0 && n < 34 && length.ends_with("\r\n"));
+        let size = usize::from_str_radix(length.trim_end(), 16).unwrap();
+        assert!(size > 0 && size <= 65_537);
+        let mut chunk = vec![0; size];
+        reader.read_exact(&mut chunk).unwrap();
+        let mut ending = [0; 2];
+        reader.read_exact(&mut ending).unwrap();
+        assert_eq!(&ending, b"\r\n");
+        // Fixture intentionally fragments event records across 17-byte frames.
+        for byte in chunk {
+            if byte != b'\n' {
+                record.push(byte);
+                assert!(record.len() <= 65_536);
+                continue;
+            }
+            let event: EdgeEvent =
+                decode_json_strict(&record, JsonDecodeLimits::default()).unwrap();
+            record.clear();
+            match event {
+                EdgeEvent::Snapshot(s) => {
+                    assert!(cursor.is_none());
+                    cursor = Some(s.event_cursor.get());
+                    std::fs::write(f.dir.join("metrics.observations"), []).unwrap();
+                }
+                EdgeEvent::DeviceObservation(e) => {
+                    assert_eq!(
+                        e.sequence.get(),
+                        cursor.unwrap() + observations.len() as u64 + 1
+                    );
+                    assert_eq!(e.binding_instance_id.as_str(), "fixture-binding-a");
+                    assert_eq!(e.state_revision.get(), 2);
+                    let DeviceObservation::ScannerBarcode { barcode } = e.observation;
+                    observations.push(barcode);
+                }
+                EdgeEvent::Heartbeat(_) => {}
+                _ => panic!("unexpected state event"),
+            }
+        }
+    }
+    assert_eq!(
+        observations,
+        ["049000001234", "049000001234", "other"]
+            .map(|v| edge_protocol::BarcodeValue::new(v).unwrap())
+    );
+    assert_eq!(f.metrics().starts, 0);
+    assert_eq!(f.metrics().posts, 0);
+}
+
+#[test]
 fn event_stream_first_snapshot_second_subscriber_and_disconnect_cleanup() {
     let f = Fixture::new("");
     let mut stream = f.connect_at("initial event-stream connection");

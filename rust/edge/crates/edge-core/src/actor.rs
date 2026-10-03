@@ -18,6 +18,11 @@ use crate::queue::{ExecutorQueuePort, QueueCommitError, QueueReservationError, Q
 #[path = "binding.rs"]
 mod binding;
 
+#[path = "observation.rs"]
+mod observation;
+
+pub use observation::{ObservationDisposition, ObservationSupervisor, ObservationToken};
+
 #[path = "events.rs"]
 mod events;
 
@@ -31,6 +36,9 @@ struct CoreDevice {
     snapshot: DeviceSnapshot,
     allowed_capabilities: BTreeSet<Capability>,
     resources: BTreeMap<Capability, ResourceId>,
+    // Installation lifetime seal, not a second public binding truth. A new
+    // observation installation cancels older proofs across supervisors too.
+    observation_installation: Option<std::rc::Weak<std::cell::Cell<bool>>>,
 }
 
 // Command ID is the map key; request ID and agent precondition are deliberately
@@ -232,6 +240,7 @@ where
                     snapshot,
                     allowed_capabilities,
                     resources,
+                    observation_installation: None,
                 },
             );
         }
