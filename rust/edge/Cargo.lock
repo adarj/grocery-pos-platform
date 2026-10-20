@@ -45,6 +45,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "edge-scanner-cdc"
+version = "0.1.0"
+dependencies = [
+ "edge-protocol",
+]
+
+[[package]]
 name = "edge-server"
 version = "0.1.0"
 dependencies = [

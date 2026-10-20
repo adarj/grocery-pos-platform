@@ -1,0 +1,13 @@
+[package]
+name = "edge-scanner-cdc"
+description = "Bounded pure framing for the DS2208 USB CDC Host profile"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+edge-protocol = { path = "../edge-protocol" }
+
+[lints]
+workspace = true
