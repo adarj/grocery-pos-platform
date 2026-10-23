@@ -307,126 +307,341 @@ syntax do not qualify runtime logger behavior.
 
 ## Phase N3 — Private evidence custody
 
-Before any custody preparation, both terminals repeat the same read-only root
-and Git identity check. A mismatch stops before directory or copy creation.
+### Custody policy and the reported preparation failure
+
+The [adopted plan](h2-15-r1-execution-plan.md#persistent-logging-and-exact-launch-templates)
+requires directories 0700, files 0600, exclusive creation and a trusted private
+parent. [R1-009](h2-15-qualification-criteria-r1.md#h215-r1-009--evidence-integrity)
+requires private, original evidence, not private permissions on the entire
+repository ancestry. Apply those requirements at distinct boundaries:
+
+- Existing shared ancestors, including the repository, .local, qualification
+  and m8-3, must be direct directories, owned by root or the ordinary operator,
+  with **no group/other write bits**. Approved 0755 ancestry may remain 0755.
+  Check actual ownership, modes and filesystem/inode identities; do not infer
+  ownership from the operator's earlier mode observations. Never chmod ancestors.
+- The prospective wp2-a3-r1 root must be operator-owned 0700, whether newly
+  created or already present. It supplies the plan's trusted **private** parent.
+  An existing nonprivate root is NO-GO, not permission to change its mode.
+- Campaign, R1-A01 and both readiness directories must be **new**, exclusively
+  created, operator-owned 0700 directories. Evidence files must be new 0600
+  regular files. No evidence is written into shared ancestors.
+
+Thus accepting trusted shared 0755 ancestors does not waive the private-parent
+or private-evidence requirements. A different policy, changed owner, writable
+ancestor, unexpected link or nonprivate custody root requires review; this
+procedure grants no permission to repair it.
+
+**Operator-reported historical N3 preparation NO-GO:** these are attestations,
+not independently preserved native measurements or a recovered transcript.
+
+| Reported path | Reported state |
+| --- | --- |
+| Repository root | 0755 |
+| .local | 0755 |
+| .local/qualification | 0755 |
+| .local/qualification/m8-3 | 0755 |
+| .local/qualification/m8-3/wp2-a3-r1 | Absent |
+| campaign_01 below that root | Absent |
+| R1-A01 below that campaign | Absent |
+
+T1 terminated during the old N3 sequence; its buffered original observations
+are unavailable. T2 may still retain independent observations in memory, but
+they have **not been independently preserved**. The operator reports no
+prospective custody directory, copied D2/S2, private manifest or physical
+attempt artifact. No R1-A01 attempt was declared or consumed, and no Decision C
+was approved. No traceback, incident timestamp, cleanup action or successful
+native assessment is supplied or reconstructed here.
+
+Static review shows that the previous helper demanded 0700 even for existing
+shared ancestors; the reported 0755 modes are incompatible with that predicate.
+This explains a procedure defect, not the exact unretained native exception.
+
+**Preserve any still-open T2 session.** Do not close it, rerun N0 setup, clear its
+arrays/labels or relabel its older records as a new session. Recovery of those
+original buffers remains subject to human review; no recovery was performed
+by this documentation task. Replacement collection must use a distinct,
+operator-assigned readiness-session ID and explicitly acknowledge the lost T1
+originals. Fresh measurements are subsequent evidence, never reconstruction.
+The routine below is for that separately reviewed subsequent readiness session;
+do not use it to silently combine old T2 records with newly collected T1 data.
+Use freshly prepared native T1/T2 terminals for replacement collection; leave
+the older T2 session intact pending an explicit preservation/recovery decision.
+
+### Read-only compatibility check, then exclusive creation
+
+Run only this phase after N0–N2 review in the intended native terminals.
+T1 creates custody; T2 independently verifies the exact same custody/session.
+Both load the procedure below, using the same directory policies. T1's
+read-only inspect operation precedes all
+mkdir/copy operations; it reports bounded path, uid/gid, mode and object facts
+or an authored failed condition and symbolic errno. Creation rechecks those
+facts against the inspection before making any directory.
+Do not invoke the N3 function in T2 until T1 has reported successful N3
+preparation; an early verification failure is still STOPPED, not a retry loop.
+
+N3 is a shell function with explicit returns, **not an exit from the interactive
+shell**. Call it only as shown. Failure latches STOPPED, retains buffered records
+and leaves the terminal open. Do not append an exit command, repeat the call,
+clear its latch, run later phases or paste the entire handoff at once. Keeping a
+shell open preserves only volatile memory; it does not complete custody or
+authorize a recovery path. A timeout still means STOP; no automatic retry occurs.
 
 ~~~bash
-h215_record N3-root 30 0 "$h215_python" -B -c "$h215_repo_check" "$h215_repo" || exit 1
-~~~
-
-After successful N0–N2 review, T1 chooses a new campaign ID. No collisions or
-automatically generated retries. T2 does **not** execute creation.
-
-```bash
-read -r -t 120 -p 'New approved campaign ID: ' h215_campaign || exit 1
-[[ "$h215_campaign" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$ ]] || exit 1
-h215_record N3-ignored-path 10 0 git check-ignore -- \
-  ".local/qualification/m8-3/wp2-a3-r1/$h215_campaign/R1-A01/" || exit 1
-read -r -d '' h215_custody <<'PYCUSTODY' || [[ -n ${h215_custody:-} ]] || exit 1
-import hashlib,json,os,re,stat,sys
+h215_n3_prepare() {
+  h215_n3_status=STOPPED
+  if [[ ${h215_n3_entered:-} == yes ]]; then
+    printf '%s\n' 'STOP: N3 was already entered; preserve evidence and seek review.' >&2
+    return 1
+  fi
+  h215_n3_entered=yes
+  [[ "${h215_role:-}" == T1 || "${h215_role:-}" == T2 ]] || return 1
+  [[ -z "${h215_sink:-}" ]] || return 1
+  read -r -t 120 -p 'Reviewed subsequent readiness-session ID (same in T1/T2): ' h215_readiness_session || return 1
+  [[ "$h215_readiness_session" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$ ]] || return 1
+  read -r -t 120 -p 'Confirm these buffers are subsequent-session originals; type NEW-READINESS-SESSION: ' h215_session_ack || return 1
+  [[ "$h215_session_ack" == NEW-READINESS-SESSION ]] || return 1
+  h215_record N3-root 30 0 "$h215_python" -B -c "$h215_repo_check" "$h215_repo" || return 1
+  read -r -t 120 -p 'Approved new campaign ID (T2 transcribes T1): ' h215_campaign || return 1
+  [[ "$h215_campaign" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$ ]] || return 1
+  h215_record N3-ignored-path 10 0 git check-ignore -- \
+    ".local/qualification/m8-3/wp2-a3-r1/$h215_campaign/R1-A01/" || return 1
+  h215_record N3-session 10 0 "$h215_python" -B -c '
+import json,sys
+print(json.dumps(dict(preparation_session=sys.argv[1],provenance="subsequent_readiness_collection",
+                     attempt_declared=False,decision_c="PENDING")))
+' "$h215_readiness_session" || return 1
+  read -r -d '' h215_custody <<'PYCUSTODY' || [[ -n ${h215_custody:-} ]] || return 1
+import errno,hashlib,json,os,re,stat,sys
 from pathlib import Path
-repo,campaign,d2,s2=sys.argv[1:];uid=os.geteuid()
-assert uid!=0 and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,47}",campaign)
-os.umask(0o077);flags=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC
+operation,repo,campaign,session,d2,s2,expected=sys.argv[1:];uid=os.geteuid()
+DIR=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC
+class NoGo(Exception):
+ def __init__(self,path,condition,error=None):
+  self.path=str(path)[:1024];self.condition=condition
+  self.error=errno.errorcode.get(error,"OS_ERROR") if error is not None else None
+def require(ok,path,condition):
+ if not ok:raise NoGo(path,condition)
+def info(fd,path,private=False):
+ try:s=os.fstat(fd)
+ except OSError as e:raise NoGo(path,"directory_metadata_failed",e.errno) from None
+ mode=stat.S_IMODE(s.st_mode)
+ require(stat.S_ISDIR(s.st_mode),path,"not_a_directory")
+ require(s.st_uid in (0,uid),path,"untrusted_owner")
+ require(not mode&0o022,path,"group_or_other_writable")
+ if private:require(s.st_uid==uid and mode==0o700,path,"private_directory_not_owner_0700")
+ return dict(path=str(path),uid=s.st_uid,gid=s.st_gid,mode=f"{mode:04o}",object=[s.st_dev,s.st_ino])
+def lookup(parent,name,path):
+ try:return os.stat(name,dir_fd=parent,follow_symlinks=False)
+ except FileNotFoundError:return None
+ except OSError as e:raise NoGo(path,"metadata_unavailable",e.errno) from None
+def open_dir(parent,name,path,private=False):
+ before=lookup(parent,name,path)
+ require(before is not None,path,"required_directory_missing")
+ require(stat.S_ISDIR(before.st_mode),path,"not_a_direct_directory")
+ try:fd=os.open(name,DIR,dir_fd=parent)
+ except OSError as e:raise NoGo(path,"directory_open_failed",e.errno) from None
+ row=info(fd,path,private)
+ require(row["object"]==[before.st_dev,before.st_ino],path,"directory_identity_changed")
+ return fd,row
 def walk(path):
- assert path.startswith("/")
- fd=os.open("/",flags)
- for name in Path(path).parts[1:]:
-  assert name not in (".","..")
-  nxt=os.open(name,flags,dir_fd=fd);os.close(fd);fd=nxt
-  st=os.fstat(fd);assert st.st_uid in (0,uid) and not stat.S_IMODE(st.st_mode)&0o022
- return fd
-def private(parent,name,new=False):
- try:os.mkdir(name,0o700,dir_fd=parent)
- except FileExistsError:
-  if new:raise
- fd=os.open(name,flags,dir_fd=parent);st=os.fstat(fd)
- assert st.st_uid==uid and stat.S_IMODE(st.st_mode)==0o700
- return fd
-def put(fd,name,data):
- out=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600,dir_fd=fd)
- with os.fdopen(out,"wb") as f:
-  f.write(data);f.flush();os.fsync(f.fileno())
-  st=os.fstat(f.fileno());assert st.st_uid==uid and stat.S_IMODE(st.st_mode)==0o600
- src=os.open(name,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=fd)
- with os.fdopen(src,"rb") as f:assert f.read(len(data)+1)==data
-fd=walk(repo);s=os.fstatvfs(fd);assert s.f_bavail*s.f_frsize>=64*1024*1024
-for name in (".local","qualification","m8-3","wp2-a3-r1"):
- nxt=private(fd,name);os.close(fd);fd=nxt
-nxt=private(fd,campaign,new=True);os.close(fd);fd=nxt
-nxt=private(fd,"R1-A01",new=True);os.close(fd);fd=nxt
-for name in ("readiness-T1","readiness-T2"):
- child=private(fd,name,new=True);os.close(child)
-rows=[]
-for path,name,digest,size in [(d2,"ds2208_a3_2.py","cfa4ae38c162eec5a2f048ca2c95c8a0c60da6dfc5f409b6d6c425ccd17d3d7d",141372),
- (s2,"synthetic-tests.txt","4e7639d4f9a7bf3311f4eda81b395b50aae8bc60397dff3aba37796bb3dbd785",14227)]:
- parent=walk(str(Path(path).parent))
- src=os.open(Path(path).name,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=parent);os.close(parent)
- with os.fdopen(src,"rb") as f:
-  assert stat.S_ISREG(os.fstat(f.fileno()).st_mode);data=f.read(1024*1024+1)
- assert len(data)==size and hashlib.sha256(data).hexdigest()==digest
- put(fd,name,data);rows.append(dict(path=name,bytes=size,sha256=digest))
-s=os.fstatvfs(fd);assert s.f_bavail*s.f_frsize>=64*1024*1024
-meta=dict(artifact_class="preparation",attempt="R1-A01",attempt_declared=False,repo=repo,campaign=campaign,
- files=rows,free_bytes=s.f_bavail*s.f_frsize,directory_identity=[os.fstat(fd).st_dev,os.fstat(fd).st_ino])
-put(fd,"custody.json",(json.dumps(meta,sort_keys=True)+"\n").encode());os.close(fd)
-print(json.dumps(meta,sort_keys=True))
+ p=Path(path);require(p.is_absolute() and len(p.parts)<=32,p,"invalid_absolute_path")
+ try:fd=os.open("/",DIR)
+ except OSError as e:raise NoGo("/","directory_open_failed",e.errno) from None
+ rows=[info(fd,"/")];current=Path("/")
+ for name in p.parts[1:]:
+  require(name not in (".",".."),p,"invalid_path_component")
+  current=current/name;nxt,row=open_dir(fd,name,current)
+  os.close(fd);fd=nxt;rows.append(row)
+ return fd,rows
+def parent():
+ fd,rows=walk(repo);path=Path(repo)
+ for name in (".local","qualification","m8-3"):
+  path=path/name;nxt,row=open_dir(fd,name,path)
+  os.close(fd);fd=nxt;rows.append(row)
+ path=path/"wp2-a3-r1"
+ existing=lookup(fd,path.name,path) is not None
+ if existing:
+  nxt,row=open_dir(fd,path.name,path,True);os.close(fd);fd=nxt;rows.append(row)
+ return fd,rows,existing
+def capacity(fd,path):
+ try:s=os.fstatvfs(fd)
+ except OSError as e:raise NoGo(path,"capacity_query_failed",e.errno) from None
+ free=s.f_bavail*s.f_frsize
+ require(free>=64*1024*1024,path,"less_than_64_MiB_free")
+ try:writable=os.access(".",os.W_OK|os.X_OK,dir_fd=fd,effective_ids=True)
+ except OSError as e:raise NoGo(path,"access_query_failed",e.errno) from None
+ require(writable,path,"no_effective_create_access")
+ return free
+def absent(fd,name,path):
+ require(lookup(fd,name,path) is None,path,"existing_target_collision")
+def make_new(fd,name,path):
+ try:os.mkdir(name,0o700,dir_fd=fd)
+ except FileExistsError:raise NoGo(path,"exclusive_directory_collision") from None
+ except OSError as e:raise NoGo(path,"directory_creation_failed",e.errno) from None
+ return open_dir(fd,name,path,True)
+def read_file(fd,name,path,limit,private):
+ try:raw=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=fd)
+ except OSError as e:raise NoGo(path,"file_open_failed",e.errno) from None
+ with os.fdopen(raw,"rb") as f:
+  s=os.fstat(f.fileno())
+  require(stat.S_ISREG(s.st_mode),path,"not_a_regular_file")
+  if private:require(s.st_uid==uid and stat.S_IMODE(s.st_mode)==0o600,path,"private_file_not_owner_0600")
+  data=f.read(limit+1)
+ require(len(data)<=limit,path,"file_size_bound")
+ return data
+def put(fd,name,data,path):
+ try:raw=os.open(name,os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600,dir_fd=fd)
+ except FileExistsError:raise NoGo(path,"exclusive_file_collision") from None
+ except OSError as e:raise NoGo(path,"file_creation_failed",e.errno) from None
+ with os.fdopen(raw,"w+b") as f:
+  s=os.fstat(f.fileno())
+  require(s.st_uid==uid and stat.S_IMODE(s.st_mode)==0o600,path,"private_file_not_owner_0600")
+  f.write(data);f.flush();os.fsync(f.fileno());f.seek(0)
+  require(f.read(len(data)+1)==data,path,"file_readback_mismatch")
+def main():
+ require(uid!=0 and repo=="/var/home/user/Projects/grocery-pos-platform",repo,"unexpected_operator_or_root")
+ for value in (campaign,session):
+  require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,47}",value) is not None,repo,"invalid_campaign_or_session")
+ require(operation in ("inspect","create"),repo,"unsupported_operation")
+ root=Path(repo)/".local/qualification/m8-3/wp2-a3-r1";cp=root/campaign;attempt=cp/"R1-A01"
+ fd,rows,existing=parent()
+ specifications=[(d2,"ds2208_a3_2.py","cfa4ae38c162eec5a2f048ca2c95c8a0c60da6dfc5f409b6d6c425ccd17d3d7d",141372),
+  (s2,"synthetic-tests.txt","4e7639d4f9a7bf3311f4eda81b395b50aae8bc60397dff3aba37796bb3dbd785",14227)]
+ if existing:absent(fd,campaign,cp)
+ free=capacity(fd,root if existing else root.parent)
+ snapshot=dict(event="N3_ANCESTRY_COMPATIBLE",read_only=True,campaign=campaign,preparation_session=session,
+  parents=rows,private_root_exists=existing,free_bytes=free,new_campaign_required=True)
+ stable={key:snapshot[key] for key in ("campaign","preparation_session","parents","private_root_exists")}
+ snapshot["identity_sha256"]=hashlib.sha256(json.dumps(stable,sort_keys=True).encode()).hexdigest()
+ if operation=="inspect":os.close(fd);print(json.dumps(snapshot,sort_keys=True));return
+ require(re.fullmatch(r"[0-9a-f]{64}",expected) is not None,root,"invalid_inspection_digest")
+ require(expected==snapshot["identity_sha256"],root,"ancestry_changed_since_inspection")
+ sources=[]
+ for path,name,digest,size in specifications:
+  parent_fd,_=walk(str(Path(path).parent))
+  data=read_file(parent_fd,Path(path).name,path,size,False);os.close(parent_fd)
+  require(len(data)==size and hashlib.sha256(data).hexdigest()==digest,path,"approved_source_identity_mismatch")
+  sources.append((name,data,digest,size))
+ if not existing:
+  nxt,row=make_new(fd,root.name,root);os.close(fd);fd=nxt
+ else:row=rows[-1]
+ identities={"root":row["object"]}
+ for label,path in (("campaign",cp),("attempt",attempt)):
+  nxt,row=make_new(fd,path.name,path);os.close(fd);fd=nxt;identities[label]=row["object"]
+ for role in ("T1","T2"):
+  name="readiness-"+role;child,row=make_new(fd,name,attempt/name)
+  identities[name]=row["object"];os.close(child)
+ files=[]
+ for name,data,digest,size in sources:
+  put(fd,name,data,attempt/name);files.append(dict(path=name,bytes=size,sha256=digest))
+ free=capacity(fd,attempt)
+ meta=dict(artifact_class="preparation",attempt="R1-A01",attempt_declared=False,repo=repo,campaign=campaign,
+  preparation_session=session,files=files,free_bytes=free,directory_identity=identities["attempt"],
+  private_directory_identities=identities)
+ put(fd,"custody.json",(json.dumps(meta,sort_keys=True)+"\n").encode(),attempt/"custody.json")
+ os.fsync(fd);os.close(fd);print(json.dumps(meta,sort_keys=True))
+try:main()
+except NoGo as e:
+ print(json.dumps(dict(event="N3_NO_GO",path=e.path,condition=e.condition,errno=e.error)),flush=True)
+ sys.exit(2)
 PYCUSTODY
-h215_record N3-custody 20 0 "$h215_python" -B -c "$h215_custody" \
-  "$h215_repo" "$h215_campaign" "$HOME/Scripts/a3-2/ds2208_a3_2.py" "$HOME/Scripts/a3-2/synthetic-tests.txt" || exit 1
-h215_attempt_dir="$h215_repo/.local/qualification/m8-3/wp2-a3-r1/$h215_campaign/R1-A01"
-```
-
-Custody creation does not declare an attempt or consume allowance. Existing
-unsafe/nonprivate ancestry, collision, low capacity or partial failure stops;
-do not chmod existing parents, delete evidence or pick another target for green.
-T2 transcribes the same campaign ID, then verifies the custody identity and
-copied bytes before writing any evidence. Run this block only in T2:
-
-~~~bash
-read -r -t 120 -p 'T1 verified campaign ID: ' h215_campaign || exit 1
-[[ "$h215_campaign" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$ ]] || exit 1
-h215_attempt_dir="$h215_repo/.local/qualification/m8-3/wp2-a3-r1/$h215_campaign/R1-A01"
-h215_record N3-path-verification 10 0 "$h215_python" -B -c '
-import hashlib,json,os,stat,sys
+  h215_attempt_dir="$h215_repo/.local/qualification/m8-3/wp2-a3-r1/$h215_campaign/R1-A01"
+  if [[ "$h215_role" == T1 ]]; then
+    h215_record N3-ancestry-check 20 0 "$h215_python" -B -c "$h215_custody" inspect \
+      "$h215_repo" "$h215_campaign" "$h215_readiness_session" "$HOME/Scripts/a3-2/ds2208_a3_2.py" "$HOME/Scripts/a3-2/synthetic-tests.txt" "" || return 1
+    read -r -t 120 -p 'Paste identity_sha256 from the compatible inspection: ' h215_checked_ancestry || return 1
+    [[ "$h215_checked_ancestry" =~ ^[0-9a-f]{64}$ ]] || return 1
+    read -r -t 120 -p 'After reviewing compatible ancestry, type CREATE-CUSTODY: ' h215_custody_ack || return 1
+    [[ "$h215_custody_ack" == CREATE-CUSTODY ]] || return 1
+    h215_record N3-custody 20 0 "$h215_python" -B -c "$h215_custody" create \
+      "$h215_repo" "$h215_campaign" "$h215_readiness_session" "$HOME/Scripts/a3-2/ds2208_a3_2.py" "$HOME/Scripts/a3-2/synthetic-tests.txt" "$h215_checked_ancestry" || return 1
+  else
+    h215_record N3-path-verification 20 0 "$h215_python" -B -c '
+import errno,hashlib,json,os,re,stat,sys
 from pathlib import Path
-p=Path(sys.argv[1]);uid=os.geteuid()
-for q in [p,*p.parents]:
- s=q.lstat();assert stat.S_ISDIR(s.st_mode) and s.st_uid in (0,uid)
- assert not stat.S_IMODE(s.st_mode)&0o022
-assert stat.S_IMODE(p.stat().st_mode)==0o700 and p.stat().st_uid==uid
-m=json.loads((p/"custody.json").read_bytes())
-assert m["campaign"]==sys.argv[2] and m["attempt"]=="R1-A01" and m["attempt_declared"] is False
-assert m["directory_identity"]==[p.stat().st_dev,p.stat().st_ino]
-for name,size,digest in [("ds2208_a3_2.py",141372,"cfa4ae38c162eec5a2f048ca2c95c8a0c60da6dfc5f409b6d6c425ccd17d3d7d"),
- ("synthetic-tests.txt",14227,"4e7639d4f9a7bf3311f4eda81b395b50aae8bc60397dff3aba37796bb3dbd785")]:
- f=p/name;s=f.lstat();assert stat.S_ISREG(s.st_mode) and s.st_uid==uid and stat.S_IMODE(s.st_mode)==0o600
- b=f.read_bytes();assert len(b)==size and hashlib.sha256(b).hexdigest()==digest
-print("T2_CUSTODY_AND_APPROVED_COPIES_VERIFIED")
-' "$h215_attempt_dir" "$h215_campaign" || exit 1
-~~~
-
-Both terminals load the following flush code and persist their original buffers:
-
-```bash
-read -r -d '' h215_flush_code <<'PYFLUSH' || [[ -n ${h215_flush_code:-} ]] || exit 1
+repo,campaign,session=sys.argv[1:];uid=os.geteuid()
+root=Path(repo)/".local/qualification/m8-3/wp2-a3-r1";cp=root/campaign;attempt=cp/"R1-A01"
+private={root,cp,attempt}
+def stop(path,condition,error=None):
+ print(json.dumps(dict(event="N3_NO_GO",path=str(path)[:1024],condition=condition,
+  errno=errno.errorcode.get(error,"OS_ERROR") if error is not None else None)),flush=True)
+ raise SystemExit(2)
+def require(ok,path,condition):
+ if not ok:stop(path,condition)
+require(repo=="/var/home/user/Projects/grocery-pos-platform" and uid!=0,repo,"unexpected_operator_or_root")
+for value in (campaign,session):
+ require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,47}",value) is not None,repo,"invalid_campaign_or_session")
+flags=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC
+def open_dir(parent,name,path,is_private):
+ try:
+  before=os.stat(name,dir_fd=parent,follow_symlinks=False)
+  require(stat.S_ISDIR(before.st_mode),path,"not_a_direct_directory")
+  fd=os.open(name,flags,dir_fd=parent);s=os.fstat(fd)
+ except OSError as e:stop(path,"directory_open_failed",e.errno)
+ require(s.st_uid in (0,uid) and not stat.S_IMODE(s.st_mode)&0o022,path,"unsafe_directory_owner_or_mode")
+ if is_private:require(s.st_uid==uid and stat.S_IMODE(s.st_mode)==0o700,path,"private_directory_not_owner_0700")
+ require([s.st_dev,s.st_ino]==[before.st_dev,before.st_ino],path,"directory_identity_changed")
+ return fd,[s.st_dev,s.st_ino]
+fd=os.open("/",flags);current=Path("/");identities={};s=os.fstat(fd)
+require(s.st_uid in (0,uid) and not stat.S_IMODE(s.st_mode)&0o022,"/","unsafe_directory_owner_or_mode")
+for name in attempt.parts[1:]:
+ current=current/name;nxt,obj=open_dir(fd,name,current,current in private)
+ os.close(fd);fd=nxt
+ if current==root:identities["root"]=obj
+ if current==cp:identities["campaign"]=obj
+ if current==attempt:identities["attempt"]=obj
+for role in ("T1","T2"):
+ name="readiness-"+role;child,obj=open_dir(fd,name,attempt/name,True)
+ identities[name]=obj;os.close(child)
+def read(name,limit):
+ path=attempt/name
+ try:raw=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=fd)
+ except OSError as e:stop(path,"file_open_failed",e.errno)
+ with os.fdopen(raw,"rb") as f:
+  s=os.fstat(f.fileno())
+  require(stat.S_ISREG(s.st_mode) and s.st_uid==uid and stat.S_IMODE(s.st_mode)==0o600,path,"private_file_not_owner_0600")
+  data=f.read(limit+1)
+ require(len(data)<=limit,path,"file_size_bound")
+ return data
+meta=json.loads(read("custody.json",65536))
+require(meta["campaign"]==campaign and meta["preparation_session"]==session,attempt,"campaign_or_session_mismatch")
+require(meta["attempt"]=="R1-A01" and meta["attempt_declared"] is False,attempt,"invalid_preparation_provenance")
+require(meta["private_directory_identities"]==identities,attempt,"private_directory_identity_changed")
+require(meta["directory_identity"]==identities["attempt"],attempt,"attempt_identity_mismatch")
+for name,digest,size in [("ds2208_a3_2.py","cfa4ae38c162eec5a2f048ca2c95c8a0c60da6dfc5f409b6d6c425ccd17d3d7d",141372),
+ ("synthetic-tests.txt","4e7639d4f9a7bf3311f4eda81b395b50aae8bc60397dff3aba37796bb3dbd785",14227)]:
+ data=read(name,size)
+ require(len(data)==size and hashlib.sha256(data).hexdigest()==digest,attempt/name,"copy_identity_mismatch")
+space=os.fstatvfs(fd)
+require(space.f_bavail*space.f_frsize>=64*1024*1024,attempt,"less_than_64_MiB_free")
+os.close(fd)
+print(json.dumps(dict(event="N3_CUSTODY_VERIFIED",preparation_session=session,attempt_declared=False)))
+' "$h215_repo" "$h215_campaign" "$h215_readiness_session" || return 1
+  fi
+  read -r -d '' h215_flush_code <<'PYFLUSH' || [[ -n ${h215_flush_code:-} ]] || return 1
 import base64,hashlib,json,os,stat,sys
 from pathlib import Path
-folder,role=sys.argv[1:];uid=os.geteuid()
-assert folder.startswith("/") and role in ("T1","T2")
-flags=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC;fd=os.open("/",flags)
+folder,role,repo,campaign=sys.argv[1:];uid=os.geteuid()
+assert role in ("T1","T2") and repo=="/var/home/user/Projects/grocery-pos-platform"
+root=Path(repo)/".local/qualification/m8-3/wp2-a3-r1";cp=root/campaign;attempt=cp/"R1-A01"
+assert Path(folder)==attempt/("readiness-"+role)
+private={root,cp,attempt,Path(folder)}
+flags=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC;fd=os.open("/",flags);current=Path("/");s=os.fstat(fd)
+assert s.st_uid in (0,uid) and not stat.S_IMODE(s.st_mode)&0o022
 for name in Path(folder).parts[1:]:
  assert name not in (".","..")
- nxt=os.open(name,flags,dir_fd=fd);os.close(fd);fd=nxt
- st=os.fstat(fd);assert st.st_uid in (0,uid) and not stat.S_IMODE(st.st_mode)&0o022
-assert os.fstat(fd).st_uid==uid and stat.S_IMODE(os.fstat(fd).st_mode)==0o700
+ current=current/name;before=os.stat(name,dir_fd=fd,follow_symlinks=False)
+ assert stat.S_ISDIR(before.st_mode)
+ nxt=os.open(name,flags,dir_fd=fd);os.close(fd);fd=nxt;s=os.fstat(fd)
+ assert [s.st_dev,s.st_ino]==[before.st_dev,before.st_ino]
+ assert s.st_uid in (0,uid) and not stat.S_IMODE(s.st_mode)&0o022
+ if current in private:assert s.st_uid==uid and stat.S_IMODE(s.st_mode)==0o700
 def put(name,data):
- out=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600,dir_fd=fd)
- with os.fdopen(out,"wb") as f:
-  f.write(data);f.flush();os.fsync(f.fileno())
-  assert stat.S_IMODE(os.fstat(f.fileno()).st_mode)==0o600
- src=os.open(name,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=fd)
- with os.fdopen(src,"rb") as f:assert f.read(len(data)+1)==data
+ out=os.open(name,os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600,dir_fd=fd)
+ with os.fdopen(out,"w+b") as f:
+  assert os.fstat(f.fileno()).st_uid==uid and stat.S_IMODE(os.fstat(f.fileno()).st_mode)==0o600
+  f.write(data);f.flush();os.fsync(f.fileno());f.seek(0);assert f.read(len(data)+1)==data
 for i,line in enumerate(sys.stdin):
  assert i<128 and len(line)<=98305
  r=json.loads(line);assert r["role"]==role
@@ -435,38 +650,57 @@ for i,line in enumerate(sys.stdin):
  assert len(raw)==r["output_bytes"] and hashlib.sha256(raw).hexdigest()==r["output_sha256"]
  put(label+".json",line.encode());put(label+".out",raw)
  put(label+".exit",(str(r["returncode"])+"\n").encode())
-os.close(fd)
+os.fsync(fd);os.close(fd)
 PYFLUSH
-h215_flush() {
-  [[ -n "$h215_sink" && ${#h215_records[@]} -gt 0 ]] || return 1
-  printf '%s\n' "${h215_records[@]}" | "$h215_python" -B -c "$h215_flush_code" "$h215_sink" "$h215_role" || return 1
-  h215_records=()
+  h215_flush() {
+    [[ -n "$h215_sink" && ${#h215_records[@]} -gt 0 ]] || return 1
+    printf '%s\n' "${h215_records[@]}" | "$h215_python" -B -c "$h215_flush_code" \
+      "$h215_sink" "$h215_role" "$h215_repo" "$h215_campaign" || return 1
+    h215_records=()
+  }
+  h215_sink="$h215_attempt_dir/readiness-$h215_role"
+  h215_flush || return 1
+  if [[ "$h215_role" == T1 ]]; then
+    [[ ! -e "$h215_attempt_dir/capture-source.py" && ! -L "$h215_attempt_dir/capture-source.py" ]] || return 1
+    printf '%s\n' "$h215_collector" > "$h215_attempt_dir/capture-source.py" || return 1
+  fi
+  h215_diag="$h215_attempt_dir/ds2208_a3_2.py"
+  export h215_attempt_dir h215_python h215_bash h215_diag
+  h215_n3_status=READY
+  return 0
 }
-h215_sink="$h215_attempt_dir/readiness-$h215_role"
-h215_flush || exit 1
-```
+if h215_n3_prepare; then
+  printf '%s\n' 'N3 prepared; review both terminals before proceeding to N4.'
+else
+  printf '%s\n' 'STOPPED at N3. Keep this shell and its buffers open; no later phase or retry before review.' >&2
+fi
+~~~
 
-In T1 save capture source, then create the helpers in the subsequent phases.
-Noclobber must remain enabled. All outputs are new owner-only files in trusted
-private directories; never use `>|`, force, append, existing targets or symlinks.
-Failure preserves partial files and stops. Verify helpers in T2; no source
-substitution is permitted. Set/export the same verified attempt variables there.
+T2 runs its verification branch only after T1 reports successful creation.
+Each checks the same existing-ancestor policy and strict private-root/campaign/
+attempt/role-directory policy; T2 also compares saved directory identities and
+D2/S2 hashes before flushing. A missing/unsafe shared ancestor, changed object,
+nonprivate existing custody root, collision or insufficient effective creation
+access is NO-GO. Never chmod, delete partial output, select a different root or
+reuse a campaign to clear a failure. The read-only check is an observation, not
+a race-free filesystem transaction; exclusive directory-relative opens and
+fresh checks remain mandatory during creation. The inspection digest covers
+stable ancestor identity/mode facts, not fluctuating free space or a physical
+attachment identity. Copy only the actually reported digest; a changed fact or
+transcription error stops before creation.
 
-```bash
-[[ ! -e "$h215_attempt_dir/capture-source.py" && ! -L "$h215_attempt_dir/capture-source.py" ]] || exit 1
-printf '%s\n' "$h215_collector" > "$h215_attempt_dir/capture-source.py" || exit 1
-```
+The current routine leaves the interactive shell alive on N3 failure. It does
+not recover the lost T1 data, guarantee preservation after terminal/VM loss or
+authorize flushing old T2 buffers into a newly attributed session. No copying,
+custody creation or new native measurement occurred during this correction.
+On any failure preserve still-available bytes and request a specific recovery/
+subsequent-readiness decision; **do not proceed to N4**. Successful creation
+and both native verifications remain prerequisites, not granted readiness GO.
 
-In **both** terminals set/export these already verified paths; T2 must not
-run T1's source-file creation command:
-
-```bash
-h215_diag="$h215_attempt_dir/ds2208_a3_2.py"
-export h215_attempt_dir h215_python h215_bash h215_diag
-```
-
-Keep physical `owner.log`, `fresh.log`, their exit files and timing/probe targets
-absent. Readiness artifacts cannot masquerade as physical experiment outputs.
+Keep owner.log, fresh.log, their exit files and timing/probe targets absent.
+Custody preparation does not declare an attempt, consume an allowance, grant
+Decision C or alter the adopted physical deadlines. All newly created evidence
+remains 0600 under private 0700 custody; original buffered bytes are not edited.
 
 ## Phase N4 — Native PTY/logger qualification
 
@@ -1187,8 +1421,10 @@ or deployed security policy. See the unchanged [audit](audit-report.md) and
 ## Preparation validation and limitations
 
 Codex performed read-only repository/source/manual inspection and static checks
-of this document only. No native commands in this handoff, diagnostic modes,
-synthetic suite, logger, device/ACL operations or custody creation were executed.
+of this document only. Codex executed none of the native command blocks,
+diagnostic modes, synthetic suite, logger, device/ACL operations or custody
+creation. The reported earlier operator N3 failure remains an attestation,
+not a firsthand observation or recovered original evidence from this correction.
 Native helpers and PTY behavior still require human review and actual native
 evidence. The prior runner-boundary NO-GO is not overturned by documentation.
 Do not label this handoff as a completed readiness assessment or Decision C.
